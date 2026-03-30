@@ -163,7 +163,7 @@ SPECS: dict[EntityType, EntitySpec] = {
         prey_types=[],
         max_age=1000, hunger_rate=0.07, max_hunger=100,
         eat_amount=8, eat_meat=0, speed=0.7, vision=4,
-        repro_hunger_min=40, repro_cooldown=100, gestation=50, litter_size=(1, 3),
+        repro_hunger_min=40, repro_cooldown=180, gestation=80, litter_size=(1, 2),
         flee_distance=3,
     ),
     EntityType.HORNED_SHEEP: EntitySpec(
@@ -172,7 +172,7 @@ SPECS: dict[EntityType, EntitySpec] = {
         prey_types=[],
         max_age=1800, hunger_rate=0.08, max_hunger=100,
         eat_amount=18, eat_meat=0, speed=0.85, vision=6,
-        repro_hunger_min=45, repro_cooldown=110, gestation=55, litter_size=(1, 2),
+        repro_hunger_min=45, repro_cooldown=220, gestation=80, litter_size=(1, 2),
         flee_distance=5,
         can_herd=True,
     ),
@@ -203,7 +203,7 @@ SPECS: dict[EntityType, EntitySpec] = {
         prey_types=[],
         max_age=1500, hunger_rate=0.07, max_hunger=100,
         eat_amount=18, eat_meat=0, speed=0.8, vision=5,
-        repro_hunger_min=45, repro_cooldown=90, gestation=45, litter_size=(2, 4),
+        repro_hunger_min=45, repro_cooldown=200, gestation=80, litter_size=(1, 3),
         flee_distance=4,
     ),
     EntityType.SHEEP: EntitySpec(
@@ -212,7 +212,7 @@ SPECS: dict[EntityType, EntitySpec] = {
         prey_types=[],
         max_age=1800, hunger_rate=0.06, max_hunger=100,
         eat_amount=15, eat_meat=0, speed=0.9, vision=6,
-        repro_hunger_min=50, repro_cooldown=100, gestation=50, litter_size=(1, 2),
+        repro_hunger_min=50, repro_cooldown=200, gestation=80, litter_size=(1, 2),
         flee_distance=5,
         can_herd=True,
     ),
@@ -259,7 +259,7 @@ class Entity:
         "clan_id", "traits", "wood", "stone", "meat",
         "building_ticks_left", "building_type",
         "tool", "pick", "sickle", "watering_can", "can_filled", "fishing_rod", "thirst",
-        "_stuck_ticks",
+        "_stuck_ticks", "chop_cooldown_left",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -294,6 +294,7 @@ class Entity:
         self.can_filled: bool = False             # arrosoir rempli d'eau
         self.fishing_rod: Optional[str] = None   # None, "fishing_rod"
         self._stuck_ticks: int = 0               # ticks consécutifs sans déplacement
+        self.chop_cooldown_left: int = 0
         # Traits héréditaires : valeurs de base ± 5% aléatoire
         self.traits = {
             "speed":       round(self.spec.speed       * random.uniform(0.95, 1.05), 4),
