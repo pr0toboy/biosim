@@ -669,6 +669,9 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             entity.hunger = max(0, entity.hunger - consumed * 1.5)
             if not spec.aquatic:
                 world.consume_fertility(entity.ix, entity.iy)
+            # Efface la cible après manger → force à réévaluer au lieu de revenir
+            entity.target_x = None
+            entity.target_y = None
             return
         # Soif modérée interrompt la recherche de nourriture (mais pas le repas en cours)
         if not spec.aquatic and entity.thirst > 50:
@@ -683,6 +686,15 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 fx, fy = entity.ix + dx, entity.iy + dy
                 if world.is_valid(fx, fy) and world.is_walkable(fx, fy, spec.aquatic):
                     f = world.get_food(fx, fy)
+                    # Pénalise les tuiles coincées contre l'eau pour les entités terrestres
+                    # (évite que tous s'agglutinent en ligne sur la rive)
+                    if not spec.aquatic and f > 0:
+                        for _wadx, _wady in ((-1,0),(1,0),(0,-1),(0,1)):
+                            _wfx, _wfy = fx + _wadx, fy + _wady
+                            if (world.is_valid(_wfx, _wfy)
+                                    and int(world.biome_grid[_wfy, _wfx]) in WATER_BIOMES):
+                                f *= 0.35
+                                break
                     if f > best_f:
                         best_f = f
                         best_pos = (fx, fy)
