@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BioSim — Simulation de vie</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  #header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    background: #1a1d2e;
+    border-bottom: 1px solid #2d3248;
+    flex-shrink: 0;
+  }
+  #header h1 { font-size: 18px; font-weight: 600; color: #7c88ff; }
+  #tick-label { font-size: 13px; color: #8892b0; }
+
+  .ctrl-btn {
+    padding: 5px 14px;
+    border-radius: 6px;
+    border: 1px solid #3d4268;
+    background: #252840;
+    color: #c9d1f0;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background .15s;
+  }
+  .ctrl-btn:hover { background: #323660; }
+  .ctrl-btn.active { background: #4a5299; border-color: #7c88ff; color: #fff; }
+
+  #speed-wrap { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #8892b0; }
+  #speed-val  { min-width: 32px; text-align: right; color: #c9d1f0; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0; }
+  .dot.paused { background: #f97316; }
+
+  /* ── Layout principal ── */
+  #main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Canvas ── */
+  #canvas-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+  #world-canvas {
+    display: block;
+    image-rendering: pixelated;
+  }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    width: 280px;
+    background: #1a1d2e;
+    border-left: 1px solid #2d3248;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .panel {
+    padding: 12px 14px;
+    border-bottom: 1px solid #2d3248;
+  }
+  .panel h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: .08em; color: #5a6380; margin-bottom: 10px; }
+
+  /* ── Populations ── */
+  .pop-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .pop-dot  { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .pop-name { flex: 1; color: #c9d1f0; }
+  .pop-count{ font-weight: 600; color: #e2e8f0; min-width: 30px; text-align: right; }
+  .pop-bar-wrap { width: 60px; height: 6px; background: #252840; border-radius: 3px; }
+  .pop-bar  { height: 6px; border-radius: 3px; transition: width .4s ease; }
+
+  /* ── Mini graphe population ── */
+  #pop-chart { width: 100%; height: 80px; }
+
+  /* ── Event log ── */
+  #event-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 4px;
+  }
+  #event-log::-webkit-scrollbar { width: 4px; }
+  #event-log::-webkit-scrollbar-thumb { background: #3d4268; border-radius: 2px; }
+
+  .ev-item {
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border-left: 3px solid transparent;
+    background: #1e2236;
+    color: #8892b0;
+    animation: fadeIn .3s ease;
+  }
+  .ev-item.birth  { border-color: #22c55e; color: #86efac; }
+  .ev-item.death  { border-color: #ef4444; color: #fca5a5; }
+  .ev-item.kill   { border-color: #f97316; color: #fdba74; }
+  .ev-item.chop       { border-color: #8B4513; color: #d4a574; }
+  .ev-item.build_house{ border-color: #fbbf24; color: #fde68a; }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+
+  /* ── Tooltip entité ── */
+  #tooltip {
+    position: absolute;
+    background: #1a1d2e;
+    border: 1px solid #3d4268;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #c9d1f0;
+    pointer-events: none;
+    display: none;
+    z-index: 10;
+    min-width: 130px;
+  }
+  #tooltip b { color: #e2e8f0; font-size: 13px; display: block; margin-bottom: 4px; }
+  #tooltip .tt-row { display: flex; justify-content: space-between; gap: 12px; }
+
+  /* ── Système ── */
+  .sys-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 7px;
+    font-size: 12px;
+  }
+  .sys-label { color: #8892b0; width: 42px; flex-shrink: 0; }
+  .sys-bar-wrap { flex: 1; height: 5px; background: #252840; border-radius: 3px; }
+  .sys-bar { height: 5px; border-radius: 3px; transition: width .5s ease, background .5s; }
+  .sys-val { font-weight: 600; color: #e2e8f0; min-width: 38px; text-align: right; font-size: 11px; }
+
+  /* ── Status bar ── */
+  #statusbar {
+    font-size: 11px;
+    color: #5a6380;
+    padding: 4px 16px;
+    background: #0f1117;
+    border-top: 1px solid #1a1d2e;
+    flex-shrink: 0;
+  }
+
+  /* ── Mobile ── */
+  #world-canvas { touch-action: none; }
+
+  @media (max-width: 640px) {
+    #header {
+      flex-wrap: wrap;
+      padding: 6px 10px;
+      gap: 8px;
+      row-gap: 6px;
+    }
+    #header h1 { font-size: 15px; }
+    #tick-label, #total-label { font-size: 12px; }
+    .ctrl-btn { padding: 7px 14px; font-size: 14px; min-height: 36px; }
+    #speed-wrap { font-size: 12px; }
+    #speed-wrap input[type=range] { width: 70px; }
+
+    #main { flex-direction: column; }
+
+    #sidebar {
+      width: 100%;
+      border-left: none;
+      border-top: 1px solid #2d3248;
+      flex-direction: row;
+      flex-wrap: wrap;
+      max-height: 190px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    #sidebar .panel {
+      flex: 1;
+      min-width: 150px;
+      border-bottom: none;
+      border-right: 1px solid #2d3248;
+    }
+    /* Masquer le log d'événements sur mobile */
+    #sidebar .panel:last-child { display: none; }
+    #pop-chart { height: 60px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div class="dot" id="status-dot"></div>
+  <h1>🌍 BioSim</h1>
+  <span id="tick-label">Tick 0</span>
+  <button class="ctrl-btn" id="pause-btn" onclick="togglePause()">⏸ Pause</button>
+  <div id="speed-wrap">
+    Vitesse
+    <input type="range" id="speed-slider" min="1" max="20" value="2"
+           oninput="setSpeed(this.value)" style="width:90px">
+    <span id="speed-val">2×</span>
+  </div>
+  <span id="season-label" style="font-size:13px;color:#c9d1f0;font-weight:500"></span>
+  <span id="temp-label" style="font-size:13px;font-weight:600;margin-left:8px"></span>
+  <span style="flex:1"></span>
+  <span id="total-label" style="font-size:13px;color:#8892b0"></span>
+</div>
+
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="world-canvas"></canvas>
+    <div id="tooltip"></div>
+  </div>
+
+  <div id="sidebar">
+    <div class="panel">
+      <h2>Populations</h2>
+      <div id="pop-list"></div>
+    </div>
+    <div class="panel">
+      <h2>Évolution</h2>
+      <canvas id="pop-chart"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Système</h2>
+      <div class="sys-row">
+        <span class="sys-label">CPU</span>
+        <div class="sys-bar-wrap"><div class="sys-bar" id="sys-cpu-bar" style="width:0%"></div></div>
+        <span class="sys-val" id="sys-cpu-val">—</span>
+      </div>
+      <div class="sys-row">
+        <span class="sys-label">RAM</span>
+        <div class="sys-bar-wrap"><div class="sys-bar" id="sys-ram-bar" style="width:0%"></div></div>
+        <span class="sys-val" id="sys-ram-val">—</span>
+      </div>
+      <div class="sys-row">
+        <span class="sys-label">Temp</span>
+        <div class="sys-bar-wrap"><div class="sys-bar" id="sys-temp-bar" style="width:0%"></div></div>
+        <span class="sys-val" id="sys-temp-val">—</span>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;overflow:hidden;display:flex;flex-direction:column;border-bottom:none;">
+      <h2>Événements</h2>
+      <div id="event-log"></div>
+    </div>
+  </div>
+</div>
+
+<div id="statusbar" id="statusbar">Connexion…</div>
+
+<script>
+// ── Config espèces ──────────────────────────────────────────────────────────
+const SPECIES = {
+  boar:         { label: "Sangliers",  art: "un sanglier",  pl: "sangliers",  color: "#8B4513", base: [1.2,  8, 0.11 ] },
+  chicken:      { label: "Poules",     art: "une poule",    pl: "poules",     color: "#f39c12", base: [0.7,  4, 0.07 ] },
+  horned_sheep: { label: "Boucs",      art: "un bouc",      pl: "boucs",      color: "#c0a080", base: [0.85, 6, 0.08 ] },
+  horse:        { label: "Chevaux",    art: "un cheval",    pl: "chevaux",    color: "#a0826d", base: [1.5,  7, 0.09 ] },
+  human:        { label: "Humains",    art: "un humain",    pl: "humains",    color: "#f4d03f", base: [1.0,  8, 0.08 ] },
+  pig:          { label: "Cochons",    art: "un cochon",    pl: "cochons",    color: "#f1948a", base: [0.8,  5, 0.07 ] },
+  sheep:        { label: "Moutons",    art: "un mouton",    pl: "moutons",    color: "#ecf0f1", base: [0.9,  6, 0.06 ] },
+  fish:         { label: "Poissons",   art: "un poisson",   pl: "poissons",   color: "#5dade2", base: [0.8,  5, 0.05 ] },
+  shark:        { label: "Requins",    art: "un requin",    pl: "requins",    color: "#1a5276", base: [1.2, 14, 0.04 ] },
+};
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+const STATE_ICONS = {
+  idle: "·", wandering: "↝", seeking_food: "🌿",
+  eating: "🍴", fleeing: "!", hunting: "⚔",
+  seeking_mate: "♥", chopping: "🪓", building: "🏗", farming: "🌾", resting: "z",
+  seeking_water: "💧", drinking: "🥤", mining: "⛏", dead: "✝"
+};
+
+// ── Sprites terrain ──────────────────────────────────────────────────────────
+const TILE_SIZE = 16;
+
+// Sprites par biome : fichier PNG + col0 (colonne de départ), cols/rows utilisés
+// Shore.png layout : col0=sable, col1=eau/sable, col2=peu profonde, col3=normale, col4=profonde
+const BIOME_SPRITES = {
+  0: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png", // col 3=normale (bord), col 4=profonde (milieu)
+     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Ground/free_pixel_16_woods.png", col0: 14, cols: 3, rows: 1, row0: 7, density: 4 } },
+  1: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png",  col0: 0, cols: 3, rows: 1, row0: 1,
+     overlay: [
+       { img: new Image(), src: "/static/MiniWorldSprites/Nature/Basic_Grass_Biom_things.png", col0: 6, cols: 1, rows: 2, row0: 2, density: 3 },
+       { img: new Image(), src: "/static/MiniWorldSprites/Nature/Trees.png",                   col0: 0, cols: 4, rows: 1,          density: 0.5 },
+     ] },
+  2: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png", col0: 0, cols: 3, rows: 2,
+     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Trees.png", col0: 1, cols: 3, rows: 1, density: 6 } },
+  3: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png",          col0: 0, cols: 1, rows: 1,
+     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Cactus.png", col0: 0, cols: 4, rows: 2, density: 2 } },
+  4: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Winter.png",         col0: 5, cols: 1, rows: 1,
+     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Rocks.png", col0: 0, cols: 3, rows: 4, density: 5 } },
+  5: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png",         col0: 2, cols: 1, rows: 1 }, // eau peu profonde (rivières)
+  6: { img: new Image(), src: "/static/MiniWorldSprites/Ground/DeadGrass.png",     col0: 0, cols: 2, rows: 1 }, // terre battue (surpâturage)
+};
+
+// Sprite feu de camp (centre de clan)
+const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
+// Sprite maison (bâtiment construit)
+const HOUSE_SPRITE          = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/Wood/Houses.png", col: 1, row: 1, size: 16 };
+const HOUSE_L2_SPRITE       = { img: HOUSE_SPRITE.img, col: 1, row: 3, size: 16 };
+const HOUSE_WIP_SPRITE      = { img: HOUSE_SPRITE.img, col: 1, row: 0, size: 16 };
+const BOX_SELECTOR_SPRITE   = { img: new Image(), src: "/static/MiniWorldSprites/User Interface/BoxSelector.png", size: 16 };
+// Sprite champ de blé : 4 stades, Wheatfield.png tuiles (0,0)→(3,0)
+const WHEAT_IMG = new Image();
+WHEAT_IMG.src = "/static/MiniWorldSprites/Wheatfield.png";
+const WHEAT_SPRITES = [0,1,2,3].map(col => ({ img: WHEAT_IMG, col, row: 0, size: 16 }));
+// Sprite moulin : Resources.png tuile (1,1)
+const MILL_IMG = new Image();
+MILL_IMG.src = "/static/MiniWorldSprites/Resources.png";
+const MILL_SPRITE = { img: MILL_IMG, col: 1, row: 1, size: 16 };
+// Sprite puit : Well.png tuile (2,1)
+const WELL_IMG    = new Image();
+const WELL_SPRITE = { img: WELL_IMG, src: "/static/MiniWorldSprites/Buildings/Well.png", col: 2, row: 1, size: 16 };
+
+// Sprites par espèce : col/row = tuile pose frontale, size = taille px de la tuile source
+const ENTITY_SPRITES = {
+  boar:         { img: new Image(), src: "/static/MiniWorldSprites/Animals/Boar.png",          col: 0, row: 0, size: 16 },
+  chicken:      { img: new Image(), src: "/static/MiniWorldSprites/Animals/Chicken.png",       col: 0, row: 0, size: 16 },
+  horned_sheep: { img: new Image(), src: "/static/MiniWorldSprites/Animals/HornedSheep.png",  col: 0, row: 0, size: 16 },
+  horse:        { img: new Image(), src: "/static/MiniWorldSprites/Animals/Horse(32x32).png",                    col: 0, row: 0, size: 32 },
+  human:        { img: new Image(), src: "/static/MiniWorldSprites/Characters/Workers/FarmerTemplate.png",       col: 1, row: 0, size: 16 },
+  human_chief:  { img: new Image(), src: "/static/MiniWorldSprites/Characters/Champions/Kanji.png",              col: 0, row: 0, size: 16 },
+  pig:          { img: new Image(), src: "/static/MiniWorldSprites/Animals/Pig.png",                             col: 0, row: 0, size: 16 },
+  sheep:        { img: new Image(), src: "/static/MiniWorldSprites/Animals/Sheep.png",         col: 0, row: 0, size: 16 },
+  fish:         { img: new Image(), src: "/static/MiniWorldSprites/Animals/MarineAnimals.png", col: 2, row: 2, size: 16 },
+  // Requin : sprite 3×4 tuiles (cols 53-55, rows 4-7), hitbox = tiles (54,5)+(54,6)
+  // Centre du hitbox = centre du sprite → drawImage centré sur entity position
+  shark:        { img: new Image(), src: "/static/MiniWorldSprites/Animals/shark.png",
+                  col: 53, row: 4, size: 16,
+                  srcCols: 3, srcRows: 4,   // source 3×4 tuiles
+                  dstW: 3,   dstH: 4 },     // affiché 3T×4T (maintien ratio source)
+};
+
+let spritesReady = false;
+
+function loadAllSprites() {
+  const all = [
+    ...Object.values(BIOME_SPRITES),
+    ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
+    ...Object.values(ENTITY_SPRITES),
+    CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE, { img: WHEAT_IMG }, { img: MILL_IMG }, { img: WELL_IMG },
+  ];
+  let loaded = 0;
+  const done = () => {
+    if (++loaded === all.length) {
+      spritesReady = true;
+      buildBiomeCache();
+      if (worldData) { fitWorld(); drawAll(); }
+    }
+  };
+  all.forEach(sp => {
+    sp.img.onload  = done;
+    sp.img.onerror = done;
+    sp.img.src     = sp.src;
+    if (sp.img.complete) done();
+  });
+}
+
+loadAllSprites();
+
+// ── Saisons ─────────────────────────────────────────────────────────────────
+const SEASONS = {
+  spring: { label: "Printemps", icon: "🌸", overlay: "rgba(144,238,144,0.06)" },
+  summer: { label: "Été",       icon: "☀️",  overlay: "rgba(255,255,100,0.06)" },
+  autumn: { label: "Automne",   icon: "🍂",  overlay: "rgba(210,105,30,0.08)"  },
+  winter: { label: "Hiver",     icon: "❄️",  overlay: "rgba(173,216,230,0.12)" },
+};
+
+// ── État global ─────────────────────────────────────────────────────────────
+let worldData    = null;
+let biomeCache   = null;   // fond tuilé statique
+let entities     = [];
+let stats           = {};
+let history         = [];
+let clans           = [];     // [{id, cx, cy, color, chief_id}, ...]
+let stumps          = new Set(); // "x,y" des tuiles-souche
+let depleted_rocks  = new Set(); // "x,y" des roches épuisées
+let fires           = new Map(); // "x,y" → intensité (0-100)
+let buildings       = [];        // [{id, clan_id, x, y, btype}, ...]
+let paused          = false;
+let currentTick  = 0;
+let currentSeason = "spring";
+let currentTemp  = null;
+let currentRain     = false;
+let currentStorm    = false;
+let currentHeatwave = false;
+let entityMap    = {};     // id → entity
+
+// Zoom / pan
+let scale = 1, offX = 0, offY = 0;
+let isDragging = false, dragSX, dragSY, dragOX, dragOY;
+
+// Suivi de personnage
+let trackedId = null;   // id de l'entité suivie, null = aucune
+
+// ── Canvas setup ─────────────────────────────────────────────────────────────
+const canvasWrap = document.getElementById("canvas-wrap");
+const canvas     = document.getElementById("world-canvas");
+const ctx        = canvas.getContext("2d");
+
+function resizeCanvas() {
+  canvas.width  = canvasWrap.clientWidth;
+  canvas.height = canvasWrap.clientHeight;
+  drawAll();
+}
+window.addEventListener("resize", resizeCanvas);
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.onopen  = () => setStatus("Connecté", true);
+ws.onclose = () => setStatus("Déconnecté", false);
+ws.onerror = () => setStatus("Erreur WS", false);
+
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data);
+  if (msg.type === "init") {
+    handleInit(msg.data);
+  } else if (msg.type === "tick") {
+    handleTick(msg.data);
+  }
+};
+
+function setStatus(text, ok) {
+  document.getElementById("statusbar").textContent = text;
+  document.getElementById("status-dot").className = "dot" + (ok ? "" : " paused");
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+function handleInit(data) {
+  worldData = data.world;
+  entities  = data.entities;
+  stats     = data.stats;
+  history   = data.history || [];
+  clans     = data.clans  || [];
+  stumps         = new Set((data.world.stumps         || []).map(([x, y]) => `${x},${y}`));
+  depleted_rocks = new Set((data.world.depleted_rocks || []).map(([x, y]) => `${x},${y}`));
+  fires          = new Map((data.world.fires || []).map(([x, y]) => [`${x},${y}`, 80]));
+  buildings = data.buildings || [];
+  currentTick   = data.tick;
+  currentSeason = data.season || "spring";
+  currentTemp   = data.temp_c  != null ? data.temp_c  : null;
+  currentRain     = data.raining   || false;
+  currentStorm    = data.storming  || false;
+  currentHeatwave = data.heatwave  || false;
+  buildEntityMap();
+  if (spritesReady) buildBiomeCache();
+  fitWorld();
+  resizeCanvas();
+  updateSidebar();
+  updateSeasonBadge();
+  (data.events || []).forEach(addEvent);
+}
+
+function handleTick(data) {
+  currentTick   = data.tick;
+  currentSeason = data.season || currentSeason;
+  if (data.temp_c   != null) currentTemp  = data.temp_c;
+  if (data.raining  != null) currentRain     = data.raining;
+  if (data.storming != null) currentStorm    = data.storming;
+  if (data.heatwave != null) currentHeatwave = data.heatwave;
+  if (data.clans) clans = data.clans;
+  entities    = data.entities;
+  stats       = data.stats;
+  buildEntityMap();
+  if (data.stats) history.push({ tick: data.tick, ...data.stats });
+  if (history.length > 300) history.shift();
+  (data.tree_changes || []).forEach(tc => {
+    const key = `${tc.x},${tc.y}`;
+    if (tc.stump) stumps.add(key); else stumps.delete(key);
+  });
+  if (data.buildings !== undefined) buildings = data.buildings;
+  (data.fire_changes || []).forEach(fc => {
+    const key = `${fc.x},${fc.y}`;
+    if (fc.fire) fires.set(key, fc.i || 80); else fires.delete(key);
+  });
+  if (data.biome_changes && data.biome_changes.length > 0 && biomeCache) {
+    const octx = biomeCache.getContext("2d");
+    octx.imageSmoothingEnabled = false;
+    data.biome_changes.forEach(({x, y, biome}) => {
+      worldData.biomes[y][x] = biome;
+      redrawBiomeTile(octx, x, y, biome);
+    });
+  }
+  document.getElementById("tick-label").textContent = `Tick ${currentTick}`;
+  document.getElementById("total-label").textContent = `${data.stats.total} entités`;
+  drawAll();
+  updateSidebar();
+  updateSeasonBadge();
+  (data.events || []).forEach(addEvent);
+}
+
+function updateSeasonBadge() {
+  const s = SEASONS[currentSeason] || SEASONS.spring;
+  const el = document.getElementById("season-label");
+  if (el) el.textContent = `${s.icon} ${s.label}`;
+  const tel = document.getElementById("temp-label");
+  if (tel && currentTemp != null) {
+    const t = currentTemp;
+    const cold = t <= 5;
+    const hot  = t >= 20;
+    const weatherIcon = currentStorm ? "⛈" : (currentRain ? "🌧" : (currentHeatwave ? "🔥" : (cold ? "❄" : (hot ? "🌡" : "🌤"))));
+    tel.style.color   = currentHeatwave ? "#f97316" : ((currentRain || currentStorm) ? "#93c5fd" : (cold ? "#74b9ff" : (hot ? "#ff7675" : "#b2bec3")));
+    tel.textContent   = weatherIcon + " " + t.toFixed(1) + "°C";
+  }
+}
+
+function buildEntityMap() {
+  entityMap = {};
+  entities.forEach(e => entityMap[e.id] = e);
+}
+
+// ── Biome cache (fond tuilé avec sprites) ────────────────────────────────────
+function buildBiomeCache() {
+  if (!worldData || !spritesReady) return;
+  const W = worldData.width, H = worldData.height;
+  const T = TILE_SIZE;
+  const off = new OffscreenCanvas(W * T, H * T);
+  const octx = off.getContext("2d");
+  octx.imageSmoothingEnabled = false;
+  const biomes = worldData.biomes;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const b = biomes[y][x];
+      const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
+      let tc, tr;
+      if (b === 0) {
+        // Eau : contour 2 tuiles → normale (col 3), milieu → profonde (col 4)
+        let border = false;
+        outer: for (let dy = -2; dy <= 2 && !border; dy++) {
+          for (let dx = -2; dx <= 2 && !border; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H || biomes[ny][nx] !== 0)
+              border = true;
+          }
+        }
+        tc = border ? 3 : 4;
+        tr = 0;
+      } else {
+        // Variation déterministe par position dans la plage col0..col0+cols-1
+        const v = (x * 7 + y * 13) % (sp.cols * sp.rows);
+        tc = sp.col0 + (v % sp.cols);
+        tr = (sp.row0 || 0) + Math.floor(v / sp.cols);
+      }
+      octx.drawImage(sp.img, tc * T, tr * T, T, T, x * T, y * T, T, T);
+      // Overlays (arbres, fleurs, cailloux…) — tableau ou objet unique
+      const ovList = sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : [];
+      ovList.forEach((ov, i) => {
+        const h1 = Math.abs(Math.sin(x * (127.1 + i * 53) + y * (311.7 + i * 79)) * 43758.5453) % 1;
+        if (h1 < ov.density / 10) {
+          const h2 = Math.abs(Math.sin(x * (269.5 + i * 37) + y * (183.3 + i * 61)) * 43758.5453) % 1;
+          const v2 = Math.floor(h2 * ov.cols * ov.rows);
+          const oc = ov.col0 + (v2 % ov.cols);
+          const or2 = (ov.row0 || 0) + Math.floor(v2 / ov.cols);
+          octx.drawImage(ov.img, oc * T, or2 * T, T, T, x * T, y * T, T, T);
+        }
+      });
+    }
+  }
+  biomeCache = off;
+}
+
+function redrawBiomeTile(octx, x, y, biome) {
+  const T = TILE_SIZE;
+  const sp = BIOME_SPRITES[biome] || BIOME_SPRITES[1];
+  const v  = (x * 7 + y * 13) % (sp.cols * sp.rows);
+  const tc = sp.col0 + (v % sp.cols);
+  const tr = (sp.row0 || 0) + Math.floor(v / sp.cols);
+  octx.drawImage(sp.img, tc * T, tr * T, T, T, x * T, y * T, T, T);
+  const ovList = sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : [];
+  ovList.forEach((ov, i) => {
+    const h1 = Math.abs(Math.sin(x * (127.1 + i * 53) + y * (311.7 + i * 79)) * 43758.5453) % 1;
+    if (h1 < ov.density / 10) {
+      const h2 = Math.abs(Math.sin(x * (269.5 + i * 37) + y * (183.3 + i * 61)) * 43758.5453) % 1;
+      const v2 = Math.floor(h2 * ov.cols * ov.rows);
+      const oc = ov.col0 + (v2 % ov.cols);
+      const or2 = (ov.row0 || 0) + Math.floor(v2 / ov.cols);
+      octx.drawImage(ov.img, oc * T, or2 * T, T, T, x * T, y * T, T, T);
+    }
+  });
+}
+
+function fitWorld() {
+  if (!worldData) return;
+  const W = worldData.width * TILE_SIZE, H = worldData.height * TILE_SIZE;
+  const cw = canvasWrap.clientWidth  || window.innerWidth - 280;
+  const ch = canvasWrap.clientHeight || window.innerHeight - 50;
+  scale = Math.min(cw / W, ch / H);
+  offX  = (cw - W * scale) / 2;
+  offY  = (ch - H * scale) / 2;
+}
+
+// ── Rendu ────────────────────────────────────────────────────────────────────
+function drawAll() {
+  if (!worldData || !biomeCache) return;
+  const W = worldData.width, H = worldData.height;
+
+  // Suivi caméra : recentre sur l'entité suivie
+  if (trackedId !== null) {
+    const e = entityMap[trackedId];
+    if (e) {
+      const cw = canvasWrap.clientWidth  || canvas.width;
+      const ch = canvasWrap.clientHeight || canvas.height;
+      offX = cw / 2 - (e.x + 0.5) * TILE_SIZE * scale;
+      offY = ch / 2 - (e.y + 0.5) * TILE_SIZE * scale;
+    } else {
+      trackedId = null;   // entité morte/disparue → arrête le suivi
+    }
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(offX, offY);
+  ctx.scale(scale, scale);
+
+  // Fond biomes (pas d'interpolation → pixels nets)
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(biomeCache, 0, 0);
+
+  // Souches d'arbres (forêt coupée, avant l'overlay saisonnier)
+  drawStumps(ctx);
+
+  // Overlay saisonnier
+  const seasonOverlay = (SEASONS[currentSeason] || SEASONS.spring).overlay;
+  ctx.fillStyle = seasonOverlay;
+  ctx.fillRect(0, 0, worldData.width * TILE_SIZE, worldData.height * TILE_SIZE);
+
+  // Overlay pluie / orage
+  if (currentRain) {
+    const W = worldData.width  * TILE_SIZE;
+    const H = worldData.height * TILE_SIZE;
+    ctx.fillStyle = currentStorm ? "rgba(60,60,120,0.22)" : "rgba(100,149,237,0.13)";
+    ctx.fillRect(0, 0, W, H);
+    // Lignes diagonales simulant des gouttes (positions pseudo-aléatoires stables via tick)
+    ctx.strokeStyle = "rgba(150,200,255,0.35)";
+    ctx.lineWidth   = 0.8;
+    const spacing = 18;
+    const offset  = (currentTick * 3) % spacing;
+    ctx.beginPath();
+    for (let x = -H + offset; x < W; x += spacing) {
+      ctx.moveTo(x,     0);
+      ctx.lineTo(x + H * 0.3, H);
+    }
+    ctx.stroke();
+  }
+
+  // Overlay canicule
+  if (currentHeatwave) {
+    const W = worldData.width  * TILE_SIZE;
+    const H = worldData.height * TILE_SIZE;
+    const pulse = 0.08 + 0.04 * Math.sin(currentTick * 0.08);
+    ctx.fillStyle = `rgba(255,120,0,${pulse.toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Territoires des clans — centré sur chaque feu de camp
+  const T = TILE_SIZE;
+  buildings.filter(b => b.btype === "campfire").forEach(fire => {
+    const clan       = clans.find(c => c.id === fire.clan_id);
+    const color      = clan ? clan.color : "#ffffff";
+    const clanLabel  = clan ? `${clan.id + 1}` : "?";
+    const clanHouses = buildings.filter(b => b.clan_id === fire.clan_id && b.btype === "house");
+
+    // Rayon minimum autour du feu — L2 campfire donne +6 tuiles de territoire
+    const minR = (fire.level >= 2 ? 14 : 8) + clanHouses.length;
+    let x1 = fire.x - minR, y1 = fire.y - minR;
+    let x2 = fire.x + minR + 1, y2 = fire.y + minR + 1;
+
+    // Extension pour inclure les maisons construites
+    if (clanHouses.length > 0) {
+      const pad = 3;
+      x1 = Math.min(x1, Math.min(...clanHouses.map(b => b.x)) - pad);
+      y1 = Math.min(y1, Math.min(...clanHouses.map(b => b.y)) - pad);
+      x2 = Math.max(x2, Math.max(...clanHouses.map(b => b.x)) + pad + 1);
+      y2 = Math.max(y2, Math.max(...clanHouses.map(b => b.y)) + pad + 1);
+    }
+
+    const rx = x1 * T, ry = y1 * T, rw = (x2 - x1) * T, rh = (y2 - y1) * T;
+
+    // Fond semi-transparent
+    ctx.fillStyle = color + "3A";
+    ctx.fillRect(rx, ry, rw, rh);
+
+    // Bordure tiretée bien visible
+    ctx.save();
+    ctx.setLineDash([T * 0.55, T * 0.25]);
+    ctx.strokeStyle = color + "DD";
+    ctx.lineWidth   = T * 0.22;
+    ctx.strokeRect(rx + ctx.lineWidth / 2, ry + ctx.lineWidth / 2,
+                   rw - ctx.lineWidth,     rh - ctx.lineWidth);
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // Crochets aux 4 coins
+    const arm = T * 1.4;
+    ctx.strokeStyle = color + "FF";
+    ctx.lineWidth   = T * 0.28;
+    ctx.lineJoin    = "miter";
+    [[rx,      ry,       1,  1],
+     [rx + rw, ry,      -1,  1],
+     [rx,      ry + rh,  1, -1],
+     [rx + rw, ry + rh, -1, -1]].forEach(([cx2, cy2, sx, sy]) => {
+      ctx.beginPath();
+      ctx.moveTo(cx2 + sx * arm, cy2);
+      ctx.lineTo(cx2,            cy2);
+      ctx.lineTo(cx2,            cy2 + sy * arm);
+      ctx.stroke();
+    });
+
+    // Numéro de clan en filigrane au centre
+    const midX = (x1 + x2) / 2 * T;
+    const midY = (y1 + y2) / 2 * T;
+    ctx.font         = `bold ${T * 2.5}px sans-serif`;
+    ctx.textAlign    = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle    = color + "55";
+    ctx.fillText(clanLabel, midX, midY);
+  });
+
+  // Feux de forêt
+  if (fires.size > 0) {
+    fires.forEach((intensity, key) => {
+      const [fx, fy] = key.split(',').map(Number);
+      const alpha = Math.min(0.85, 0.3 + (intensity / 100) * 0.55);
+      // Base rouge-orangé
+      ctx.fillStyle = `rgba(220,60,10,${alpha})`;
+      ctx.fillRect(fx * T, fy * T, T, T);
+      // Halo jaune au centre (braise vive)
+      const cx2 = (fx + 0.5) * T, cy2 = (fy + 0.5) * T;
+      const r = T * 0.35 * (intensity / 100);
+      const grad = ctx.createRadialGradient(cx2, cy2, 0, cx2, cy2, r);
+      grad.addColorStop(0, `rgba(255,220,40,${alpha})`);
+      grad.addColorStop(1, `rgba(220,60,10,0)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(fx * T, fy * T, T, T);
+    });
+  }
+
+  // Maisons construites
+  drawBuildings(ctx, T);
+
+  // Feux de camp (buildings de type campfire)
+  buildings.filter(b => b.btype === "campfire").forEach(b => {
+    const px = (b.x + 0.5) * T;
+    const py = (b.y + 0.5) * T;
+    if (CAMPFIRE_SPRITE.img.complete && CAMPFIRE_SPRITE.img.naturalWidth > 0) {
+      const S = CAMPFIRE_SPRITE.size;
+      ctx.drawImage(CAMPFIRE_SPRITE.img, 0, 0, S, S, px - S / 2, py - S / 2, S, S);
+    } else {
+      ctx.beginPath();
+      ctx.arc(px, py, T * 0.38, 0, Math.PI * 2);
+      ctx.fillStyle = "#f97316";
+      ctx.fill();
+    }
+    // Halo doré autour du campfire L2
+    if (b.level >= 2) {
+      ctx.beginPath();
+      ctx.arc(px, py, T * 0.72, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,200,50,0.7)";
+      ctx.lineWidth = T * 0.18;
+      ctx.stroke();
+    }
+    // Badge L2
+    if (b.level >= 2) {
+      ctx.font = `${Math.max(5, T * 0.5)}px monospace`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fcd34d";
+      ctx.fillText("★", px, py + T * 0.85);
+    }
+  });
+
+  // Chantiers en cours (tx/ty transmis par les entités en état building)
+  if (HOUSE_WIP_SPRITE.img.complete && HOUSE_WIP_SPRITE.img.naturalWidth > 0) {
+    const S = HOUSE_WIP_SPRITE.size;
+    entities.forEach(e => {
+      if (e.s === "building" && e.tx !== undefined) {
+        ctx.drawImage(HOUSE_WIP_SPRITE.img,
+                      HOUSE_WIP_SPRITE.col * S, HOUSE_WIP_SPRITE.row * S, S, S,
+                      e.tx * T, e.ty * T, T, T);
+      }
+    });
+  }
+
+  // Entités (coordonnées en pixels-sprite)
+  ctx.imageSmoothingEnabled = false;
+  entities.forEach(e => {
+    if (!SPECIES[e.t]) return;
+    const cx = (e.x + 0.5) * T;
+    const cy = (e.y + 0.5) * T;
+    // Cercle d'état (hunting / fleeing) dessiné avant le sprite
+    if (e.s === "hunting" || e.s === "fleeing") {
+      ctx.beginPath();
+      ctx.arc(cx, cy, T * 0.52, 0, Math.PI * 2);
+      ctx.strokeStyle = e.s === "hunting" ? "#ff4444" : "#44aaff";
+      ctx.lineWidth = T * 0.14;
+      ctx.stroke();
+    }
+    const isChief = e.t === "human" && clans.some(c => c.chief_id === e.id);
+    const sp = ENTITY_SPRITES[isChief ? "human_chief" : e.t];
+    if (sp && sp.img.complete && sp.img.naturalWidth > 0) {
+      const S = sp.size || T;
+      if (sp.srcCols) {
+        // Sprite multi-tuiles (ex. requin) : source srcCols×srcRows tuiles → dest dstW×dstH tuiles
+        const srcW = sp.srcCols * S, srcH = sp.srcRows * S;
+        const dstW = sp.dstW * T,   dstH = sp.dstH * T;
+        ctx.drawImage(sp.img, sp.col * S, sp.row * S, srcW, srcH,
+                      cx - dstW / 2, cy - dstH / 2, dstW, dstH);
+      } else {
+        ctx.drawImage(sp.img, sp.col * S, sp.row * S, S, S, cx - S / 2, cy - S / 2, S, S);
+      }
+    } else {
+      // Fallback cercle coloré
+      ctx.beginPath();
+      ctx.arc(cx, cy, T * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = SPECIES[e.t].color;
+      ctx.fill();
+    }
+    // Badge hache — petit carré orange en haut à droite
+    if (e.t === "human" && e.tool) {
+      ctx.fillStyle = e.tool === "stone_axe" ? "#94a3b8" : "#f97316";
+      ctx.fillRect(cx + T * 0.22, cy - T * 0.5, T * 0.28, T * 0.28);
+    }
+    // Badge pioche — petit carré gris-bleu en haut à gauche
+    if (e.t === "human" && e.pick) {
+      ctx.fillStyle = e.pick === "stone_pick" ? "#60a5fa" : "#a8a29e";
+      ctx.fillRect(cx - T * 0.5, cy - T * 0.5, T * 0.28, T * 0.28);
+    }
+    // Badge faucille — petit carré vert en bas à droite
+    if (e.t === "human" && e.sickle) {
+      ctx.fillStyle = "#4ade80";
+      ctx.fillRect(cx + T * 0.22, cy + T * 0.22, T * 0.28, T * 0.28);
+    }
+    // Badge arrosoir — petit carré bleu ciel en bas à gauche (bleu vif si plein)
+    if (e.t === "human" && e.wcan) {
+      ctx.fillStyle = e.can_filled ? "#38bdf8" : "#94a3b8";
+      ctx.fillRect(cx - T * 0.5, cy + T * 0.22, T * 0.28, T * 0.28);
+    }
+    // Badge clan sous le sprite (humains uniquement)
+    if (e.t === "human" && e.clan != null) {
+      const clan = clans.find(c => c.id === e.clan);
+      if (clan) {
+        ctx.beginPath();
+        ctx.arc(cx, cy + T * 0.45, T * 0.18, 0, Math.PI * 2);
+        ctx.fillStyle = clan.color;
+        ctx.fill();
+      }
+    }
+  });
+
+  // Sélecteur de personnage suivi
+  if (trackedId !== null) {
+    const e = entityMap[trackedId];
+    if (e && BOX_SELECTOR_SPRITE.img.complete && BOX_SELECTOR_SPRITE.img.naturalWidth > 0) {
+      const S = BOX_SELECTOR_SPRITE.size;
+      const T = TILE_SIZE;
+      const px = (e.x + 0.5) * T - S / 2;
+      const py = (e.y + 0.5) * T - S / 2;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(BOX_SELECTOR_SPRITE.img, 0, 0, S, S, px, py, S, S);
+    }
+  }
+
+  ctx.restore();
+}
+
+// ── Bâtiments ────────────────────────────────────────────────────────────────
+function drawBuildings(c, T) {
+  if (!buildings.length) return;
+  const S = HOUSE_SPRITE.size;
+  buildings.forEach(b => {
+    if (b.btype === "house") {
+      if (!HOUSE_SPRITE.img.complete || !HOUSE_SPRITE.img.naturalWidth) return;
+      const sp = b.level >= 2 ? HOUSE_L2_SPRITE : HOUSE_SPRITE;
+      c.drawImage(sp.img, sp.col * S, sp.row * S, S, S, b.x * T, b.y * T, T, T);
+      // Stock de bois + pierre + badge L2
+      const labels = [];
+      if (b.wood  > 0) labels.push(`🪵${Math.floor(b.wood)}`);
+      if (b.stone > 0) labels.push(`🪨${b.stone}`);
+      if (b.level >= 2) labels.push("★");
+      if (labels.length) {
+        c.font = `${Math.max(5, T * 0.52)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = b.level >= 2 ? "#93c5fd" : "#fde68a";
+        c.fillText(labels.join(" "), (b.x + 0.5) * T, b.y * T - 1);
+      }
+    } else if (b.btype === "mill") {
+      if (!MILL_IMG.complete || !MILL_IMG.naturalWidth) return;
+      const S = MILL_SPRITE.size;
+      c.drawImage(MILL_SPRITE.img, MILL_SPRITE.col * S, MILL_SPRITE.row * S, S, S,
+                  b.x * T, b.y * T, T, T);
+      // Labels : blé stocké + pains prêts
+      const labels = [];
+      if (b.wheat > 0) labels.push(`🌾${b.wheat}`);
+      if (b.bread > 0) labels.push(`🍞${b.bread}`);
+      if (labels.length) {
+        c.font = `${Math.max(5, T * 0.52)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = "#fde68a";
+        c.fillText(labels.join(" "), (b.x + 0.5) * T, b.y * T - 1);
+      }
+    } else if (b.btype === "well") {
+      if (!WELL_IMG.complete || !WELL_IMG.naturalWidth) return;
+      const S = WELL_SPRITE.size;
+      c.drawImage(WELL_SPRITE.img, WELL_SPRITE.col * S, WELL_SPRITE.row * S, S, S,
+                  b.x * T, b.y * T, T, T);
+    } else if (b.btype === "wheatfield") {
+      if (!WHEAT_IMG.complete || !WHEAT_IMG.naturalWidth) return;
+      const stage = Math.min(4, Math.max(1, b.stage || 1));
+      const sp = WHEAT_SPRITES[stage - 1];
+      c.drawImage(sp.img, sp.col * S, sp.row * S, S, S, b.x * T, b.y * T, T, T);
+      // Indicateur arrosé — petit carré bleu en haut à gauche
+      if (b.watered) {
+        c.fillStyle = "#38bdf8";
+        c.fillRect(b.x * T, b.y * T, T * 0.25, T * 0.25);
+      }
+      // Badge mûr
+      if (stage >= 4) {
+        c.font = `${Math.max(5, T * 0.55)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = "#fbbf24";
+        c.fillText("🌾", (b.x + 0.5) * T, b.y * T - 1);
+      }
+    }
+  });
+}
+
+// ── Souches d'arbres ─────────────────────────────────────────────────────────
+function drawStumps(c) {
+  if (stumps.size === 0) return;
+  const T = TILE_SIZE;
+  const forestSp  = BIOME_SPRITES[2];
+  const treesImg  = forestSp.overlay.img;
+  stumps.forEach(key => {
+    const [x, y] = key.split(',').map(Number);
+    // Redessine le sol forêt (même logique déterministe que buildBiomeCache)
+    const v  = (x * 7 + y * 13) % (forestSp.cols * forestSp.rows);
+    const tc = forestSp.col0 + (v % forestSp.cols);
+    const tr = (forestSp.row0 || 0) + Math.floor(v / forestSp.cols);
+    c.drawImage(forestSp.img, tc * T, tr * T, T, T, x * T, y * T, T, T);
+    // Sprite souche : Trees.png tuile (0, 0)
+    c.drawImage(treesImg, 0, 0, T, T, x * T, y * T, T, T);
+  });
+}
+
+// ── Sidebar ──────────────────────────────────────────────────────────────────
+function updateSidebar() {
+  const pops = stats.populations || {};
+  const total = stats.total || 1;
+  let html = "";
+  Object.entries(SPECIES).forEach(([key, sp]) => {
+    const count = pops[key] || 0;
+    const pct   = Math.round((count / Math.max(total, 1)) * 100);
+    const barW  = Math.round((count / Math.max(total, 1)) * 60);
+    html += `
+      <div class="pop-row">
+        <div class="pop-dot" style="background:${sp.color}"></div>
+        <span class="pop-name">${sp.label}</span>
+        <div class="pop-bar-wrap"><div class="pop-bar" style="width:${barW}px;background:${sp.color}"></div></div>
+        <span class="pop-count">${count}</span>
+      </div>`;
+  });
+  document.getElementById("pop-list").innerHTML = html;
+  drawPopChart();
+}
+
+// ── Mini graphe linéaire ─────────────────────────────────────────────────────
+function drawPopChart() {
+  const c  = document.getElementById("pop-chart");
+  const cx = c.getContext("2d");
+  const W  = c.width = c.offsetWidth;
+  const H  = c.height = 80;
+  cx.clearRect(0, 0, W, H);
+
+  if (history.length < 2) return;
+  const keys  = Object.keys(SPECIES);
+  const slice = history.slice(-120);
+  const maxV  = Math.max(...slice.map(h => h.populations ? Math.max(...Object.values(h.populations)) : 0), 1);
+
+  keys.forEach(key => {
+    const color = SPECIES[key].color;
+    cx.beginPath();
+    cx.strokeStyle = color;
+    cx.lineWidth   = 1.2;
+    slice.forEach((h, i) => {
+      const v = h.populations?.[key] || 0;
+      const x = (i / (slice.length - 1)) * W;
+      const y = H - (v / maxV) * (H - 4) - 2;
+      i === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+    });
+    cx.stroke();
+  });
+}
+
+// ── Event log ────────────────────────────────────────────────────────────────
+const MAX_EVENTS = 60;
+let evCount = 0;
+
+function addEvent(ev) {
+  const log = document.getElementById("event-log");
+  const div = document.createElement("div");
+  div.className = `ev-item ${ev.type}`;
+
+  if (ev.type === "birth") {
+    const sp = SPECIES[ev.etype];
+    const who = sp ? (ev.count > 1 ? `${ev.count} ${sp.pl}` : cap(sp.art)) : ev.etype;
+    div.textContent = `🐣 ${who} né(s) en (${ev.x},${ev.y})`;
+  } else if (ev.type === "death") {
+    const sp = SPECIES[ev.etype];
+    const who = sp ? cap(sp.art) : ev.etype;
+    const cause = ev.cause === "age" ? "vieillesse" : "famine";
+    div.textContent = `💀 ${who} mort de ${cause}`;
+  } else if (ev.type === "kill") {
+    const pred = SPECIES[ev.predator];
+    const prey = SPECIES[ev.prey];
+    const predStr = pred ? cap(pred.art) : ev.predator;
+    const preyStr = prey ? prey.art : ev.prey;
+    div.textContent = `⚔ ${predStr} a tué ${preyStr}`;
+  } else if (ev.type === "chop") {
+    div.className = "ev-item chop";
+    div.textContent = `🪓 Arbre coupé en (${ev.x},${ev.y})`;
+  } else if (ev.type === "craft_axe") {
+    div.className = "ev-item chop";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    const axeLabel = ev.tool === "stone_axe" ? "🪓🪨 Hache pierre" : "🪓 Hache bois";
+    div.textContent = `${axeLabel} — Clan ${ev.clan_id + 1}`;
+    if (cn) div.style.borderColor = cn.color;
+  } else if (ev.type === "craft_pick") {
+    div.className = "ev-item chop";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    const pickLabel = ev.pick === "stone_pick" ? "⛏🪨 Pioche pierre" : "⛏ Pioche bois";
+    div.textContent = `${pickLabel} — Clan ${ev.clan_id + 1}`;
+    if (cn) div.style.borderColor = cn.color;
+  } else if (ev.type === "mine") {
+    div.className = "ev-item chop";
+    div.style.borderColor = "#94a3b8";
+    div.textContent = `⛏ Pierre minée en (${ev.x},${ev.y})`;
+  } else if (ev.type === "upgrade_building") {
+    div.className = "ev-item build_house";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    const icon = ev.btype === "campfire" ? "🔥" : "🏠";
+    div.textContent = `${icon}★ Niveau 2 — Clan ${ev.clan_id + 1} (${ev.btype})`;
+    if (cn) { div.style.borderColor = "#93c5fd"; div.style.color = "#93c5fd"; }
+  } else if (ev.type === "build_house") {
+    div.className = "ev-item build_house";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🏠 Maison construite — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#fde68a"; }
+  } else if (ev.type === "build_wheatfield") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🌱 Champ planté — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#86efac"; }
+  } else if (ev.type === "harvest_wheat") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🌾 Récolte — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#fbbf24"; }
+  } else if (ev.type === "water_wheat") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `💧 Arrosage — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#38bdf8"; }
+  } else if (ev.type === "craft_sickle") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🌾 Faucille fabriquée — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#4ade80"; }
+  } else if (ev.type === "craft_watering_can") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🪣 Arrosoir fabriqué — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#38bdf8"; }
+  } else if (ev.type === "craft_fishing_rod") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🎣 Canne à pêche fabriquée — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#7dd3fc"; }
+  } else if (ev.type === "fish_catch") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🐟 Poisson pêché — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#5dade2"; }
+  } else if (ev.type === "heatwave_start") {
+    div.className = "ev-item";
+    div.textContent = `🔥 Canicule ! Chaleur extrême`;
+    div.style.borderColor = "#f97316";
+    div.style.color = "#fed7aa";
+  } else if (ev.type === "heatwave_end") {
+    div.className = "ev-item";
+    div.textContent = `🌤 Fin de la canicule`;
+    div.style.borderColor = "#fbbf24";
+    div.style.color = "#fde68a";
+  } else if (ev.type === "heatwave_fire") {
+    div.className = "ev-item";
+    div.textContent = `🔥 Incendie spontané en (${ev.x},${ev.y}) — canicule`;
+    div.style.borderColor = "#ef4444";
+    div.style.color = "#fca5a5";
+  } else if (ev.type === "lightning") {
+    div.className = "ev-item";
+    div.textContent = `⚡ Foudre ! Incendie en (${ev.x},${ev.y})`;
+    div.style.borderColor = "#fbbf24";
+    div.style.color = "#fde68a";
+  } else if (ev.type === "build_mill") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `⚙ Moulin construit — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#fde68a"; }
+  } else if (ev.type === "build_well") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🪣 Puit construit — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#38bdf8"; }
+  } else if (ev.type === "bake_bread") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🍞 Pain cuit — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#fb923c"; }
+  } else if (ev.type === "eat_bread") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🍞 Pain mangé — Clan ${ev.clan_id + 1}`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#fbbf24"; }
+  } else if (ev.type === "clan_fight") {
+    const ca = clans.find(c => c.id === ev.attacker_clan);
+    const cv = clans.find(c => c.id === ev.victim_clan);
+    const nameA = ca ? `Clan ${ca.id + 1}` : "?";
+    const nameV = cv ? `Clan ${cv.id + 1}` : "?";
+    div.textContent = `🗡 ${nameA} a tué un membre du ${nameV}`;
+    div.style.borderColor = ca?.color || "#f97316";
+    div.style.color = "#fcd34d";
+  } else {
+    div.textContent = JSON.stringify(ev);
+  }
+
+  log.prepend(div);
+  evCount++;
+  if (evCount > MAX_EVENTS) {
+    while (log.children.length > MAX_EVENTS) log.removeChild(log.lastChild);
+  }
+}
+
+// ── Tooltip au survol ─────────────────────────────────────────────────────────
+const tooltip = document.getElementById("tooltip");
+
+canvas.addEventListener("mousemove", (ev) => {
+  if (!worldData) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = (ev.clientX - rect.left - offX) / scale / TILE_SIZE;
+  const my = (ev.clientY - rect.top  - offY) / scale / TILE_SIZE;
+
+  let closest = null, closestD = 1.2;
+  entities.forEach(e => {
+    const d = Math.hypot(e.x + 0.5 - mx, e.y + 0.5 - my);
+    if (d < closestD) { closestD = d; closest = e; }
+  });
+
+  if (closest) {
+    const sp = SPECIES[closest.t];
+    const icon = STATE_ICONS[closest.s] || "?";
+    const trHtml = (() => {
+      if (!closest.tr || !sp?.base) return "";
+      const [sp2, vi, hr] = closest.tr;
+      const [bs, bv, bh] = sp.base;
+      const fmt = (v, b) => {
+        const pct = Math.round((v / b - 1) * 100);
+        const col = pct > 0 ? "#4ade80" : pct < 0 ? "#f87171" : "#94a3b8";
+        return `<span style="color:${col}">${pct >= 0 ? "+" : ""}${pct}%</span>`;
+      };
+      return `
+      <div class="tt-row"><span>Vitesse</span><span>${sp2.toFixed(2)} ${fmt(sp2,bs)}</span></div>
+      <div class="tt-row"><span>Vision</span><span>${vi} ${fmt(vi,bv)}</span></div>
+      <div class="tt-row"><span>Faim/tick</span><span>${hr.toFixed(3)} ${fmt(hr,bh)}</span></div>`;
+    })();
+    const invHtml = closest.t === "human" ? [
+      `<div class="tt-row"><span>🪵 Bois porté</span><span>${closest.inv ?? 0} / 5</span></div>`,
+      `<div class="tt-row"><span>🪨 Pierre portée</span><span>${closest.stone ?? 0} / 3</span></div>`,
+      `<div class="tt-row"><span>🪓 Hache</span><span>${closest.tool ?? "—"}</span></div>`,
+      `<div class="tt-row"><span>⛏ Pioche</span><span>${closest.pick ?? "—"}</span></div>`,
+      closest.sickle ? `<div class="tt-row"><span>🌾 Faucille</span><span>✓</span></div>` : "",
+      closest.wcan   ? `<div class="tt-row"><span>🪣 Arrosoir</span><span>${closest.can_filled ? "💧 plein" : "vide"}</span></div>` : "",
+      closest.rod    ? `<div class="tt-row"><span>🎣 Canne à pêche</span><span>✓</span></div>` : "",
+    ].join("") : "";
+    const isChiefTT = closest.t === "human" && clans.some(c => c.chief_id === closest.id);
+    tooltip.innerHTML = `
+      <b>${isChiefTT ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
+      ${isChiefTT ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
+      <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
+      <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
+      <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
+      <div class="tt-row"><span>Âge</span><span>${closest.age}</span></div>
+      ${invHtml}${trHtml}
+    `;
+    tooltip.style.display = "block";
+    tooltip.style.left = (ev.clientX - rect.left + 12) + "px";
+    tooltip.style.top  = (ev.clientY - rect.top  - 20) + "px";
+  } else {
+    tooltip.style.display = "none";
+  }
+});
+canvas.addEventListener("mouseleave", () => tooltip.style.display = "none");
+
+// ── Zoom (limites) ────────────────────────────────────────────────────────────
+const ZOOM_MIN = 0.5;   // vue dézoomée max (monde entier visible)
+const ZOOM_MAX = 8.0;   // vue zoomée max (pixels bien lisibles)
+
+function applyZoom(mx, my, delta) {
+  const newScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale * delta));
+  const realDelta = newScale / scale;
+  offX = mx - (mx - offX) * realDelta;
+  offY = my - (my - offY) * realDelta;
+  scale = newScale;
+  drawAll();
+}
+
+// ── Zoom molette ──────────────────────────────────────────────────────────────
+canvas.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+  applyZoom(mx, my, ev.deltaY < 0 ? 1.15 : 0.87);
+}, { passive: false });
+
+// ── Pan drag ──────────────────────────────────────────────────────────────────
+canvas.addEventListener("mousedown", (ev) => {
+  isDragging = true; dragSX = ev.clientX; dragSY = ev.clientY;
+  dragOX = offX; dragOY = offY;
+});
+canvas.addEventListener("mousemove", (ev) => {
+  if (!isDragging) return;
+  offX = dragOX + (ev.clientX - dragSX);
+  offY = dragOY + (ev.clientY - dragSY);
+  drawAll();
+});
+canvas.addEventListener("mouseup", (ev) => {
+  const moved = Math.hypot(ev.clientX - dragSX, ev.clientY - dragSY);
+  isDragging = false;
+  if (moved > 4 || !worldData) return;   // c'était un drag, pas un clic
+
+  // Clic : cherche l'entité la plus proche du pointeur
+  const rect = canvas.getBoundingClientRect();
+  const mx = (ev.clientX - rect.left - offX) / scale / TILE_SIZE;
+  const my = (ev.clientY - rect.top  - offY) / scale / TILE_SIZE;
+  let closest = null, closestD = 1.2;
+  entities.forEach(e => {
+    const d = Math.hypot(e.x + 0.5 - mx, e.y + 0.5 - my);
+    if (d < closestD) { closestD = d; closest = e; }
+  });
+  trackedId = closest ? closest.id : null;
+  drawAll();
+});
+
+// Escape pour annuler le suivi
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") trackedId = null;
+});
+
+// ── Contrôles ─────────────────────────────────────────────────────────────────
+function togglePause() {
+  fetch("/api/pause", { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      paused = !d.running;
+      const btn = document.getElementById("pause-btn");
+      btn.textContent = d.running ? "⏸ Pause" : "▶ Reprendre";
+      btn.className   = "ctrl-btn" + (d.running ? "" : " active");
+      document.getElementById("status-dot").className = "dot" + (d.running ? "" : " paused");
+    });
+}
+
+function setSpeed(v) {
+  document.getElementById("speed-val").textContent = v + "×";
+  fetch(`/api/speed?tps=${v}`, { method: "POST" });
+}
+
+// ── Double-clic pour recentrer ────────────────────────────────────────────────
+canvas.addEventListener("dblclick", () => { fitWorld(); drawAll(); });
+
+// ── Touch : pan, pinch-zoom, tap tooltip ─────────────────────────────────────
+let lastPinchDist = null;
+let lastTapTime   = 0;
+
+canvas.addEventListener("touchstart", (ev) => {
+  ev.preventDefault();
+  if (ev.touches.length === 2) {
+    isDragging = false;
+    lastPinchDist = Math.hypot(
+      ev.touches[0].clientX - ev.touches[1].clientX,
+      ev.touches[0].clientY - ev.touches[1].clientY
+    );
+  } else if (ev.touches.length === 1) {
+    isDragging = true;
+    dragSX = ev.touches[0].clientX;
+    dragSY = ev.touches[0].clientY;
+    dragOX = offX; dragOY = offY;
+    lastPinchDist = null;
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (ev) => {
+  ev.preventDefault();
+  if (ev.touches.length === 1 && isDragging) {
+    offX = dragOX + (ev.touches[0].clientX - dragSX);
+    offY = dragOY + (ev.touches[0].clientY - dragSY);
+    drawAll();
+  } else if (ev.touches.length === 2 && lastPinchDist !== null) {
+    const dist = Math.hypot(
+      ev.touches[0].clientX - ev.touches[1].clientX,
+      ev.touches[0].clientY - ev.touches[1].clientY
+    );
+    const delta = dist / lastPinchDist;
+    const rect  = canvas.getBoundingClientRect();
+    const mx = (ev.touches[0].clientX + ev.touches[1].clientX) / 2 - rect.left;
+    const my = (ev.touches[0].clientY + ev.touches[1].clientY) / 2 - rect.top;
+    applyZoom(mx, my, delta);
+    lastPinchDist = dist;
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchend", (ev) => {
+  // Passage 2 doigts → 1 doigt : relancer le pan sans traiter comme un tap
+  if (ev.touches.length === 1) {
+    isDragging    = true;
+    dragSX        = ev.touches[0].clientX;
+    dragSY        = ev.touches[0].clientY;
+    dragOX        = offX;
+    dragOY        = offY;
+    lastPinchDist = null;
+    return;
+  }
+
+  isDragging    = false;
+  lastPinchDist = null;
+  if (ev.changedTouches.length !== 1 || !worldData) return;
+
+  // Double-tap → recentrer
+  const now = Date.now();
+  if (now - lastTapTime < 300) { fitWorld(); drawAll(); lastTapTime = 0; return; }
+  lastTapTime = now;
+
+  // Tap simple → tooltip 2 secondes
+  const rect = canvas.getBoundingClientRect();
+  const mx = (ev.changedTouches[0].clientX - rect.left  - offX) / scale;
+  const my = (ev.changedTouches[0].clientY - rect.top   - offY) / scale;
+  let closest = null, closestD = 2.0;
+  entities.forEach(e => {
+    const d = Math.hypot(e.x + 0.5 - mx, e.y + 0.5 - my);
+    if (d < closestD) { closestD = d; closest = e; }
+  });
+  if (closest) {
+    const sp   = SPECIES[closest.t];
+    const icon = STATE_ICONS[closest.s] || "?";
+    const trHtml2 = (() => {
+      if (!closest.tr || !sp?.base) return "";
+      const [sp2, vi, hr] = closest.tr;
+      const [bs, bv, bh] = sp.base;
+      const fmt = (v, b) => {
+        const pct = Math.round((v / b - 1) * 100);
+        const col = pct > 0 ? "#4ade80" : pct < 0 ? "#f87171" : "#94a3b8";
+        return `<span style="color:${col}">${pct >= 0 ? "+" : ""}${pct}%</span>`;
+      };
+      return `
+      <div class="tt-row"><span>Vitesse</span><span>${sp2.toFixed(2)} ${fmt(sp2,bs)}</span></div>
+      <div class="tt-row"><span>Vision</span><span>${vi} ${fmt(vi,bv)}</span></div>
+      <div class="tt-row"><span>Faim/tick</span><span>${hr.toFixed(3)} ${fmt(hr,bh)}</span></div>`;
+    })();
+    const invHtml2 = closest.t === "human" ? [
+      `<div class="tt-row"><span>🪵 Bois porté</span><span>${closest.inv ?? 0} / 5</span></div>`,
+      `<div class="tt-row"><span>🪨 Pierre portée</span><span>${closest.stone ?? 0} / 3</span></div>`,
+      `<div class="tt-row"><span>🪓 Hache</span><span>${closest.tool ?? "—"}</span></div>`,
+      `<div class="tt-row"><span>⛏ Pioche</span><span>${closest.pick ?? "—"}</span></div>`,
+      closest.sickle ? `<div class="tt-row"><span>🌾 Faucille</span><span>✓</span></div>` : "",
+      closest.wcan   ? `<div class="tt-row"><span>🪣 Arrosoir</span><span>${closest.can_filled ? "💧 plein" : "vide"}</span></div>` : "",
+      closest.rod    ? `<div class="tt-row"><span>🎣 Canne à pêche</span><span>✓</span></div>` : "",
+    ].join("") : "";
+    const isChiefTT2 = closest.t === "human" && clans.some(c => c.chief_id === closest.id);
+    tooltip.innerHTML = `
+      <b>${isChiefTT2 ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
+      ${isChiefTT2 ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
+      <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
+      <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
+      <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
+      <div class="tt-row"><span>Âge</span><span>${closest.age}</span></div>
+      ${invHtml2}${trHtml2}
+    `;
+    tooltip.style.display = "block";
+    tooltip.style.left = (ev.changedTouches[0].clientX - rect.left + 12) + "px";
+    tooltip.style.top  = (ev.changedTouches[0].clientY - rect.top  - 20) + "px";
+    setTimeout(() => tooltip.style.display = "none", 2000);
+  }
+});
+
+// ── Monitoring système ────────────────────────────────────────────────────────
+function sysBarColor(pct) {
+  if (pct < 60) return "#22c55e";
+  if (pct < 80) return "#f97316";
+  return "#ef4444";
+}
+
+function tempBarColor(t) {
+  if (t < 55) return "#22c55e";
+  if (t < 70) return "#f97316";
+  return "#ef4444";
+}
+
+function updateSysInfo() {
+  fetch("/api/sysinfo")
+    .then(r => r.json())
+    .then(d => {
+      if (d.cpu !== null && d.cpu !== undefined) {
+        document.getElementById("sys-cpu-bar").style.width  = d.cpu + "%";
+        document.getElementById("sys-cpu-bar").style.background = sysBarColor(d.cpu);
+        document.getElementById("sys-cpu-val").textContent  = d.cpu.toFixed(0) + "%";
+      }
+      if (d.ram !== null && d.ram !== undefined) {
+        document.getElementById("sys-ram-bar").style.width  = d.ram + "%";
+        document.getElementById("sys-ram-bar").style.background = sysBarColor(d.ram);
+        document.getElementById("sys-ram-val").textContent  = d.ram.toFixed(0) + "%";
+      }
+      if (d.temp !== null && d.temp !== undefined) {
+        const pct = Math.min(100, (d.temp / 85) * 100);
+        document.getElementById("sys-temp-bar").style.width  = pct + "%";
+        document.getElementById("sys-temp-bar").style.background = tempBarColor(d.temp);
+        document.getElementById("sys-temp-val").textContent  = d.temp.toFixed(1) + "°C";
+      }
+    })
+    .catch(() => {});
+}
+
+updateSysInfo();
+setInterval(updateSysInfo, 3000);
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+resizeCanvas();
+</script>
+</body>
+</html>

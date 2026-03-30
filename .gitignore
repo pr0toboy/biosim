@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# Données de simulation
+*.db
+*.sqlite
+*.sqlite3
+
+# Claude Code (config locale)
+.claude/
+
+# Variables d'environnement
+.env
+.env.*
+
+# Éditeurs / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Distribution / packaging
+*.tar.gz
+*.zip
