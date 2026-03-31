@@ -162,6 +162,25 @@
   .sys-bar { height: 5px; border-radius: 3px; transition: width .5s ease, background .5s; }
   .sys-val { font-weight: 600; color: #e2e8f0; min-width: 38px; text-align: right; font-size: 11px; }
 
+  /* ── Panneau bâtiment sélectionné ── */
+  #building-panel {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    background: #1a1d2e;
+    border: 1px solid #3d4268;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #c9d1f0;
+    display: none;
+    z-index: 10;
+    min-width: 170px;
+    pointer-events: none;
+  }
+  #building-panel b { color: #e2e8f0; font-size: 13px; display: block; margin-bottom: 6px; }
+  #building-panel .tt-row { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 3px; }
+
   /* ── Status bar ── */
   #statusbar {
     font-size: 11px;
@@ -235,6 +254,7 @@
   <div id="canvas-wrap">
     <canvas id="world-canvas"></canvas>
     <div id="tooltip"></div>
+    <div id="building-panel"></div>
   </div>
 
   <div id="sidebar">
@@ -292,7 +312,7 @@ const STATE_ICONS = {
   idle: "·", wandering: "↝", seeking_food: "🌿",
   eating: "🍴", fleeing: "!", hunting: "⚔",
   seeking_mate: "♥", chopping: "🪓", building: "🏗", farming: "🌾", resting: "z",
-  seeking_water: "💧", drinking: "🥤", mining: "⛏", dead: "✝"
+  seeking_water: "💧", drinking: "🥤", mining: "⛏", exploring: "🧭", dead: "✝"
 };
 
 // ── Sprites terrain ──────────────────────────────────────────────────────────
@@ -415,8 +435,9 @@ let entityMap    = {};     // id → entity
 let scale = 1, offX = 0, offY = 0;
 let isDragging = false, dragSX, dragSY, dragOX, dragOY;
 
-// Suivi de personnage
-let trackedId = null;   // id de l'entité suivie, null = aucune
+// Suivi de personnage / bâtiment
+let trackedId = null;         // id de l'entité suivie, null = aucune
+let trackedBuildingId = null; // id du bâtiment sélectionné, null = aucun
 
 // ── Canvas setup ─────────────────────────────────────────────────────────────
 const canvasWrap = document.getElementById("canvas-wrap");
@@ -511,6 +532,7 @@ function handleTick(data) {
   drawAll();
   updateSidebar();
   updateSeasonBadge();
+  updateBuildingPanel();
   (data.events || []).forEach(addEvent);
 }
 
@@ -793,17 +815,7 @@ function drawAll() {
     }
   });
 
-  // Chantiers en cours (tx/ty transmis par les entités en état building)
-  if (HOUSE_WIP_SPRITE.img.complete && HOUSE_WIP_SPRITE.img.naturalWidth > 0) {
-    const S = HOUSE_WIP_SPRITE.size;
-    entities.forEach(e => {
-      if (e.s === "building" && e.tx !== undefined) {
-        ctx.drawImage(HOUSE_WIP_SPRITE.img,
-                      HOUSE_WIP_SPRITE.col * S, HOUSE_WIP_SPRITE.row * S, S, S,
-                      e.tx * T, e.ty * T, T, T);
-      }
-    });
-  }
+  // (chantiers en cours dessinés dans drawBuildings via site_* btype)
 
   // Entités (coordonnées en pixels-sprite)
   ctx.imageSmoothingEnabled = false;
@@ -883,6 +895,23 @@ function drawAll() {
       ctx.drawImage(BOX_SELECTOR_SPRITE.img, 0, 0, S, S, px, py, S, S);
     }
   }
+  // Sélecteur de bâtiment
+  if (trackedBuildingId !== null) {
+    const b = buildings.find(bd => bd.id === trackedBuildingId);
+    if (b && BOX_SELECTOR_SPRITE.img.complete && BOX_SELECTOR_SPRITE.img.naturalWidth > 0) {
+      const S = BOX_SELECTOR_SPRITE.size;
+      const T = TILE_SIZE;
+      const px = (b.x + 0.5) * T - S / 2;
+      const py = (b.y + 0.5) * T - S / 2;
+      ctx.imageSmoothingEnabled = false;
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(BOX_SELECTOR_SPRITE.img, 0, 0, S, S, px, py, S, S);
+      ctx.restore();
+    } else if (!b) {
+      trackedBuildingId = null;
+    }
+  }
 
   ctx.restore();
 }
@@ -892,6 +921,20 @@ function drawBuildings(c, T) {
   if (!buildings.length) return;
   const S = HOUSE_SPRITE.size;
   buildings.forEach(b => {
+    // Chantiers en cours
+    if (b.btype.startsWith("site_")) {
+      if (!HOUSE_WIP_SPRITE.img.complete || !HOUSE_WIP_SPRITE.img.naturalWidth) return;
+      c.drawImage(HOUSE_WIP_SPRITE.img,
+                  HOUSE_WIP_SPRITE.col * S, HOUSE_WIP_SPRITE.row * S, S, S,
+                  b.x * T, b.y * T, T, T);
+      // Barre de progression
+      const pct = b.work_needed > 0 ? (b.work_done ?? 0) / b.work_needed : 0;
+      c.fillStyle = "rgba(0,0,0,0.5)";
+      c.fillRect(b.x * T, (b.y + 1) * T - 3, T, 3);
+      c.fillStyle = "#4ade80";
+      c.fillRect(b.x * T, (b.y + 1) * T - 3, T * pct, 3);
+      return;
+    }
     if (b.btype === "house") {
       if (!HOUSE_SPRITE.img.complete || !HOUSE_SPRITE.img.naturalWidth) return;
       const sp = b.level >= 2 ? HOUSE_L2_SPRITE : HOUSE_SPRITE;
@@ -1017,17 +1060,39 @@ function drawPopChart() {
 
 // ── Event log ────────────────────────────────────────────────────────────────
 const MAX_EVENTS = 60;
+const MAX_WOOD_PER_HOUSE = 50;   // synchronisé avec simulation.py
 let evCount = 0;
 
+// Seuls les événements importants sont affichés dans le log
+const SILENT_EVENTS = new Set([
+  // actions routinières
+  "chop", "mine", "eat_bread", "fish_catch",
+  "harvest_wheat", "water_wheat", "bake_bread", "death",
+  "start_site",
+  // kills très fréquents
+  "kill",
+  // fabrication d'outils (trop régulière)
+  "craft_axe", "craft_pick", "craft_watering_can",
+  "craft_sickle", "craft_fishing_rod",
+  // plantation trop fréquente
+  "build_wheatfield",
+  "build_storehouse",
+]);
+
 function addEvent(ev) {
+  if (SILENT_EVENTS.has(ev.type)) return;
   const log = document.getElementById("event-log");
   const div = document.createElement("div");
   div.className = `ev-item ${ev.type}`;
 
   if (ev.type === "birth") {
+    // N'afficher que les naissances humaines (trop de bruit sinon)
+    if (ev.etype !== "human") return;
     const sp = SPECIES[ev.etype];
     const who = sp ? (ev.count > 1 ? `${ev.count} ${sp.pl}` : cap(sp.art)) : ev.etype;
-    div.textContent = `🐣 ${who} né(s) en (${ev.x},${ev.y})`;
+    const cn = ev.clan != null ? clans.find(c => c.id === ev.clan) : null;
+    const clanStr = cn ? ` — Clan ${cn.id + 1}` : "";
+    div.textContent = `🐣 ${who} né(s)${clanStr}`;
   } else if (ev.type === "death") {
     const sp = SPECIES[ev.etype];
     const who = sp ? cap(sp.art) : ev.etype;
@@ -1163,6 +1228,96 @@ function addEvent(ev) {
   }
 }
 
+// ── Panneau bâtiment sélectionné ─────────────────────────────────────────────
+const buildingPanel = document.getElementById("building-panel");
+
+function buildingInfoHTML(b) {
+  if (!b) return "";
+  const cn = clans.find(c => c.id === b.clan_id);
+  const cLabel = `Clan ${(b.clan_id ?? 0) + 1}`;
+  const cColor = cn ? cn.color : "#8892b0";
+  const lvl = b.level >= 2 ? "★ Niveau 2" : "Niveau 1";
+  if (b.btype === "campfire") {
+    const clanBuildings = buildings.filter(x => x.clan_id === b.clan_id);
+    const clanHouses    = clanBuildings.filter(x => x.btype === "house");
+    const clanMills     = clanBuildings.filter(x => x.btype === "mill");
+    const clanWells     = clanBuildings.filter(x => x.btype === "well");
+    const clanFields    = clanBuildings.filter(x => x.btype === "wheatfield");
+    const totalPop      = clanHouses.reduce((s, h) => s + (h.level >= 2 ? 6 : 3), 0);
+    const curPop        = entities.filter(e => e.t === "human" && e.clan === b.clan_id);
+    const totalWood     = clanHouses.reduce((s, h) => s + (h.wood ?? 0), 0);
+    const totalStone    = clanHouses.reduce((s, h) => s + (h.stone ?? 0), 0);
+    const nAxe          = curPop.filter(e => e.tool === "stone_axe").length;
+    const nWoodAxe      = curPop.filter(e => e.tool === "axe").length;
+    const nPick         = curPop.filter(e => e.pick === "stone_pick").length;
+    const nWoodPick     = curPop.filter(e => e.pick === "wood_pick").length;
+    const nRod          = curPop.filter(e => e.rod).length;
+    const toolStr = [
+      nAxe      && `🪓🪨×${nAxe}`,
+      nWoodAxe  && `🪓×${nWoodAxe}`,
+      nPick     && `⛏🪨×${nPick}`,
+      nWoodPick && `⛏×${nWoodPick}`,
+      nRod      && `🎣×${nRod}`,
+    ].filter(Boolean).join("  ") || "—";
+    const upgradeNote = b.level < 2
+      ? `<div class="tt-row" style="color:#94a3b8;font-size:0.85em"><span>Amélioration L2</span><span>🪵5 🪨20</span></div>`
+      : "";
+    return `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
+      <div class="tt-row"><span>Niveau feu</span><span>${lvl}</span></div>
+      <hr style="border-color:#334155;margin:4px 0">
+      <div class="tt-row"><span>👥 Population</span><span>${curPop.length} / ${totalPop || "?"}</span></div>
+      <div class="tt-row"><span>🏠 Maisons</span><span>${clanHouses.length}</span></div>
+      ${clanMills.length  ? `<div class="tt-row"><span>⚙ Moulins</span><span>${clanMills.length}</span></div>` : ""}
+      ${clanWells.length  ? `<div class="tt-row"><span>🪣 Puits</span><span>${clanWells.length}</span></div>` : ""}
+      ${clanFields.length ? `<div class="tt-row"><span>🌾 Champs</span><span>${clanFields.length}</span></div>` : ""}
+      <hr style="border-color:#334155;margin:4px 0">
+      <div class="tt-row"><span>🪵 Bois stocké</span><span>${Math.floor(totalWood)}</span></div>
+      <div class="tt-row"><span>🪨 Pierre stockée</span><span>${totalStone}</span></div>
+      <div class="tt-row"><span>Outils</span><span>${toolStr}</span></div>
+      ${upgradeNote}`;
+  } else if (b.btype === "house") {
+    return `<b style="color:${cColor}">🏠 Maison — ${cLabel}</b>
+      <div class="tt-row"><span>Niveau</span><span>${lvl}</span></div>
+      <div class="tt-row"><span>🪵 Bois</span><span>${Math.floor(b.wood ?? 0)} / ${MAX_WOOD_PER_HOUSE}</span></div>
+      <div class="tt-row"><span>🪨 Pierre</span><span>${b.stone ?? 0}</span></div>
+      <div class="tt-row"><span>Capacité</span><span>${b.level >= 2 ? 6 : 3} habitants</span></div>`;
+  } else if (b.btype === "well") {
+    return `<b style="color:${cColor}">🪣 Puit — ${cLabel}</b>`;
+  } else if (b.btype === "mill") {
+    return `<b style="color:${cColor}">⚙ Moulin — ${cLabel}</b>
+      <div class="tt-row"><span>🌾 Blé</span><span>${b.wheat ?? 0}</span></div>
+      <div class="tt-row"><span>🍞 Pain</span><span>${b.bread ?? 0}</span></div>`;
+  } else if (b.btype === "wheatfield") {
+    return `<b style="color:${cColor}">🌱 Champ — ${cLabel}</b>
+      <div class="tt-row"><span>Stade</span><span>${b.stage ?? 1} / 4</span></div>`;
+  } else if (b.btype.startsWith("site_")) {
+    const bname = {house:"maison",mill:"moulin",well:"puit",wheatfield:"champ"}[b.btype.slice(5)] || b.btype.slice(5);
+    const pct = b.work_needed > 0 ? Math.round((b.work_done ?? 0) / b.work_needed * 100) : 0;
+    return `<b style="color:${cColor}">🏗 Chantier ${bname} — ${cLabel}</b>
+      <div class="tt-row"><span>Progression</span><span>${pct}%</span></div>`;
+  }
+  return "";
+}
+
+function showBuildingPanel(b) {
+  const html = buildingInfoHTML(b);
+  if (!html) { buildingPanel.style.display = "none"; return; }
+  buildingPanel.innerHTML = html;
+  buildingPanel.style.display = "block";
+}
+
+function hideBuildingPanel() {
+  buildingPanel.style.display = "none";
+}
+
+// Mise à jour du panneau bâtiment à chaque tick si un bâtiment est sélectionné
+function updateBuildingPanel() {
+  if (trackedBuildingId === null) return;
+  const b = buildings.find(bd => bd.id === trackedBuildingId);
+  if (b) showBuildingPanel(b);
+  else hideBuildingPanel();
+}
+
 // ── Tooltip au survol ─────────────────────────────────────────────────────────
 const tooltip = document.getElementById("tooltip");
 
@@ -1218,7 +1373,51 @@ canvas.addEventListener("mousemove", (ev) => {
     tooltip.style.left = (ev.clientX - rect.left + 12) + "px";
     tooltip.style.top  = (ev.clientY - rect.top  - 20) + "px";
   } else {
-    tooltip.style.display = "none";
+    // Cherche un bâtiment sous le curseur
+    let closestB = null, closestBD = 1.8;
+    buildings.forEach(b => {
+      const d = Math.hypot(b.x + 0.5 - mx, b.y + 0.5 - my);
+      if (d < closestBD) { closestBD = d; closestB = b; }
+    });
+    if (closestB) {
+      const cn = clans.find(c => c.id === closestB.clan_id);
+      const cLabel = `Clan ${(closestB.clan_id ?? 0) + 1}`;
+      const cColor = cn ? cn.color : "#8892b0";
+      let html = "";
+      if (closestB.btype === "campfire") {
+        html = `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
+          <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>`;
+      } else if (closestB.btype === "house") {
+        html = `<b style="color:${cColor}">🏠 Maison — ${cLabel}</b>
+          <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>
+          <div class="tt-row"><span>🪵 Bois</span><span>${Math.floor(closestB.wood ?? 0)} / ${MAX_WOOD_PER_HOUSE}</span></div>
+          <div class="tt-row"><span>🪨 Pierre</span><span>${closestB.stone ?? 0}</span></div>`;
+      } else if (closestB.btype.startsWith("site_")) {
+        const bname = { house:"maison", mill:"moulin", well:"puit", wheatfield:"champ" }[closestB.btype.slice(5)] || closestB.btype.slice(5);
+        const pct = closestB.work_needed > 0 ? Math.round((closestB.work_done ?? 0) / closestB.work_needed * 100) : 0;
+        html = `<b style="color:${cColor}">🏗 Chantier ${bname} — ${cLabel}</b>
+          <div class="tt-row"><span>Progression</span><span>${closestB.work_done ?? 0} / ${closestB.work_needed ?? 0} (${pct}%)</span></div>`;
+      } else if (closestB.btype === "well") {
+        html = `<b style="color:${cColor}">🪣 Puit — ${cLabel}</b>`;
+      } else if (closestB.btype === "mill") {
+        html = `<b style="color:${cColor}">⚙ Moulin — ${cLabel}</b>
+          <div class="tt-row"><span>🌾 Blé</span><span>${closestB.wheat ?? 0}</span></div>
+          <div class="tt-row"><span>🍞 Pain</span><span>${closestB.bread ?? 0}</span></div>`;
+      } else if (closestB.btype === "wheatfield") {
+        html = `<b style="color:${cColor}">🌱 Champ — ${cLabel}</b>
+          <div class="tt-row"><span>Stade</span><span>${closestB.stage ?? 1} / 4</span></div>`;
+      }
+      if (html) {
+        tooltip.innerHTML = html;
+        tooltip.style.display = "block";
+        tooltip.style.left = (ev.clientX - rect.left + 12) + "px";
+        tooltip.style.top  = (ev.clientY - rect.top  - 20) + "px";
+      } else {
+        tooltip.style.display = "none";
+      }
+    } else {
+      tooltip.style.display = "none";
+    }
   }
 });
 canvas.addEventListener("mouseleave", () => tooltip.style.display = "none");
@@ -1270,13 +1469,31 @@ canvas.addEventListener("mouseup", (ev) => {
     const d = Math.hypot(e.x + 0.5 - mx, e.y + 0.5 - my);
     if (d < closestD) { closestD = d; closest = e; }
   });
-  trackedId = closest ? closest.id : null;
+  if (closest) {
+    trackedId = closest.id;
+    trackedBuildingId = null;
+  } else {
+    // Cherche un bâtiment proche
+    let closestB = null, closestBD = 1.2;
+    buildings.forEach(b => {
+      const d = Math.hypot(b.x + 0.5 - mx, b.y + 0.5 - my);
+      if (d < closestBD) { closestBD = d; closestB = b; }
+    });
+    trackedId = null;
+    trackedBuildingId = closestB ? closestB.id : null;
+    if (trackedBuildingId !== null) showBuildingPanel(closestB);
+    else hideBuildingPanel();
+  }
   drawAll();
 });
 
 // Escape pour annuler le suivi
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") trackedId = null;
+  if (ev.key === "Escape") {
+    trackedId = null;
+    trackedBuildingId = null;
+    hideBuildingPanel();
+  }
 });
 
 // ── Contrôles ─────────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ class State(str, Enum):
     RESTING       = "resting"
     SEEKING_WATER = "seeking_water"
     DRINKING      = "drinking"
+    EXPLORING     = "exploring"
     DEAD          = "dead"
 
 
@@ -151,7 +152,7 @@ SPECS: dict[EntityType, EntitySpec] = {
     EntityType.BOAR: EntitySpec(
         name="boar", color="#8B4513",
         is_predator=True, is_prey=False,
-        prey_types=[EntityType.CHICKEN, EntityType.SHEEP],
+        prey_types=[EntityType.SHEEP, EntityType.PIG],
         max_age=2000, hunger_rate=0.11, max_hunger=100,
         eat_amount=8, eat_meat=50, speed=1.2, vision=8,
         repro_hunger_min=35, repro_cooldown=140, gestation=50, litter_size=(1, 3),
@@ -161,26 +162,25 @@ SPECS: dict[EntityType, EntitySpec] = {
         name="chicken", color="#f39c12",
         is_predator=False, is_prey=True,
         prey_types=[],
-        max_age=1000, hunger_rate=0.07, max_hunger=100,
+        max_age=1200, hunger_rate=0.06, max_hunger=100,
         eat_amount=8, eat_meat=0, speed=0.7, vision=4,
-        repro_hunger_min=40, repro_cooldown=180, gestation=80, litter_size=(1, 2),
+        repro_hunger_min=45, repro_cooldown=70, gestation=40, litter_size=(2, 5),
         flee_distance=3,
     ),
     EntityType.HORNED_SHEEP: EntitySpec(
         name="horned_sheep", color="#c0a080",
         is_predator=False, is_prey=True,
         prey_types=[],
-        max_age=1800, hunger_rate=0.08, max_hunger=100,
+        max_age=1800, hunger_rate=0.07, max_hunger=100,
         eat_amount=18, eat_meat=0, speed=0.85, vision=6,
-        repro_hunger_min=45, repro_cooldown=220, gestation=80, litter_size=(1, 2),
+        repro_hunger_min=48, repro_cooldown=115, gestation=60, litter_size=(1, 2),
         flee_distance=5,
         can_herd=True,
     ),
     EntityType.HUMAN: EntitySpec(
         name="human", color="#f4d03f",
         is_predator=True, is_prey=False,
-        prey_types=[EntityType.CHICKEN, EntityType.SHEEP, EntityType.PIG,
-                    EntityType.HORNED_SHEEP, EntityType.HORSE],
+        prey_types=[EntityType.SHEEP, EntityType.PIG, EntityType.HORNED_SHEEP],
         max_age=3600, hunger_rate=0.08, max_hunger=100,
         eat_amount=20, eat_meat=40, speed=1.0, vision=8,
         repro_hunger_min=40, repro_cooldown=120, gestation=60, litter_size=(1, 2),
@@ -191,9 +191,9 @@ SPECS: dict[EntityType, EntitySpec] = {
         name="horse", color="#a0826d",
         is_predator=False, is_prey=False,
         prey_types=[],
-        max_age=3000, hunger_rate=0.09, max_hunger=100,
+        max_age=3000, hunger_rate=0.07, max_hunger=100,
         eat_amount=25, eat_meat=0, speed=1.5, vision=7,
-        repro_hunger_min=45, repro_cooldown=200, gestation=90, litter_size=(1, 1),
+        repro_hunger_min=48, repro_cooldown=120, gestation=65, litter_size=(1, 2),
         flee_distance=6,
         can_herd=True,
     ),
@@ -201,18 +201,18 @@ SPECS: dict[EntityType, EntitySpec] = {
         name="pig", color="#f1948a",
         is_predator=False, is_prey=True,
         prey_types=[],
-        max_age=1500, hunger_rate=0.07, max_hunger=100,
+        max_age=1500, hunger_rate=0.06, max_hunger=100,
         eat_amount=18, eat_meat=0, speed=0.8, vision=5,
-        repro_hunger_min=45, repro_cooldown=200, gestation=80, litter_size=(1, 3),
+        repro_hunger_min=48, repro_cooldown=95, gestation=55, litter_size=(2, 4),
         flee_distance=4,
     ),
     EntityType.SHEEP: EntitySpec(
         name="sheep", color="#ecf0f1",
         is_predator=False, is_prey=True,
         prey_types=[],
-        max_age=1800, hunger_rate=0.06, max_hunger=100,
+        max_age=1800, hunger_rate=0.055, max_hunger=100,
         eat_amount=15, eat_meat=0, speed=0.9, vision=6,
-        repro_hunger_min=50, repro_cooldown=200, gestation=80, litter_size=(1, 2),
+        repro_hunger_min=50, repro_cooldown=105, gestation=60, litter_size=(1, 3),
         flee_distance=5,
         can_herd=True,
     ),
@@ -220,9 +220,9 @@ SPECS: dict[EntityType, EntitySpec] = {
         name="fish", color="#5dade2",
         is_predator=False, is_prey=True,
         prey_types=[],
-        max_age=800, hunger_rate=0.05, max_hunger=100,
+        max_age=1400, hunger_rate=0.045, max_hunger=100,
         eat_amount=12, eat_meat=0, speed=0.8, vision=5,
-        repro_hunger_min=40, repro_cooldown=80, gestation=30, litter_size=(2, 4),
+        repro_hunger_min=45, repro_cooldown=45, gestation=20, litter_size=(2, 4),
         flee_distance=5,
         aquatic=True,
     ),
@@ -230,12 +230,12 @@ SPECS: dict[EntityType, EntitySpec] = {
         name="shark", color="#1a5276",
         is_predator=True, is_prey=False,
         prey_types=[EntityType.FISH],
-        max_age=6000, hunger_rate=0.04, max_hunger=100,
+        max_age=6000, hunger_rate=0.025, max_hunger=100,
         eat_amount=0, eat_meat=70, speed=1.2, vision=14,
-        repro_hunger_min=30, repro_cooldown=300, gestation=150, litter_size=(1, 2),
+        repro_hunger_min=30, repro_cooldown=200, gestation=100, litter_size=(1, 2),
         flee_distance=0,
         aquatic=True,
-        hitbox_width=1, hitbox_height=2,  # tiles (54,5) et (54,6) : colonne centrale, 2 lignes
+        hitbox_width=1, hitbox_height=2,
     ),
 }
 
@@ -260,6 +260,8 @@ class Entity:
         "building_ticks_left", "building_type",
         "tool", "pick", "sickle", "watering_can", "can_filled", "fishing_rod", "thirst",
         "_stuck_ticks", "chop_cooldown_left",
+        "_etype_str", "_sex_str",
+        "_build_target_x", "_build_target_y", "_build_target_type",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -295,6 +297,12 @@ class Entity:
         self.fishing_rod: Optional[str] = None   # None, "fishing_rod"
         self._stuck_ticks: int = 0               # ticks consécutifs sans déplacement
         self.chop_cooldown_left: int = 0
+        self._build_target_x: Optional[float] = None   # destination planifiée pour construction
+        self._build_target_y: Optional[float] = None
+        self._build_target_type: Optional[str] = None
+        # Strings pré-calculées pour éviter l'overhead enum.__get__ dans to_dict
+        self._etype_str: str = etype.value
+        self._sex_str:   str = self.sex.value
         # Traits héréditaires : valeurs de base ± 5% aléatoire
         self.traits = {
             "speed":       round(self.spec.speed       * random.uniform(0.95, 1.05), 4),
@@ -310,13 +318,13 @@ class Entity:
     def to_dict(self):
         d = {
             "id":    self.id,
-            "t":     self.etype.value,
+            "t":     self._etype_str,
             "x":     round(self.x, 1),
             "y":     round(self.y, 1),
             "s":     self.state.value,
             "h":     round(self.hunger, 1),
             "age":   int(self.age),
-            "sex":   self.sex.value,
+            "sex":   self._sex_str,
             "th":    round(self.thirst, 1),
         }
         if self.clan_id is not None:

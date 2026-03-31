@@ -3,6 +3,7 @@ BioSim — Moteur de simulation
 World: grille, biomes, ressources
 """
 import random
+from collections import deque
 import numpy as np
 from enum import IntEnum
 
@@ -99,6 +100,22 @@ class World:
             self._orig_grass_mask, FERTILITY_MAX, 0.0
         ).astype(np.float32)
         self._biome_changes: list = []   # changements GRASS↔DIRT ce tick
+        self._chop_changes: list = []    # arbres abattus ce tick [(x, y), ...]
+        self._mine_changes: list = []    # roches minées ce tick [(x, y), ...]
+        # ── Masques de navigation pré-calculés (invariants : l'eau ne bouge pas) ──
+        _water = (self.biome_grid == int(Biome.WATER)) | (self.biome_grid == int(Biome.RIVER))
+        self._walkable          = ~_water                     # bool, terrestres
+        self._aquatic_walkable  = _water                      # bool, aquatiques
+        # Tuiles terrestres adjacentes à l'eau (pour pénaliser nourriture en bord d'eau)
+        _nw = np.zeros((self.height, self.width), dtype=bool)
+        _nw[:-1, :] |= _water[1:, :]
+        _nw[1:,  :] |= _water[:-1, :]
+        _nw[:, :-1] |= _water[:, 1:]
+        _nw[:, 1:]  |= _water[:, :-1]
+        self._near_water = _nw & ~_water
+        # Carte BFS : pour chaque tuile terrestre, coordonnées de la tuile bord-eau la plus proche
+        # Permet à _find_water_spot de répondre en O(1) au lieu d'O(r²)
+        self._nearest_water_tile = self._build_nearest_water()
 
     def _fbm(self, X: np.ndarray, Y: np.ndarray,
              octaves: int = 6, base_freq: float = 0.025,
@@ -146,10 +163,10 @@ class World:
         mid  = land & (hmap >= 0.50) & (hmap < 0.65)
         high = land & (hmap >= 0.65)
 
-        grid[low  & (mmap < 0.62)] = Biome.GRASS
-        grid[low  & (mmap >= 0.62)] = Biome.FOREST
-        grid[mid  & (mmap < 0.55)] = Biome.DESERT
-        grid[mid  & (mmap >= 0.55)] = Biome.FOREST
+        grid[low  & (mmap < 0.80)] = Biome.GRASS
+        grid[low  & (mmap >= 0.80)] = Biome.FOREST
+        grid[mid  & (mmap < 0.74)] = Biome.DESERT
+        grid[mid  & (mmap >= 0.74)] = Biome.FOREST
         grid[high] = Biome.MOUNTAIN
 
         # Rivières depuis les hautes terres vers la mer
@@ -274,6 +291,7 @@ class World:
         if not self.is_choppable(x, y):
             return 0
         self.tree_grid[y, x] = max(0.0, float(self.tree_grid[y, x]) - 50.0)
+        self._chop_changes.append((x, y))
         return WOOD_PER_CHOP
 
     def get_stumps(self) -> list[list[int]]:
@@ -301,6 +319,7 @@ class World:
         if not self.is_mineable(x, y):
             return 0
         self.stone_grid[y, x] = max(0.0, float(self.stone_grid[y, x]) - 60.0)
+        self._mine_changes.append((x, y))
         return STONE_PER_MINE
 
     def get_depleted_rocks(self) -> list[list[int]]:
@@ -370,13 +389,36 @@ class World:
         self._biome_changes = []
         return ch
 
+    def _build_nearest_water(self) -> np.ndarray:
+        """BFS depuis toutes les tuiles terrestres bord-eau.
+        Retourne un tableau (H, W, 2) de dtype int16 : [x, y] de la tuile bord-eau la plus proche.
+        -1 = aucune trouvée (tuile enclavée sans accès à l'eau)."""
+        h, w = self.height, self.width
+        result = np.full((h, w, 2), -1, dtype=np.int16)
+        visited = np.zeros((h, w), dtype=bool)
+        dq: deque = deque()
+        # Initialiser le BFS depuis les tuiles terrestres adjacentes à l'eau
+        ys, xs = np.where(self._near_water)
+        for x, y in zip(xs.tolist(), ys.tolist()):
+            result[y, x] = [x, y]
+            visited[y, x] = True
+            dq.append((x, y, x, y))  # (current_x, current_y, target_x, target_y)
+        # Propagation 4-directions sur toutes les tuiles marchables terrestres
+        dirs = ((-1, 0), (1, 0), (0, -1), (0, 1))
+        while dq:
+            cx, cy, tx, ty = dq.popleft()
+            for dx, dy in dirs:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < h and not visited[ny, nx] and self._walkable[ny, nx]:
+                    result[ny, nx] = [tx, ty]
+                    visited[ny, nx] = True
+                    dq.append((nx, ny, tx, ty))
+        return result
+
     def is_walkable(self, x: int, y: int, aquatic: bool = False) -> bool:
         if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return False
-        b = self.biome_grid[y, x]
-        if aquatic:
-            return b in (Biome.WATER, Biome.RIVER)
-        return b not in (Biome.WATER, Biome.RIVER)
+        return bool(self._aquatic_walkable[y, x] if aquatic else self._walkable[y, x])
 
     def is_valid(self, x: int, y: int) -> bool:
         return 0 <= x < self.width and 0 <= y < self.height

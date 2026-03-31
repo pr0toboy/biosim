@@ -130,8 +130,8 @@ SEASON_NAMES = ["spring", "summer", "autumn", "winter"]
 SEASON_REGEN_MULT = {
     "spring": 1.6,
     "summer": 1.1,
-    "autumn": 0.6,
-    "winter": 0.10,
+    "autumn": 0.7,
+    "winter": 0.32,
 }
 
 def get_season(tick: int) -> str:
@@ -169,11 +169,11 @@ def _thirst_mult(temp_c: float) -> float:
         return max(0.5, 1.0 - (5.0 - temp_c) * 0.033)
     return 1.0
 
-# La reproduction n'est possible qu'au printemps et en été
+# La reproduction n'est possible qu'au printemps, été et automne (début)
 SEASON_REPRO_ALLOWED = {
     "spring": True,
     "summer": True,
-    "autumn": False,
+    "autumn": True,   # une dernière portée avant l'hiver
     "winter": False,
 }
 
@@ -231,6 +231,7 @@ def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "Wor
     nx = entity.x + (dx / d) * step
     ny = entity.y + (dy / d) * step
     aq = entity.spec.aquatic
+    ox, oy = entity.x, entity.y   # position avant mouvement
     moved = False
     if world.is_walkable(int(nx), int(ny), aq):
         entity.x = max(0, min(world.width  - 0.01, nx))
@@ -243,29 +244,36 @@ def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "Wor
         entity.y = max(0, min(world.height - 0.01, ny))
         moved = True
 
-    if moved:
+    # Micro-mouvement (< 0.01 tile/tick) : traité comme bloqué pour éviter les boucles
+    # de virgule flottante (ex : entité à x=42.999 glissant vers x=43.0 au rythme de 0.0001/tick)
+    really_moved = moved and ((entity.x - ox)**2 + (entity.y - oy)**2 >= 0.0001)
+    if really_moved:
         entity._stuck_ticks = 0
     else:
         entity._stuck_ticks += 1
-        if entity._stuck_ticks >= STUCK_TICKS_RESET:
-            # Cible inaccessible : reset + échappée aléatoire
-            entity.target_x = None
-            entity.target_y = None
-            entity._stuck_ticks = 0
-            dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
-            random.shuffle(dirs)
-            for ddx, ddy in dirs:
-                ex = max(0.0, min(world.width  - 0.01, entity.x + ddx))
-                ey = max(0.0, min(world.height - 0.01, entity.y + ddy))
-                if world.is_walkable(int(ex), int(ey), aq):
-                    entity.x, entity.y = ex, ey
-                    break
+    if entity._stuck_ticks >= STUCK_TICKS_RESET:
+        # Cible inaccessible : reset + annule chantier planifié + échappée aléatoire
+        entity.target_x = None
+        entity.target_y = None
+        entity._build_target_type = None
+        entity._build_target_x    = None
+        entity._build_target_y    = None
+        entity._stuck_ticks = 0
+        dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+        random.shuffle(dirs)
+        for ddx, ddy in dirs:
+            ex = max(0.0, min(world.width  - 0.01, entity.x + ddx))
+            ey = max(0.0, min(world.height - 0.01, entity.y + ddy))
+            if world.is_walkable(int(ex), int(ey), aq):
+                entity.x, entity.y = ex, ey
+                break
 
 
 def _random_walk(entity: Entity, world: "World"):
     """Déambule aléatoirement."""
-    if entity.target_x is None or (
-        _dist(entity.x, entity.y, entity.target_x, entity.target_y) < 0.5
+    tx, ty = entity.target_x, entity.target_y
+    if tx is None or (
+        (entity.x - tx)**2 + (entity.y - ty)**2 < 0.25
     ):
         entity.target_x = None
         entity.target_y = None
@@ -287,6 +295,8 @@ def _random_walk(entity: Entity, world: "World"):
 
 
 MAX_CARRY = 5          # bois max transportable par un humain
+MAX_WOOD_PER_HOUSE = 50  # bois max stocké par maison individuelle
+CLAN_WOOD_CAP = 100      # total bois clan → arrête de couper (laisse de la place aux autres tâches)
 MAX_PER_SPECIES = 200  # cap d'entités par espèce
 
 HERD_RADIUS = 8    # tuiles de détection des congénères
@@ -297,10 +307,14 @@ HERD_MIN    = 2    # membres min pour déclencher le comportement de troupeau
 def _herd_move(entity: Entity, all_entities: list[Entity], world: "World") -> bool:
     """Déplace vers le centroïde du troupeau proche. Retourne True si appliqué."""
     sx, sy, count = 0.0, 0.0, 0
+    herd_r_sq = HERD_RADIUS * HERD_RADIUS
+    ex, ey = entity.x, entity.y
+    etype = entity.etype
     for e in all_entities:
-        if e is entity or not e.alive or e.etype != entity.etype:
+        if e is entity or not e.alive or e.etype != etype:
             continue
-        if _dist(entity.x, entity.y, e.x, e.y) <= HERD_RADIUS:
+        dx = ex - e.x; dy = ey - e.y
+        if dx*dx + dy*dy <= herd_r_sq:
             sx += e.x
             sy += e.y
             count += 1
@@ -309,7 +323,8 @@ def _herd_move(entity: Entity, all_entities: list[Entity], world: "World") -> bo
     if count < HERD_MIN:
         return False
     cx, cy = sx / count, sy / count
-    if _dist(entity.x, entity.y, cx, cy) < 2.5:
+    dx = ex - cx; dy = ey - cy
+    if dx*dx + dy*dy < 6.25:
         # Déjà au cœur du troupeau → disperser activement
         angle = random.uniform(0, 2 * math.pi)
         spread_r = random.uniform(3, 7)
@@ -333,57 +348,63 @@ def _herd_move(entity: Entity, all_entities: list[Entity], world: "World") -> bo
 
 def _find_nearest(entity: Entity, entities: list[Entity],
                   etype: EntityType, max_dist: float) -> "Entity|None":
-    best, best_d = None, max_dist + 1
+    best, best_d_sq = None, max_dist * max_dist
+    ex, ey = entity.x, entity.y
     for e in entities:
         if e is entity or not e.alive or e.etype != etype:
             continue
-        d = _dist(entity.x, entity.y, e.x, e.y)
-        if d < best_d:
-            best_d = d
+        dx = ex - e.x; dy = ey - e.y
+        d_sq = dx*dx + dy*dy
+        if d_sq < best_d_sq:
+            best_d_sq = d_sq
             best = e
     return best
 
 
-def _find_predator_nearby(entity: Entity, entities: list[Entity]) -> "Entity|None":
+def _find_predator_nearby(entity: Entity, entities: list[Entity],
+                          predators: list = None,
+                          predator_grid: dict = None) -> "Entity|None":
     fd = entity.spec.flee_distance
-    for e in entities:
+    fd_sq = fd * fd
+    ex, ey = entity.x, entity.y
+    etype = entity.etype
+    # Grille spatiale : ne cherche que dans les cellules proches (8×8 tuiles)
+    if predator_grid is not None:
+        cx, cy = entity.ix >> 3, entity.iy >> 3
+        for gcx in range(cx - 1, cx + 2):
+            for gcy in range(cy - 1, cy + 2):
+                for e in predator_grid.get((gcx, gcy), ()):
+                    if not e.alive: continue
+                    if etype in e.spec.prey_types:
+                        dx = ex - e.x; dy = ey - e.y
+                        if dx*dx + dy*dy <= fd_sq:
+                            return e
+        return None
+    scan = predators if predators is not None else entities
+    for e in scan:
         if not e.alive:
             continue
-        if entity.etype in e.spec.prey_types:
-            if _dist(entity.x, entity.y, e.x, e.y) <= fd:
+        if etype in e.spec.prey_types:
+            dx = ex - e.x; dy = ey - e.y
+            if dx*dx + dy*dy <= fd_sq:
                 return e
     return None
 
 
 def _find_water_spot(entity: Entity, world: "World", max_r: int = 40) -> "tuple[float,float]|None":
-    """Trouve la tuile marchable adjacente à de l'eau la plus proche dans un rayon max_r."""
-    best_pos, best_d = None, float("inf")
+    """Trouve la tuile marchable adjacente à de l'eau la plus proche.
+    Utilise la carte BFS pré-calculée world._nearest_water_tile pour répondre en O(1)."""
     ex, ey = entity.ix, entity.iy
-    for r in range(1, max_r + 1):
-        found_this_ring = False
-        for dx in range(-r, r + 1):
-            for dy in (-r, r) if abs(dx) < r else range(-r, r + 1):
-                wx, wy = ex + dx, ey + dy
-                if not world.is_valid(wx, wy):
-                    continue
-                if int(world.biome_grid[wy, wx]) not in WATER_BIOMES:
-                    continue
-                # Cherche une tuile marchable adjacente à cette tuile d'eau
-                for adx, ady in ((-1,0),(1,0),(0,-1),(0,1)):
-                    lx, ly = wx + adx, wy + ady
-                    if world.is_valid(lx, ly) and world.is_walkable(lx, ly, entity.spec.aquatic):
-                        d = _dist(entity.x, entity.y, lx, ly)
-                        if d < best_d:
-                            best_d = d
-                            best_pos = (float(lx), float(ly))
-                            found_this_ring = True
-        if found_this_ring and best_d < r + 2:
-            break   # on a une bonne candidate à distance r, inutile de chercher plus loin
-    return best_pos
+    if not world.is_valid(ex, ey):
+        return None
+    pos = world._nearest_water_tile[ey, ex]
+    if int(pos[0]) >= 0:
+        return (float(pos[0]), float(pos[1]))
+    return None
 
 
 def _drink_or_seek_water(entity: Entity, world: "World", events: list[dict],
-                         buildings: list = None) -> bool:
+                         buildings: list = None, cb: dict = None) -> bool:
     """Essaie de boire si adjacent à de l'eau ou à un puit, sinon cherche et va vers la source.
     Retourne True si l'action soif a été traitée (l'entité ne doit pas faire autre chose)."""
     # Vérifie si une tuile adjacente est de l'eau
@@ -399,41 +420,44 @@ def _drink_or_seek_water(entity: Entity, world: "World", events: list[dict],
                 entity.target_y = None
                 return True
 
-    # Vérifie si un puit est adjacent
-    if buildings:
-        for b in buildings:
-            if b.btype == "well" and _dist(entity.x, entity.y, b.x, b.y) < 1.5:
-                entity.state = State.DRINKING
-                entity.thirst = max(0.0, entity.thirst - WELL_DRINK_AMOUNT)
-                entity.target_x = None
-                entity.target_y = None
-                return True
+    # Vérifie si un puit est adjacent (utilise l'index cb si disponible)
+    _wells = (cb.get("well", []) if cb is not None
+              else ([b for b in buildings if b.btype == "well"] if buildings else []))
+    ex, ey = entity.x, entity.y
+    for b in _wells:
+        dx = ex - b.x; dy = ey - b.y
+        if dx*dx + dy*dy < 2.25:
+            entity.state = State.DRINKING
+            entity.thirst = max(0.0, entity.thirst - WELL_DRINK_AMOUNT)
+            entity.target_x = None
+            entity.target_y = None
+            return True
 
     # Pas d'eau adjacente : cherche un puit proche d'abord, sinon une tuile eau
     entity.state = State.SEEKING_WATER
     # Invalider la cible si elle pointe vers une tuile non-marchable (ex: eau)
+    # Note : on laisse _move_toward gérer les blocages (STUCK_TICKS_RESET=25) — ne pas
+    # réinitialiser prématurément la cible sur _stuck_ticks, ce qui boucle à l'infini.
     if entity.target_x is not None:
         _tx, _ty = int(entity.target_x), int(entity.target_y)
         if (not world.is_valid(_tx, _ty)
                 or not world.is_walkable(_tx, _ty, entity.spec.aquatic)):
             entity.target_x = None
             entity.target_y = None
+            entity._stuck_ticks = 0
         else:
             _move_toward(entity, entity.target_x, entity.target_y,
                          entity.traits["speed"] * 1.2, world)
             return True
 
     # Puit du clan en priorité (évite les longs trajets jusqu'à la rivière)
-    if buildings and entity.clan_id is not None:
-        clan_wells = [b for b in buildings
-                      if b.btype == "well" and b.clan_id == entity.clan_id]
-        if clan_wells:
-            nearest = min(clan_wells, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
-            entity.target_x = float(nearest.x)
-            entity.target_y = float(nearest.y)
-            _move_toward(entity, entity.target_x, entity.target_y,
-                         entity.traits["speed"] * 1.2, world)
-            return True
+    if _wells:
+        nearest = min(_wells, key=lambda b: (ex - b.x)**2 + (ey - b.y)**2)
+        entity.target_x = float(nearest.x)
+        entity.target_y = float(nearest.y)
+        _move_toward(entity, entity.target_x, entity.target_y,
+                     entity.traits["speed"] * 1.2, world)
+        return True
 
     spot = _find_water_spot(entity, world)
     if spot:
@@ -449,17 +473,24 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 season: str = "spring", clans: dict = None,
                 buildings: list = None,
                 temp_c: float = 12.0, species_counts: dict = None,
-                raining: bool = False, heatwave: bool = False):
+                raining: bool = False, heatwave: bool = False,
+                clan_bldg: dict = None, predators: list = None,
+                predator_grid: dict = None):
+    """clan_bldg : {clan_id: {btype: [Building]}} pré-calculé dans step() pour éviter O(n²).
+    predators : liste pré-filtrée des prédateurs actifs pour _find_predator_nearby."""
     if not entity.alive:
         return
 
-    # Reset verrou de démarrage de construction (intra-tick uniquement)
+    # Reset du verrou intra-tick de construction
     entity.building_type = None
     # Décrémente cooldown de coupe
     if entity.chop_cooldown_left > 0:
         entity.chop_cooldown_left -= 1
 
     spec = entity.spec
+
+    # Index de bâtiments du clan (évite les list comprehensions répétées)
+    _cb = clan_bldg.get(entity.clan_id, {}) if clan_bldg and entity.clan_id is not None else {}
 
     # Sanity clamp : corrige la vitesse si elle a dévié hors de ±60% de la spec de base
     _spec_spd = entity.spec.speed
@@ -558,7 +589,8 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     births.append(baby)
                     births_same += 1
             events.append({"type": "birth", "etype": entity.etype.value,
-                           "count": n, "x": entity.ix, "y": entity.iy})
+                           "count": n, "x": entity.ix, "y": entity.iy,
+                           "clan": entity.clan_id})
         entity.state = State.RESTING
         return
 
@@ -566,7 +598,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
 
     # 1. Fuite (priorité max pour les proies)
     if spec.flee_distance > 0:
-        predator = _find_predator_nearby(entity, all_entities)
+        predator = _find_predator_nearby(entity, all_entities, predators, predator_grid)
         if predator:
             entity.state = State.FLEEING
             dx = entity.x - predator.x
@@ -592,12 +624,15 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
 
     # 2.5 Soif urgente (prioritaire sur la chasse)
     if not spec.aquatic and entity.thirst > 70:
-        if _drink_or_seek_water(entity, world, events, buildings):
+        if _drink_or_seek_water(entity, world, events, buildings, cb=_cb):
             return
 
     # 2. Chasse (prédateurs)
-    if spec.is_predator and entity.hunger > 35:
+    if spec.is_predator and entity.hunger > 55:
         for prey_type in spec.prey_types:
+            # Préserve les proies si leur population est trop basse
+            if (species_counts or {}).get(prey_type.value, 0) < 30:
+                continue
             prey = _find_nearest(entity, all_entities, prey_type, entity.traits["vision"])
             if prey:
                 entity.state  = State.HUNTING
@@ -639,16 +674,13 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
 
     # 3.0 Mange le pain au moulin (humains affamés, moulin adjacent avec du pain)
     if entity.spec.can_build and entity.clan_id is not None and entity.hunger > 35:
-        clan_mills = [b for b in (buildings or [])
-                      if b.clan_id == entity.clan_id and b.btype == "mill"]
+        clan_mills = _cb.get("mill", [])
         mill_adj = next((m for m in clan_mills
                          if m.bread > 0 and _dist(entity.x, entity.y, m.x, m.y) < 1.5), None)
         if mill_adj is not None:
             mill_adj.bread -= 1
             entity.hunger   = max(0.0, entity.hunger - MILL_BREAD_FOOD)
             entity.state    = State.EATING
-            events.append({"type": "eat_bread", "clan_id": entity.clan_id,
-                           "x": entity.ix, "y": entity.iy})
             return
         # Moulin avec pain mais pas adjacent → se déplace
         mill_ripe = next((m for m in clan_mills if m.bread > 0), None)
@@ -675,39 +707,47 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             return
         # Soif modérée interrompt la recherche de nourriture (mais pas le repas en cours)
         if not spec.aquatic and entity.thirst > 50:
-            if _drink_or_seek_water(entity, world, events, buildings):
+            if _drink_or_seek_water(entity, world, events, buildings, cb=_cb):
                 return
-        # Cherche une tuile avec de la nourriture dans son champ de vision
+        # Cherche une tuile avec de la nourriture dans son champ de vision (numpy)
         entity.state = State.SEEKING_FOOD
-        best_f, best_pos = -1, None
         r = int(entity.traits["vision"])
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                fx, fy = entity.ix + dx, entity.iy + dy
-                if world.is_valid(fx, fy) and world.is_walkable(fx, fy, spec.aquatic):
-                    f = world.get_food(fx, fy)
-                    # Pénalise les tuiles coincées contre l'eau pour les entités terrestres
-                    # (évite que tous s'agglutinent en ligne sur la rive)
-                    if not spec.aquatic and f > 0:
-                        for _wadx, _wady in ((-1,0),(1,0),(0,-1),(0,1)):
-                            _wfx, _wfy = fx + _wadx, fy + _wady
-                            if (world.is_valid(_wfx, _wfy)
-                                    and int(world.biome_grid[_wfy, _wfx]) in WATER_BIOMES):
-                                f *= 0.35
-                                break
-                    if f > best_f:
-                        best_f = f
-                        best_pos = (fx, fy)
-        if best_pos and best_f > 5:
-            entity.target_x = float(best_pos[0])
-            entity.target_y = float(best_pos[1])
+        ex_i, ey_i = entity.ix, entity.iy
+        x0 = max(0, ex_i - r); x1 = min(world.width,  ex_i + r + 1)
+        y0 = max(0, ey_i - r); y1 = min(world.height, ey_i + r + 1)
+        food_sub = world.food_grid[y0:y1, x0:x1].copy()
+        walk_mask = (world._aquatic_walkable if spec.aquatic else world._walkable)[y0:y1, x0:x1]
+        food_sub[~walk_mask] = 0.0
+        if not spec.aquatic:
+            food_sub[world._near_water[y0:y1, x0:x1]] *= 0.35
+        best_idx = int(np.argmax(food_sub))
+        best_f = float(food_sub.flat[best_idx])
+        if best_f > 5:
+            ly, lx = np.unravel_index(best_idx, food_sub.shape)
+            entity.target_x = float(x0 + int(lx))
+            entity.target_y = float(y0 + int(ly))
             _move_toward(entity, entity.target_x, entity.target_y,
                          _eff_speed, world)
             return
+        # Aucune nourriture dans le champ de vision → scan global (comme pour les arbres)
+        if not spec.aquatic:
+            _food_tiles = np.argwhere(world.food_grid > 8)
+            if len(_food_tiles):
+                _wk = world._walkable
+                _food_tiles = _food_tiles[_wk[_food_tiles[:, 0], _food_tiles[:, 1]]]
+            if len(_food_tiles):
+                _dists = (_food_tiles[:, 1] - entity.x)**2 + (_food_tiles[:, 0] - entity.y)**2
+                _best = _food_tiles[int(np.argmin(_dists))]
+                entity.target_x = float(_best[1])
+                entity.target_y = float(_best[0])
+                entity.state    = State.EXPLORING
+                _move_toward(entity, entity.target_x, entity.target_y,
+                             _eff_speed, world)
+                return
 
     # 3.7 Soif légère (après manger, avant bois/construction)
     if not spec.aquatic and entity.thirst > 35:
-        if _drink_or_seek_water(entity, world, events, buildings):
+        if _drink_or_seek_water(entity, world, events, buildings, cb=_cb):
             return
 
     # 3.8 Pêche (canne à pêche + affamé, après échec de la recherche de nourriture)
@@ -727,9 +767,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             entity.state = State.FISHING
             if random.random() < FISHING_CATCH_PROB:
                 entity.hunger = max(0.0, entity.hunger - FISHING_FOOD)
-                events.append({"type": "fish_catch",
-                               "clan_id": entity.clan_id,
-                               "x": entity.ix, "y": entity.iy})
+                pass  # fish_catch — événement interne silencieux
             return
         # Pas adjacent : chercher une berge accessible
         spot = _find_water_spot(entity, world)
@@ -744,58 +782,57 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
     if ((entity.spec.can_chop or entity.spec.can_mine)
             and (entity.wood > 0 or entity.stone > 0)
             and entity.clan_id is not None):
-        clan_houses = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "house"]
+        clan_houses = _cb.get("house", [])
         if clan_houses:
-            nearest = min(clan_houses, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
-            dist_to_house = _dist(entity.x, entity.y, nearest.x, nearest.y)
+            # Préfère une maison avec de la place libre; si tout est plein, jette le bois
+            _houses_with_space = [h for h in clan_houses if h.wood < MAX_WOOD_PER_HOUSE]
+            if not _houses_with_space:
+                entity.wood = 0   # tout plein → abandonne le bois, fait autre chose
+            else:
+                nearest = min(_houses_with_space, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
+            dist_to_house = _dist(entity.x, entity.y, nearest.x, nearest.y) if _houses_with_space else 999
             if dist_to_house < 1.5:
-                # Adjacent : dépose tout
-                nearest.wood  += entity.wood;  entity.wood  = 0
+                # Adjacent : dépose (bois capé, pierre non capée)
+                _wood_space = max(0, MAX_WOOD_PER_HOUSE - nearest.wood)
+                nearest.wood  += min(entity.wood, _wood_space)
+                entity.wood   = max(0, entity.wood - _wood_space)
                 nearest.stone += entity.stone; entity.stone = 0
                 # Fabrication d'outils (priorité : pioche bois > hache bois > pioche pierre > hache pierre)
                 if entity.pick is None and nearest.wood >= PICK_WOOD_COST:
                     nearest.wood -= PICK_WOOD_COST
                     entity.pick = "wood_pick"
                     events.append({"type": "craft_pick", "pick": "wood_pick",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.tool is None and nearest.wood >= AXE_CRAFT_COST:
                     nearest.wood -= AXE_CRAFT_COST
                     entity.tool = "axe"
                     events.append({"type": "craft_axe", "tool": "axe",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.pick == "wood_pick" and nearest.stone >= STONE_PICK_COST:
                     nearest.stone -= STONE_PICK_COST
                     entity.pick = "stone_pick"
                     events.append({"type": "craft_pick", "pick": "stone_pick",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.tool == "axe" and nearest.stone >= STONE_AXE_COST:
                     nearest.stone -= STONE_AXE_COST
                     entity.tool = "stone_axe"
                     events.append({"type": "craft_axe", "tool": "stone_axe",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.watering_can is None and nearest.wood >= WATERING_CAN_WOOD_COST:
                     nearest.wood -= WATERING_CAN_WOOD_COST
                     entity.watering_can = "watering_can"
                     events.append({"type": "craft_watering_can",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.sickle is None and nearest.stone >= SICKLE_STONE_COST:
                     nearest.stone -= SICKLE_STONE_COST
                     entity.sickle = "sickle"
                     events.append({"type": "craft_sickle",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
                 elif entity.fishing_rod is None and nearest.wood >= FISHING_ROD_WOOD_COST:
                     nearest.wood -= FISHING_ROD_WOOD_COST
                     entity.fishing_rod = "fishing_rod"
                     events.append({"type": "craft_fishing_rod",
-                                   "clan_id": entity.clan_id,
-                                   "x": entity.ix, "y": entity.iy})
+                                   "clan_id": entity.clan_id})
             elif entity.wood >= MAX_CARRY or entity.stone >= MAX_STONE_CARRY:
                 # Portée pleine → aller déposer
                 entity.state = State.WANDERING
@@ -806,11 +843,10 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 return
 
     # 4.1 Travailler sur un chantier en cours du clan (n'importe quel humain peut contribuer)
-    if entity.spec.can_build and entity.clan_id is not None and entity.hunger < 80:
-        clan_sites = [b for b in (buildings or [])
-                      if b.btype.startswith("site_")
-                      and b.clan_id == entity.clan_id
-                      and b.work_done < b.work_needed]
+    # Ne pas interrompre un humain qui se rend déjà sur son propre chantier planifié
+    if (entity.spec.can_build and entity.clan_id is not None and entity.hunger < 80
+            and entity._build_target_type is None):
+        clan_sites = [b for btl in [v for k, v in _cb.items() if k.startswith("site_")] for b in btl if b.work_done < b.work_needed]
         if clan_sites:
             near = min(clan_sites,
                        key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
@@ -836,9 +872,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
         repro_allowed = True
         if entity.spec.can_build and entity.clan_id is not None:
             base = BUILDING_SPECS["house"].pop_bonus
-            cap = max(3, sum(base * b.level
-                             for b in (buildings or [])
-                             if b.clan_id == entity.clan_id and b.btype == "house"))
+            cap = sum(base * b.level for b in _cb.get("house", []))
             clan_pop = sum(1 for e in all_entities
                            if e.alive and e.etype == EntityType.HUMAN
                            and e.clan_id == entity.clan_id)
@@ -863,27 +897,112 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 partner.repro_cooldown_left = spec.repro_cooldown
                 return
 
-    # 4.25 Démarre une construction (pas déjà en chantier, source de bois disponible)
+    # 4.24 Se déplacer vers le chantier planifié et le démarrer une fois sur place
+    if (entity.spec.can_build
+            and entity._build_target_type is not None
+            and entity.clan_id is not None):
+        btype_t = entity._build_target_type
+        btx = entity._build_target_x
+        bty = entity._build_target_y
+        bx_t = int(btx)
+        by_t = int(bty)
+        # Annuler si un chantier du même type existe déjà pour ce clan
+        existing_site = _cb.get(f"site_{btype_t}", [])
+        # Annuler aussi si l'emplacement est devenu invalide
+        if (existing_site
+                or not world.is_valid(bx_t, by_t)
+                or not world.is_walkable(bx_t, by_t)):
+            entity._build_target_type = None
+            entity._build_target_x    = None
+            entity._build_target_y    = None
+        elif _dist(entity.x, entity.y, btx, bty) < 1.5:
+            # Arrivé à l'emplacement : vérifier ressources et créer le chantier
+            bspec_t    = BUILDING_SPECS[btype_t]
+            clan_houses_t = _cb.get("house", [])
+            can_build_t   = False
+            # Éviter double déduction si un autre humain a émis le même start_site ce tick
+            already_this_tick = any(
+                ev.get("type") == "start_site"
+                and ev.get("btype") == btype_t
+                and ev.get("clan_id") == entity.clan_id
+                for ev in events
+            )
+            if not already_this_tick:
+                if btype_t == "house":
+                    if not clan_houses_t:
+                        if entity.wood >= bspec_t.first_cost:
+                            entity.wood -= bspec_t.first_cost
+                            can_build_t = True
+                    else:
+                        donor_t = max(clan_houses_t, key=lambda b: b.wood)
+                        if donor_t.wood >= bspec_t.wood_cost:
+                            donor_t.wood -= bspec_t.wood_cost
+                            can_build_t = True
+                elif btype_t in ("well", "mill"):
+                    dw = max(clan_houses_t, key=lambda b: b.wood)  if clan_houses_t else None
+                    ds = max(clan_houses_t, key=lambda b: b.stone) if clan_houses_t else None
+                    if (dw and ds
+                            and dw.wood  >= bspec_t.wood_cost
+                            and ds.stone >= bspec_t.stone_cost):
+                        dw.wood  -= bspec_t.wood_cost
+                        ds.stone -= bspec_t.stone_cost
+                        can_build_t = True
+            if can_build_t:
+                entity.building_type = btype_t
+                events.append({"type": "start_site", "btype": btype_t,
+                               "x": bx_t, "y": by_t,
+                               "clan_id": entity.clan_id,
+                               "work_needed": bspec_t.build_time})
+            entity._build_target_type = None
+            entity._build_target_x    = None
+            entity._build_target_y    = None
+            return
+        else:
+            # En chemin vers le chantier prévu
+            entity.state   = State.BUILDING
+            entity.target_x = btx
+            entity.target_y = bty
+            _move_toward(entity, btx, bty, _eff_speed, world)
+            return
+
+    # 4.25 Démarre une construction de maison (l'humain doit rejoindre l'emplacement)
     if (entity.spec.can_build
             and entity.clan_id is not None
             and entity.building_type is None
+            and entity._build_target_type is None
             and entity.hunger < 65
             and clans):
         clan = clans.get(entity.clan_id)
         if clan:
             bspec = BUILDING_SPECS["house"]
-            clan_houses = [b for b in (buildings or [])
-                           if b.clan_id == entity.clan_id and b.btype == "house"]
-            # Cap village atteint → pas de nouvelle construction
-            if bspec.max_per_clan == 0 or len(clan_houses) < bspec.max_per_clan:
+            clan_houses = _cb.get("house", [])
+            clan_sites_h = _cb.get("site_house", [])
+            # Cap atteint ou chantier déjà en cours → pas de nouvelle construction
+            _total_h = len(clan_houses) + len(clan_sites_h)
+            if bspec.max_per_clan == 0 or _total_h < bspec.max_per_clan:
+                # Ne construire que si la population dépasse ~70% de la capacité actuelle
+                _pop_cap_h = sum(bspec.pop_bonus * b.level for b in clan_houses)
+                _clan_pop_h = sum(1 for e in all_entities
+                                  if e.alive and e.etype == EntityType.HUMAN
+                                  and e.clan_id == entity.clan_id)
+                _need_house = (not clan_houses) or (_clan_pop_h >= _pop_cap_h * 0.70)
+                # Vérifier si un autre humain a déjà planifié une maison ce tick
+                already_planned = (
+                    _need_house and (
+                        any(ev.get("type") == "start_site" and ev.get("btype") == "house"
+                            and ev.get("clan_id") == entity.clan_id for ev in events)
+                        or any(e._build_target_type == "house" and e.clan_id == entity.clan_id
+                               for e in all_entities if e.alive and e is not entity)
+                    )
+                )
                 # Source de bois : porté (1re maison) ou stockage (maisons suivantes)
                 if not clan_houses:
-                    can_build_house = entity.wood >= bspec.first_cost
-                    wood_source = None      # None = prélève sur le porteur
+                    can_build_house = (_need_house and not already_planned
+                                       and entity.wood >= bspec.first_cost)
                 else:
                     donor = max(clan_houses, key=lambda b: b.wood)
-                    can_build_house = donor.wood >= bspec.wood_cost
-                    wood_source = donor     # prélève dans le stockage de cette maison
+                    can_build_house = (_need_house and not already_planned
+                                       and donor.wood >= bspec.wood_cost)
                 if can_build_house:
                     for _ in range(30):
                         angle = random.uniform(0, 2 * math.pi)
@@ -892,35 +1011,35 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                         by = int(clan.cy + math.sin(angle) * dist)
                         if not world.is_valid(bx, by) or not world.is_walkable(bx, by):
                             continue
-                        if any(_dist(bx, by, b.x, b.y) < bspec.min_dist for b in clan_houses):
+                        if any(_dist(bx, by, b.x, b.y) < bspec.min_dist
+                               for b in (buildings or [])
+                               if b.btype in ("house", "site_house")):
                             continue
-                        # Emplacement valide → prélève le bois et démarre le chantier
-                        if wood_source is None:
-                            entity.wood -= bspec.first_cost
-                        else:
-                            wood_source.wood -= bspec.wood_cost
-                        entity.building_type = "house"  # verrou intra-tick
-                        events.append({"type": "start_site", "btype": "house",
-                                       "x": bx, "y": by,
-                                       "clan_id": entity.clan_id,
-                                       "work_needed": bspec.build_time})
+                        # Emplacement valide → planifier le déplacement (pas de déduction bois encore)
+                        entity._build_target_type = "house"
+                        entity._build_target_x    = float(bx)
+                        entity._build_target_y    = float(by)
+                        entity.state   = State.BUILDING
+                        entity.target_x = float(bx)
+                        entity.target_y = float(by)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
                         return
 
     # 4.26 Construction d'un moulin (si le clan a ≥2 champs et pas encore de moulin)
     if (entity.spec.can_build
             and entity.clan_id is not None
             and entity.building_type is None
+            and entity._build_target_type is None
             and entity.hunger < 65
             and clans):
         bspec_m = BUILDING_SPECS["mill"]
-        clan_mills   = [b for b in (buildings or [])
-                        if b.clan_id == entity.clan_id and b.btype == "mill"]
-        clan_fields  = [b for b in (buildings or [])
-                        if b.clan_id == entity.clan_id and b.btype == "wheatfield"]
-        if (len(clan_fields) >= 2
+        clan_mills   = _cb.get("mill", [])
+        clan_sites_m = _cb.get("site_mill", [])
+        clan_fields  = _cb.get("wheatfield", [])
+        if (len(clan_fields) >= 2 and not clan_sites_m
                 and (bspec_m.max_per_clan == 0 or len(clan_mills) < bspec_m.max_per_clan)):
-            clan_houses = [b for b in (buildings or [])
-                           if b.clan_id == entity.clan_id and b.btype == "house"]
+            clan_houses = _cb.get("house", [])
             donor = max(clan_houses, key=lambda b: b.wood) if clan_houses else None
             donor_s = max(clan_houses, key=lambda b: b.stone) if clan_houses else None
             has_res = (donor and donor.wood >= bspec_m.wood_cost
@@ -944,18 +1063,18 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                                        "work_needed": bspec_m.build_time})
                         return
 
-    # 4.27 Construction d'un puit (si le clan a ≥1 maison et pas encore de puit nearby)
+    # 4.27 Construction d'un puit (si le clan a ≥1 maison et pas encore de puit)
     if (entity.spec.can_build
             and entity.clan_id is not None
             and entity.building_type is None
+            and entity._build_target_type is None
             and entity.hunger < 65
             and clans):
         bspec_well = BUILDING_SPECS["well"]
-        clan_wells  = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "well"]
-        clan_houses = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "house"]
-        if (len(clan_houses) >= 1
+        clan_wells  = _cb.get("well", [])
+        clan_sites_w = _cb.get("site_well", [])
+        clan_houses = _cb.get("house", [])
+        if (len(clan_houses) >= 2 and not clan_sites_w
                 and (bspec_well.max_per_clan == 0 or len(clan_wells) < bspec_well.max_per_clan)):
             donor   = max(clan_houses, key=lambda b: b.wood)   if clan_houses else None
             donor_s = max(clan_houses, key=lambda b: b.stone)  if clan_houses else None
@@ -963,7 +1082,13 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                        and donor_s and donor_s.stone >= bspec_well.stone_cost)
             if has_res:
                 clan = clans.get(entity.clan_id)
-                if clan:
+                already_planned_w = (
+                    any(ev.get("type") == "start_site" and ev.get("btype") == "well"
+                        and ev.get("clan_id") == entity.clan_id for ev in events)
+                    or any(e._build_target_type == "well" and e.clan_id == entity.clan_id
+                           for e in all_entities if e.alive and e is not entity)
+                )
+                if clan and not already_planned_w:
                     for _ in range(30):
                         angle = random.uniform(0, 2 * math.pi)
                         dist  = random.uniform(bspec_well.min_from_fire, bspec_well.max_from_fire)
@@ -974,21 +1099,21 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                         if any(_dist(wx, wy, b.x, b.y) < bspec_well.min_dist
                                for b in (buildings or []) if b.btype == "well"):
                             continue
-                        donor.wood    -= bspec_well.wood_cost
-                        donor_s.stone -= bspec_well.stone_cost
-                        entity.building_type = "well"
-                        events.append({"type": "start_site", "btype": "well",
-                                       "x": wx, "y": wy,
-                                       "clan_id": entity.clan_id,
-                                       "work_needed": bspec_well.build_time})
+                        # Planifier le déplacement (la déduction des ressources se fait à l'arrivée)
+                        entity._build_target_type = "well"
+                        entity._build_target_x    = float(wx)
+                        entity._build_target_y    = float(wy)
+                        entity.state   = State.BUILDING
+                        entity.target_x = float(wx)
+                        entity.target_y = float(wy)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
                         return
 
     # 4.3a Récolte : champ mûr (priorité élevée : affamé OU adjacent à un champ mûr)
     if entity.spec.can_build and entity.clan_id is not None:
-        clan_fields = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "wheatfield"]
-        clan_mills  = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "mill"]
+        clan_fields = _cb.get("wheatfield", [])
+        clan_mills  = _cb.get("mill", [])
         ripe_adj = next((b for b in clan_fields
                          if b.stage >= 4 and _dist(entity.x, entity.y, b.x, b.y) < 1.5), None)
         if ripe_adj is not None:
@@ -999,13 +1124,9 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             mill_dst = next((m for m in clan_mills if m.wheat < MILL_MAX_BREAD * 2), None)
             if mill_dst is not None:
                 mill_dst.wheat += 1
-                events.append({"type": "harvest_wheat", "clan_id": entity.clan_id,
-                               "x": ripe_adj.x, "y": ripe_adj.y, "to_mill": True})
             else:
                 food = WHEAT_HARVEST_FOOD + (SICKLE_HARVEST_BONUS if entity.sickle else 0.0)
                 entity.hunger = max(0.0, entity.hunger - food)
-                events.append({"type": "harvest_wheat", "clan_id": entity.clan_id,
-                               "x": ripe_adj.x, "y": ripe_adj.y})
             return
         # Chercher un champ mûr si affamé
         if entity.hunger > WHEAT_HUNGER_THRESH:
@@ -1021,10 +1142,8 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
     # 4.3b/c Entretien des champs : arrosage + plantation (quand reposé et non trop affamé)
     if (entity.spec.can_build and entity.clan_id is not None
             and entity.hunger < WHEAT_WORK_THRESH):
-        clan_fields = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "wheatfield"]
-        clan_mills  = [b for b in (buildings or [])
-                       if b.clan_id == entity.clan_id and b.btype == "mill"]
+        clan_fields = _cb.get("wheatfield", [])
+        clan_mills  = _cb.get("mill", [])
 
         # 4.3b Arrosage (si possède l'arrosoir)
         if entity.watering_can is not None:
@@ -1037,8 +1156,6 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     entity.state    = State.FARMING
                     entity.can_filled = False
                     dry.watered_ticks = WATERED_TICKS
-                    events.append({"type": "water_wheat", "clan_id": entity.clan_id,
-                                   "x": dry.x, "y": dry.y})
                     return
                 # Se déplacer vers le champ le plus sec
                 dry_far = next((b for b in clan_fields
@@ -1052,8 +1169,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     return
             else:
                 # Arrosoir vide → chercher de l'eau : puit du clan d'abord, sinon tuile eau
-                clan_wells = [b for b in (buildings or [])
-                              if b.btype == "well" and b.clan_id == entity.clan_id]
+                clan_wells = _cb.get("well", [])
                 near_well = next((b for b in clan_wells
                                   if _dist(entity.x, entity.y, b.x, b.y) < 1.5), None)
                 if near_well is not None:
@@ -1112,7 +1228,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     fy = int(clan.cy + math.sin(angle) * dist)
                     if (not world.is_valid(fx, fy)
                             or not world.is_walkable(fx, fy)
-                            or world.biome_grid[fy, fx] != int(Biome.GRASS)):
+                            or world.biome_grid[fy, fx] not in (int(Biome.GRASS), int(Biome.DIRT))):
                         continue
                     if any(_dist(fx, fy, b.x, b.y) < bspec_w.min_dist for b in clan_fields):
                         continue
@@ -1124,8 +1240,13 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     return
 
     # 4.5 Coupe du bois (l'humain doit être SUR la tuile forêt pour couper)
+    # Arrête de couper si le total de bois du clan dépasse le seuil global
+    _clan_houses_wood = _cb.get("house", [])
+    _total_clan_wood = sum(b.wood for b in _clan_houses_wood)
+    _wood_full = bool(_clan_houses_wood) and _total_clan_wood >= CLAN_WOOD_CAP
     if (entity.spec.can_chop and entity.wood < MAX_CARRY
-            and entity.hunger < 70 and entity.chop_cooldown_left == 0):
+            and entity.hunger < 70 and entity.chop_cooldown_left == 0
+            and not _wood_full):
         # Coupe si debout sur une tuile d'arbre debout
         if world.is_choppable(entity.ix, entity.iy):
             entity.state = State.CHOPPING
@@ -1136,19 +1257,21 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 wood += AXE_BONUS
             entity.wood = min(MAX_CARRY, entity.wood + wood)
             entity.chop_cooldown_left = CHOP_COOLDOWN
-            events.append({"type": "chop", "x": entity.ix, "y": entity.iy})
             return
-        # Arbre dans le champ de vision → se déplace vers le plus proche
-        r = max(int(entity.traits["vision"]), 10)
-        best_tree, best_d = None, float("inf")
-        for vdx in range(-r, r + 1):
-            for vdy in range(-r, r + 1):
-                tx, ty = entity.ix + vdx, entity.iy + vdy
-                if world.is_choppable(tx, ty):
-                    d = _dist(entity.x, entity.y, tx, ty)
-                    if d < best_d:
-                        best_d = d
-                        best_tree = (tx, ty)
+        # Arbre dans le champ de vision → se déplace vers le plus proche (numpy)
+        r = int(entity.traits["vision"])
+        ex_i, ey_i = entity.ix, entity.iy
+        x0 = max(0, ex_i - r); x1 = min(world.width,  ex_i + r + 1)
+        y0 = max(0, ey_i - r); y1 = min(world.height, ey_i + r + 1)
+        chop_sub = (world._forest_mask[y0:y1, x0:x1]
+                    & (world.tree_grid[y0:y1, x0:x1] >= TREE_STUMP_THRESHOLD))
+        _ys, _xs = np.where(chop_sub)
+        best_tree = None
+        if len(_xs):
+            abs_xs = _xs + x0; abs_ys = _ys + y0
+            dists_sq = (abs_xs - entity.x)**2 + (abs_ys - entity.y)**2
+            idx = int(np.argmin(dists_sq))
+            best_tree = (int(abs_xs[idx]), int(abs_ys[idx]))
         if best_tree:
             entity.state = State.CHOPPING
             entity.target_x = float(best_tree[0])
@@ -1156,6 +1279,25 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             _move_toward(entity, entity.target_x, entity.target_y,
                          _eff_speed, world)
             return
+        # Aucun arbre visible → chercher la forêt la plus proche sur toute la map
+        # (important pour les clans éloignés de la forêt)
+        _need_wood = (
+            entity.wood < MAX_CARRY
+            and (not _clan_houses_wood or entity.wood < 2)
+        )
+        if _need_wood:
+            forest_tiles = np.argwhere(
+                world._forest_mask & (world.tree_grid >= TREE_STUMP_THRESHOLD)
+            )
+            if len(forest_tiles):
+                dists = (forest_tiles[:, 1] - entity.x)**2 + (forest_tiles[:, 0] - entity.y)**2
+                best = forest_tiles[int(np.argmin(dists))]
+                entity.state = State.CHOPPING
+                entity.target_x = float(best[1])
+                entity.target_y = float(best[0])
+                _move_toward(entity, entity.target_x, entity.target_y,
+                             _eff_speed, world)
+                return
 
     # 4.6 Mine la pierre (entités avec can_mine + pioche, si portée non pleine et pas trop affamées)
     if (entity.spec.can_mine
@@ -1174,19 +1316,21 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     if entity.pick == "stone_pick":
                         stone += STONE_PICK_BONUS
                     entity.stone = min(MAX_STONE_CARRY, entity.stone + stone)
-                    events.append({"type": "mine", "x": tx, "y": ty})
                     return
-        # Roche dans le champ de vision → se déplace vers la plus proche
-        r = max(int(entity.traits["vision"]), 12)
-        best_rock, best_d = None, float("inf")
-        for vdx in range(-r, r + 1):
-            for vdy in range(-r, r + 1):
-                tx, ty = entity.ix + vdx, entity.iy + vdy
-                if world.is_mineable(tx, ty):
-                    d = _dist(entity.x, entity.y, tx, ty)
-                    if d < best_d:
-                        best_d = d
-                        best_rock = (tx, ty)
+        # Roche dans le champ de vision → se déplace vers la plus proche (numpy)
+        r = int(entity.traits["vision"])
+        ex_i, ey_i = entity.ix, entity.iy
+        x0 = max(0, ex_i - r); x1 = min(world.width,  ex_i + r + 1)
+        y0 = max(0, ey_i - r); y1 = min(world.height, ey_i + r + 1)
+        mine_sub = (world._mountain_mask[y0:y1, x0:x1]
+                    & (world.stone_grid[y0:y1, x0:x1] >= STONE_STUMP_THRESHOLD))
+        _ys, _xs = np.where(mine_sub)
+        best_rock = None
+        if len(_xs):
+            abs_xs = _xs + x0; abs_ys = _ys + y0
+            dists_sq = (abs_xs - entity.x)**2 + (abs_ys - entity.y)**2
+            idx = int(np.argmin(dists_sq))
+            best_rock = (int(abs_xs[idx]), int(abs_ys[idx]))
         if best_rock:
             entity.state = State.MINING
             entity.target_x = float(best_rock[0])
@@ -1195,18 +1339,42 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                          _eff_speed * 0.8, world)
             return
 
-    # 4.7 Exploration du territoire (humain reposé : étend les frontières du clan)
+    # 4.65 Continuation d'une exploration longue distance déjà engagée
     if (entity.etype == EntityType.HUMAN
             and entity.clan_id is not None
-            and entity.hunger < 40
-            and entity.thirst < 30
             and clans
-            and random.random() < 0.18):
+            and entity.hunger < 68
+            and entity.thirst < 58
+            and entity.target_x is not None):
+        clan = clans.get(entity.clan_id)
+        if clan and _dist(clan.cx, clan.cy, entity.target_x, entity.target_y) > 75:
+            entity.state = State.EXPLORING
+            _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+            return
+
+    # 4.7 Exploration (humain sans tâche urgente : explore loin du clan)
+    if (entity.etype == EntityType.HUMAN
+            and entity.clan_id is not None
+            and entity.hunger < 65
+            and entity.thirst < 55
+            and clans
+            and random.random() < 0.45):
         clan = clans.get(entity.clan_id)
         if clan:
+            # Vérifie si la zone locale du clan est vide de ressources
+            _cx_i, _cy_i = int(clan.cx), int(clan.cy)
+            _r_loc = 30
+            _x0l = max(0, _cx_i - _r_loc); _x1l = min(world.width,  _cx_i + _r_loc)
+            _y0l = max(0, _cy_i - _r_loc); _y1l = min(world.height, _cy_i + _r_loc)
+            _local_food  = float(world.food_grid[_y0l:_y1l, _x0l:_x1l].max())
+            _local_trees = bool(world._forest_mask[_y0l:_y1l, _x0l:_x1l].any())
+            _zone_vide   = _local_food < 5 and not _local_trees
+            # Zone vide → exploration forcée; sinon 8 % de chance
+            far_explore = _zone_vide or random.random() < 0.08
+            dist_range  = (80, 200) if far_explore else (20, 70)
             for _ in range(12):
                 angle = random.uniform(0, 2 * math.pi)
-                dist  = random.uniform(35, 80)
+                dist  = random.uniform(*dist_range)
                 tx = int(clan.cx + math.cos(angle) * dist)
                 ty = int(clan.cy + math.sin(angle) * dist)
                 tx = max(0, min(world.width  - 1, tx))
@@ -1214,7 +1382,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 if world.is_walkable(tx, ty):
                     entity.target_x = float(tx)
                     entity.target_y = float(ty)
-                    entity.state = State.WANDERING
+                    entity.state = State.EXPLORING if far_explore else State.WANDERING
                     _move_toward(entity, entity.target_x, entity.target_y,
                                  _eff_speed, world)
                     return
@@ -1232,8 +1400,8 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                  or _dist(entity.x, entity.y, entity.target_x, entity.target_y) < 0.5)):
         clan = clans.get(entity.clan_id)
         if clan:
-            # Plus reposé → explore plus loin autour du campfire
-            wander_r = 40 if (entity.hunger < 40 or entity.thirst > 45) else 22
+            # Affamé/assoiffé → reste proche; reposé → explore loin
+            wander_r = 18 if (entity.hunger > 55 or entity.thirst > 55) else 50
             for _ in range(8):
                 tx = clan.cx + random.uniform(-wander_r, wander_r)
                 ty = clan.cy + random.uniform(-wander_r, wander_r)
@@ -1283,14 +1451,14 @@ class Simulation:
         """Spawn initial des entités sur des cases marchables."""
         # Animaux : placement aléatoire (les humains sont gérés séparément par clan)
         defaults = {
-            EntityType.BOAR:         25,
+            EntityType.BOAR:         10,
             EntityType.CHICKEN:      30,
-            EntityType.HORNED_SHEEP: 15,
-            EntityType.HORSE:        10,
+            EntityType.HORNED_SHEEP: 20,
+            EntityType.HORSE:        16,
             EntityType.PIG:          30,
             EntityType.SHEEP:        30,
-            EntityType.FISH:         30,
-            EntityType.SHARK:        5,
+            EntityType.FISH:         55,
+            EntityType.SHARK:        3,
         }
         counts = counts or defaults
         for etype, n in counts.items():
@@ -1305,17 +1473,37 @@ class Simulation:
 
         # ── Placement des clans : 4 emplacements bien espacés sur terrain marchable ──
         MIN_CAMPFIRE_DIST = min(self.world.width, self.world.height) // (N_CLANS + 1)
+        FOREST_SEARCH_R   = 25   # rayon max pour trouver une forêt proche du campfire
+
+        def _has_forest_nearby(x, y, r=FOREST_SEARCH_R):
+            x0 = max(0, x - r); x1 = min(self.world.width,  x + r + 1)
+            y0 = max(0, y - r); y1 = min(self.world.height, y + r + 1)
+            return bool((self.world.biome_grid[y0:y1, x0:x1] == int(Biome.FOREST)).any())
+
         clan_positions: list[tuple[int, int]] = []
-        for _ in range(8000):
+        for _ in range(12000):
             x = random.randint(10, self.world.width  - 10)
             y = random.randint(10, self.world.height - 10)
             if not self.world.is_walkable(x, y):
+                continue
+            if not _has_forest_nearby(x, y):
                 continue
             if all(_dist(x, y, cx, cy) >= MIN_CAMPFIRE_DIST for cx, cy in clan_positions):
                 clan_positions.append((x, y))
             if len(clan_positions) == N_CLANS:
                 break
-        # Fallback : compléter sans contrainte de distance si la map est serrée
+        # Fallback : compléter sans contrainte de distance mais avec forêt
+        if len(clan_positions) < N_CLANS:
+            for _ in range(8000):
+                x = random.randint(10, self.world.width  - 10)
+                y = random.randint(10, self.world.height - 10)
+                if (self.world.is_walkable(x, y)
+                        and _has_forest_nearby(x, y)
+                        and (x, y) not in clan_positions):
+                    clan_positions.append((x, y))
+                if len(clan_positions) == N_CLANS:
+                    break
+        # Dernier recours : sans contrainte de forêt (évite le crash)
         if len(clan_positions) < N_CLANS:
             for _ in range(5000):
                 x = random.randint(10, self.world.width  - 10)
@@ -1347,8 +1535,8 @@ class Simulation:
                     if self.world.is_walkable(int(mx), int(my)):
                         member = spawn(EntityType.HUMAN, mx, my, sex=sex)
                         member.clan_id = cid
-                        member.hunger  = random.uniform(10, 30)
-                        member.age     = SPECS[EntityType.HUMAN].max_age * random.uniform(0.1, 0.3)
+                        member.hunger  = random.uniform(5, 75)
+                        member.age     = SPECS[EntityType.HUMAN].max_age * random.uniform(0.1, 0.35)
                         self.entities.append(member)
                         break
 
@@ -1428,10 +1616,33 @@ class Simulation:
             if e.alive:
                 species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) + 1
 
+        # Index bâtiments par clan pour éviter O(n_humains × n_bâtiments) dans tick_entity
+        clan_bldg: dict = {}
+        for _b in self.buildings:
+            _cid = _b.clan_id
+            if _cid not in clan_bldg:
+                clan_bldg[_cid] = {}
+            if _b.btype not in clan_bldg[_cid]:
+                clan_bldg[_cid][_b.btype] = []
+            clan_bldg[_cid][_b.btype].append(_b)
+
+        # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
+        active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
+
+        # Grille spatiale des prédateurs (cellule 8×8 tuiles) pour accélérer la détection
+        _GCELL = 8
+        predator_grid: dict = {}
+        for _p in active_predators:
+            _key = (_p.ix >> 3, _p.iy >> 3)
+            if _key not in predator_grid:
+                predator_grid[_key] = []
+            predator_grid[_key].append(_p)
+
         for e in self.entities:
             tick_entity(e, self.world, self.entities, births, tick_events,
                         self.tick_count, season, clans_dict, self.buildings,
-                        temp_c, species_counts, self.raining, self.heatwave)
+                        temp_c, species_counts, self.raining, self.heatwave,
+                        clan_bldg, active_predators, predator_grid)
 
         # Traiter les constructions (dédoublonnage intra-tick inclus)
         new_this_tick: list[Building] = []
@@ -1536,8 +1747,6 @@ class Simulation:
                 b.wheat      -= MILL_BREAD_COST_WHEAT
                 b.bread      += 1
                 b.mill_ticks  = 0
-                tick_events.append({"type": "bake_bread", "clan_id": b.clan_id,
-                                    "x": b.x, "y": b.y})
 
         # Croissance des champs de blé (×2 si arrosé, +1 bonus si pluie)
         for b in self.buildings:
@@ -1593,6 +1802,12 @@ class Simulation:
                 continue
             clan_houses = [x for x in self.buildings
                            if x.clan_id == b.clan_id and x.btype == "house"]
+            # Pour upgrader une maison L2, le feu de camp doit être L2 d'abord
+            if b.btype == "house":
+                clan_fire = next((x for x in self.buildings
+                                  if x.clan_id == b.clan_id and x.btype == "campfire"), None)
+                if clan_fire is None or clan_fire.level < 2:
+                    continue
             total_wood  = sum(x.wood  for x in clan_houses)
             total_stone = sum(x.stone for x in clan_houses)
             if total_wood < bspec.upgrade_wood or total_stone < bspec.upgrade_stone:
@@ -1637,12 +1852,13 @@ class Simulation:
         if len(self.stats_history) > 300:
             self.stats_history = self.stats_history[-300:]
 
-        # Arbres abattus / roches minées ce tick
-        for ev in tick_events:
-            if ev["type"] == "chop":
-                tree_changes.append({"x": ev["x"], "y": ev["y"], "stump": True})
-            elif ev["type"] == "mine":
-                rock_changes.append({"x": ev["x"], "y": ev["y"], "depleted": True})
+        # Arbres abattus et roches minées ce tick (collectés depuis world)
+        for _cx, _cy in self.world._chop_changes:
+            tree_changes.append({"x": _cx, "y": _cy, "stump": True})
+        for _cx, _cy in self.world._mine_changes:
+            rock_changes.append({"x": _cx, "y": _cy, "depleted": True})
+        self.world._chop_changes.clear()
+        self.world._mine_changes.clear()
 
         return {
             "tick":         self.tick_count,
