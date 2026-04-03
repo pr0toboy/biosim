@@ -391,8 +391,9 @@ class World:
 
     def _build_nearest_water(self) -> np.ndarray:
         """BFS depuis toutes les tuiles terrestres bord-eau.
-        Retourne un tableau (H, W, 2) de dtype int16 : [x, y] de la tuile bord-eau la plus proche.
-        -1 = aucune trouvée (tuile enclavée sans accès à l'eau)."""
+        Retourne un flow field (H, W, 2) de dtype int16 : [x, y] du PREMIER PAS vers l'eau.
+        Chaque case stocke son parent BFS (le voisin plus proche de l'eau d'un cran).
+        Les tuiles bord-eau pointent vers elles-mêmes.  -1 = pas d'eau accessible."""
         h, w = self.height, self.width
         result = np.full((h, w, 2), -1, dtype=np.int16)
         visited = np.zeros((h, w), dtype=bool)
@@ -400,19 +401,19 @@ class World:
         # Initialiser le BFS depuis les tuiles terrestres adjacentes à l'eau
         ys, xs = np.where(self._near_water)
         for x, y in zip(xs.tolist(), ys.tolist()):
-            result[y, x] = [x, y]
+            result[y, x] = [x, y]   # déjà au bord : premier pas = soi-même
             visited[y, x] = True
-            dq.append((x, y, x, y))  # (current_x, current_y, target_x, target_y)
+            dq.append((x, y))
         # Propagation 4-directions sur toutes les tuiles marchables terrestres
         dirs = ((-1, 0), (1, 0), (0, -1), (0, 1))
         while dq:
-            cx, cy, tx, ty = dq.popleft()
+            cx, cy = dq.popleft()
             for dx, dy in dirs:
                 nx, ny = cx + dx, cy + dy
                 if 0 <= nx < w and 0 <= ny < h and not visited[ny, nx] and self._walkable[ny, nx]:
-                    result[ny, nx] = [tx, ty]
+                    result[ny, nx] = [cx, cy]  # premier pas depuis (nx,ny) = revenir vers (cx,cy)
                     visited[ny, nx] = True
-                    dq.append((nx, ny, tx, ty))
+                    dq.append((nx, ny))
         return result
 
     def is_walkable(self, x: int, y: int, aquatic: bool = False) -> bool:

@@ -392,8 +392,9 @@ def _find_predator_nearby(entity: Entity, entities: list[Entity],
 
 
 def _find_water_spot(entity: Entity, world: "World", max_r: int = 40) -> "tuple[float,float]|None":
-    """Trouve la tuile marchable adjacente à de l'eau la plus proche.
-    Utilise la carte BFS pré-calculée world._nearest_water_tile pour répondre en O(1)."""
+    """Retourne le prochain pas (flow field) vers la tuile bord-eau la plus proche.
+    L'entité appelle cette fonction à chaque tick : elle suit le flow field case par case,
+    sans jamais tenter de traverser l'eau en ligne droite."""
     ex, ey = entity.ix, entity.iy
     if not world.is_valid(ex, ey):
         return None
@@ -433,24 +434,10 @@ def _drink_or_seek_water(entity: Entity, world: "World", events: list[dict],
             entity.target_y = None
             return True
 
-    # Pas d'eau adjacente : cherche un puit proche d'abord, sinon une tuile eau
+    # Pas d'eau adjacente : cherche un puit proche d'abord, sinon suit le flow field
     entity.state = State.SEEKING_WATER
-    # Invalider la cible si elle pointe vers une tuile non-marchable (ex: eau)
-    # Note : on laisse _move_toward gérer les blocages (STUCK_TICKS_RESET=25) — ne pas
-    # réinitialiser prématurément la cible sur _stuck_ticks, ce qui boucle à l'infini.
-    if entity.target_x is not None:
-        _tx, _ty = int(entity.target_x), int(entity.target_y)
-        if (not world.is_valid(_tx, _ty)
-                or not world.is_walkable(_tx, _ty, entity.spec.aquatic)):
-            entity.target_x = None
-            entity.target_y = None
-            entity._stuck_ticks = 0
-        else:
-            _move_toward(entity, entity.target_x, entity.target_y,
-                         entity.traits["speed"] * 1.2, world)
-            return True
 
-    # Puit du clan en priorité (évite les longs trajets jusqu'à la rivière)
+    # Puit du clan en priorité (cible fixe jusqu'à arrivée)
     if _wells:
         nearest = min(_wells, key=lambda b: (ex - b.x)**2 + (ey - b.y)**2)
         entity.target_x = float(nearest.x)
@@ -459,6 +446,8 @@ def _drink_or_seek_water(entity: Entity, world: "World", events: list[dict],
                      entity.traits["speed"] * 1.2, world)
         return True
 
+    # Flow field : recalcule le prochain pas à chaque tick depuis la position actuelle.
+    # L'entité avance case par case sans jamais tenter de traverser l'eau en droite ligne.
     spot = _find_water_spot(entity, world)
     if spot:
         entity.target_x, entity.target_y = spot
@@ -906,12 +895,19 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
         bty = entity._build_target_y
         bx_t = int(btx)
         by_t = int(bty)
-        # Annuler si un chantier du même type existe déjà pour ce clan
-        existing_site = _cb.get(f"site_{btype_t}", [])
-        # Annuler aussi si l'emplacement est devenu invalide
-        if (existing_site
-                or not world.is_valid(bx_t, by_t)
-                or not world.is_walkable(bx_t, by_t)):
+        # Pour le champ de blé (multiples permis), annuler seulement si la case est prise ou invalide
+        # Pour les autres types (unique en cours), annuler si n'importe quel chantier de ce type existe
+        if btype_t == "wheatfield":
+            existing_site = _cb.get("site_wheatfield", [])
+            should_cancel = (any(s.x == bx_t and s.y == by_t for s in existing_site)
+                             or not world.is_valid(bx_t, by_t)
+                             or not world.is_walkable(bx_t, by_t))
+        else:
+            existing_site = _cb.get(f"site_{btype_t}", [])
+            should_cancel = (bool(existing_site)
+                             or not world.is_valid(bx_t, by_t)
+                             or not world.is_walkable(bx_t, by_t))
+        if should_cancel:
             entity._build_target_type = None
             entity._build_target_x    = None
             entity._build_target_y    = None
@@ -947,6 +943,8 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                         dw.wood  -= bspec_t.wood_cost
                         ds.stone -= bspec_t.stone_cost
                         can_build_t = True
+                elif btype_t == "wheatfield":
+                    can_build_t = True  # pas de coût en ressources
             if can_build_t:
                 entity.building_type = btype_t
                 events.append({"type": "start_site", "btype": btype_t,
@@ -1046,22 +1044,29 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                        and donor_s and donor_s.stone >= bspec_m.stone_cost)
             if has_res:
                 # Placement adjacent à un champ de blé existant
-                for field in clan_fields:
-                    for ddx, ddy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,-1),(-1,1),(1,1)]:
-                        mx, my = field.x + ddx, field.y + ddy
-                        if not world.is_valid(mx, my) or not world.is_walkable(mx, my):
-                            continue
-                        if any(_dist(mx, my, b.x, b.y) < bspec_m.min_dist
-                               for b in (buildings or []) if b.btype == "mill"):
-                            continue
-                        donor.wood   -= bspec_m.wood_cost
-                        donor_s.stone -= bspec_m.stone_cost
-                        entity.building_type = "mill"
-                        events.append({"type": "start_site", "btype": "mill",
-                                       "x": mx, "y": my,
-                                       "clan_id": entity.clan_id,
-                                       "work_needed": bspec_m.build_time})
-                        return
+                already_planned_m = any(
+                    e._build_target_type == "mill" and e.clan_id == entity.clan_id
+                    for e in all_entities if e.alive and e is not entity
+                )
+                if not already_planned_m:
+                    for field in clan_fields:
+                        for ddx, ddy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,-1),(-1,1),(1,1)]:
+                            mx, my = field.x + ddx, field.y + ddy
+                            if not world.is_valid(mx, my) or not world.is_walkable(mx, my):
+                                continue
+                            if any(_dist(mx, my, b.x, b.y) < bspec_m.min_dist
+                                   for b in (buildings or []) if b.btype == "mill"):
+                                continue
+                            # Planifier le déplacement (ressources déduites à l'arrivée)
+                            entity._build_target_type = "mill"
+                            entity._build_target_x    = float(mx)
+                            entity._build_target_y    = float(my)
+                            entity.state   = State.BUILDING
+                            entity.target_x = float(mx)
+                            entity.target_y = float(my)
+                            _move_toward(entity, entity.target_x, entity.target_y,
+                                         _eff_speed, world)
+                            return
 
     # 4.27 Construction d'un puit (si le clan a ≥1 maison et pas encore de puit)
     if (entity.spec.can_build
@@ -1216,11 +1221,20 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
 
         # 4.3c Plantation : si le clan peut encore planter
         bspec_w = BUILDING_SPECS["wheatfield"]
+        clan_sites_wf = _cb.get("site_wheatfield", [])
+        _total_wf = len(clan_fields) + len(clan_sites_wf)
         if (entity.building_type is None
-                and (bspec_w.max_per_clan == 0 or len(clan_fields) < bspec_w.max_per_clan)
+                and entity._build_target_type is None
+                and (bspec_w.max_per_clan == 0 or _total_wf < bspec_w.max_per_clan)
                 and clans):
             clan = clans.get(entity.clan_id)
-            if clan:
+            already_planned_wf = (
+                any(ev.get("type") == "start_site" and ev.get("btype") == "wheatfield"
+                    and ev.get("clan_id") == entity.clan_id for ev in events)
+                or any(e._build_target_type == "wheatfield" and e.clan_id == entity.clan_id
+                       for e in all_entities if e.alive and e is not entity)
+            )
+            if clan and not already_planned_wf:
                 for _ in range(30):
                     angle = random.uniform(0, 2 * math.pi)
                     dist  = random.uniform(bspec_w.min_from_fire, bspec_w.max_from_fire)
@@ -1232,11 +1246,14 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                         continue
                     if any(_dist(fx, fy, b.x, b.y) < bspec_w.min_dist for b in clan_fields):
                         continue
-                    entity.building_type = "wheatfield"
-                    events.append({"type": "start_site", "btype": "wheatfield",
-                                   "x": fx, "y": fy,
-                                   "clan_id": entity.clan_id,
-                                   "work_needed": bspec_w.build_time})
+                    # Emplacement valide → planifier le déplacement
+                    entity._build_target_type = "wheatfield"
+                    entity._build_target_x    = float(fx)
+                    entity._build_target_y    = float(fy)
+                    entity.state   = State.BUILDING
+                    entity.target_x = float(fx)
+                    entity.target_y = float(fy)
+                    _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
                     return
 
     # 4.5 Coupe du bois (l'humain doit être SUR la tuile forêt pour couper)
