@@ -269,6 +269,36 @@ def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "Wor
                 break
 
 
+def _teleport_to_nearest_walkable(entity: Entity, world: "World") -> bool:
+    """Renvoie une entité échouée sur une tuile non-franchissable (terrestre sur
+    l'eau, ou l'inverse) vers la tuile franchissable la PLUS PROCHE. Balaie des
+    anneaux complets à rayon croissant : l'ancien filet ne testait que 8 offsets
+    par anneau, ratant la plupart des tuiles → une entité pouvait rester coincée
+    à vie. Sort au premier anneau contenant une tuile valide. Retourne True si
+    déplacée."""
+    aq = entity.spec.aquatic
+    ix, iy = entity.ix, entity.iy
+    best = None
+    best_d = None
+    for r in range(1, max(world.width, world.height) + 1):
+        x_lo, x_hi, y_lo, y_hi = ix - r, ix + r, iy - r, iy + r
+        # rangées haute/basse de l'anneau, puis colonnes gauche/droite (hors coins)
+        candidates = [(nx, y) for nx in range(x_lo, x_hi + 1) for y in (y_lo, y_hi)]
+        candidates += [(x, ny) for ny in range(y_lo + 1, y_hi) for x in (x_lo, x_hi)]
+        for nx, ny in candidates:
+            if world.is_valid(nx, ny) and world.is_walkable(nx, ny, aq):
+                d = (nx - ix) ** 2 + (ny - iy) ** 2
+                if best_d is None or d < best_d:
+                    best, best_d = (nx, ny), d
+        if best is not None:      # premier anneau non vide = le plus proche
+            entity.x = float(best[0]) + 0.5
+            entity.y = float(best[1]) + 0.5
+            entity.target_x = None
+            entity.target_y = None
+            return True
+    return False
+
+
 def _random_walk(entity: Entity, world: "World"):
     """Déambule aléatoirement."""
     tx, ty = entity.target_x, entity.target_y
@@ -517,19 +547,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
 
     # ── Récupération si sur une tuile non-franchissable (eau) ─────────────
     if not world.is_walkable(entity.ix, entity.iy, spec.aquatic):
-        for r in range(1, 10):
-            for ddx, ddy in [(-r,0),(r,0),(0,-r),(0,r),
-                              (-r,-r),(r,-r),(-r,r),(r,r)]:
-                nx, ny = entity.ix + ddx, entity.iy + ddy
-                if world.is_valid(nx, ny) and world.is_walkable(nx, ny, spec.aquatic):
-                    entity.x = float(nx) + 0.5
-                    entity.y = float(ny) + 0.5
-                    entity.target_x = None
-                    entity.target_y = None
-                    break
-            else:
-                continue
-            break
+        _teleport_to_nearest_walkable(entity, world)
 
     # ── Vieillissement, faim & soif ───────────────────────────────────────
     entity.age    += 1
@@ -715,7 +733,11 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
     # 3. Mange ou cherche de la nourriture
     if spec.eat_amount > 0 and entity.hunger > 30:
         food = world.get_food(entity.ix, entity.iy)
-        if food >= 5:
+        # Un non-aquatique ne broute PAS le plancton d'une tuile d'eau : sinon une
+        # entité échouée mange sur place et survit indéfiniment (l'état ne se dénoue
+        # jamais). Sur l'eau → pas de repas → elle finit par mourir de faim.
+        _tile_edible = spec.aquatic or world.is_walkable(entity.ix, entity.iy, False)
+        if food >= 5 and _tile_edible:
             entity.state = State.EATING
             consumed = world.consume_food(entity.ix, entity.iy, spec.eat_amount)
             entity.hunger = max(0, entity.hunger - consumed * 1.5)

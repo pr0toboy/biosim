@@ -105,6 +105,34 @@ def test_deposit_no_crash_when_houses_full():
     print("  test_deposit_no_crash_when_houses_full OK (pierre déposée, pas de crash)")
 
 
+def _find_water_tile(world):
+    for y in range(world.height):
+        for x in range(world.width):
+            if not world.is_walkable(x, y, aquatic=False):
+                return x, y
+    raise RuntimeError("aucune tuile d'eau")
+
+
+def test_water_stranded_entity_rescued():
+    """Régression bug de l'eau : une entité terrestre posée sur une tuile d'eau
+    doit être renvoyée sur la terre ferme en UN tick (filet _teleport_to_nearest_
+    walkable à anneaux complets). Auparavant elle pouvait rester coincée à vie."""
+    world = World(width=90, height=70, seed=12345)
+    wx, wy = _find_water_tile(world)
+
+    sheep = spawn(EntityType.SHEEP, wx + 0.5, wy + 0.5)
+    sheep.hunger = 20.0
+    sheep.thirst = 10.0
+    assert not world.is_walkable(sheep.ix, sheep.iy, False), "départ censé être sur l'eau"
+
+    tick_entity(sheep, world, [sheep], [], [], tick=1, species_counts={"sheep": 10})
+
+    assert sheep.alive, "le mouton ne devrait pas être mort en 1 tick"
+    assert world.is_walkable(sheep.ix, sheep.iy, False), (
+        f"mouton toujours sur une tuile non-terrestre après 1 tick: ({sheep.ix},{sheep.iy})")
+    print("  test_water_stranded_entity_rescued OK (échoué secouru en 1 tick)")
+
+
 def test_preservation_live_counter():
     """Régression M1 : à 30 proies, 2 prédateurs affamés dans le même tick ne
     doivent PAS tuer 2 proies (le compteur vivant passe sous 30 après le 1er kill
@@ -134,7 +162,8 @@ def test_preservation_live_counter():
 if __name__ == "__main__":
     failures = 0
     for fn in (test_deposit_no_crash_when_houses_full,
-               test_preservation_live_counter, test_smoke_runs):
+               test_preservation_live_counter, test_water_stranded_entity_rescued,
+               test_smoke_runs):
         try:
             fn()
         except Exception as e:
