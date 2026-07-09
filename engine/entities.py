@@ -129,13 +129,8 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         min_dist=4, min_from_fire=3, max_from_fire=16,
         max_per_clan=2,
     ),
-    "storehouse": BuildingSpec(
-        btype="storehouse",
-        wood_cost=10, stone_cost=4,
-        build_time=45, pop_bonus=0,
-        min_dist=3, min_from_fire=2, max_from_fire=12,
-        max_per_clan=1,
-    ),
+    # (storehouse retiré le 2026-07-09 : spec jamais planifiée/construite par l'IA —
+    #  les ressources vivent dans les maisons, pas de stockage centralisé.)
     "well": BuildingSpec(
         btype="well",
         wood_cost=8, stone_cost=6,

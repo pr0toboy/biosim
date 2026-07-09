@@ -297,14 +297,14 @@
 // ── Config espèces ──────────────────────────────────────────────────────────
 const SPECIES = {
   boar:         { label: "Sangliers",  art: "un sanglier",  pl: "sangliers",  color: "#8B4513", base: [1.2,  8, 0.11 ] },
-  chicken:      { label: "Poules",     art: "une poule",    pl: "poules",     color: "#f39c12", base: [0.7,  4, 0.07 ] },
-  horned_sheep: { label: "Boucs",      art: "un bouc",      pl: "boucs",      color: "#c0a080", base: [0.85, 6, 0.08 ] },
-  horse:        { label: "Chevaux",    art: "un cheval",    pl: "chevaux",    color: "#a0826d", base: [1.5,  7, 0.09 ] },
-  human:        { label: "Humains",    art: "un humain",    pl: "humains",    color: "#f4d03f", base: [1.0,  8, 0.08 ] },
-  pig:          { label: "Cochons",    art: "un cochon",    pl: "cochons",    color: "#f1948a", base: [0.8,  5, 0.07 ] },
-  sheep:        { label: "Moutons",    art: "un mouton",    pl: "moutons",    color: "#ecf0f1", base: [0.9,  6, 0.06 ] },
-  fish:         { label: "Poissons",   art: "un poisson",   pl: "poissons",   color: "#5dade2", base: [0.8,  5, 0.05 ] },
-  shark:        { label: "Requins",    art: "un requin",    pl: "requins",    color: "#1a5276", base: [1.2, 14, 0.04 ] },
+  chicken:      { label: "Poules",     art: "une poule",    pl: "poules",     color: "#f39c12", base: [0.7,  4, 0.06  ] },
+  horned_sheep: { label: "Boucs",      art: "un bouc",      pl: "boucs",      color: "#c0a080", base: [0.85, 6, 0.07  ] },
+  horse:        { label: "Chevaux",    art: "un cheval",    pl: "chevaux",    color: "#a0826d", base: [1.5,  7, 0.07  ] },
+  human:        { label: "Humains",    art: "un humain",    pl: "humains",    color: "#f4d03f", base: [1.0,  8, 0.08  ] },
+  pig:          { label: "Cochons",    art: "un cochon",    pl: "cochons",    color: "#f1948a", base: [0.8,  5, 0.06  ] },
+  sheep:        { label: "Moutons",    art: "un mouton",    pl: "moutons",    color: "#ecf0f1", base: [0.9,  6, 0.055 ] },
+  fish:         { label: "Poissons",   art: "un poisson",   pl: "poissons",   color: "#5dade2", base: [0.8,  5, 0.045 ] },
+  shark:        { label: "Requins",    art: "un requin",    pl: "requins",    color: "#1a5276", base: [1.2, 14, 0.025 ] },
 };
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
@@ -1076,7 +1076,6 @@ const SILENT_EVENTS = new Set([
   "craft_sickle", "craft_fishing_rod",
   // plantation trop fréquente
   "build_wheatfield",
-  "build_storehouse",
 ]);
 
 function addEvent(ev) {

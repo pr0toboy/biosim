@@ -304,13 +304,18 @@ CHOP_COOLDOWN = 12  # ticks minimum entre deux coupes d'arbre
 HERD_MIN    = 2    # membres min pour déclencher le comportement de troupeau
 
 
-def _herd_move(entity: Entity, all_entities: list[Entity], world: "World") -> bool:
-    """Déplace vers le centroïde du troupeau proche. Retourne True si appliqué."""
+def _herd_move(entity: Entity, all_entities: list[Entity], world: "World",
+               entity_grid: dict = None) -> bool:
+    """Déplace vers le centroïde du troupeau proche. Retourne True si appliqué.
+    `entity_grid` (grille spatiale) évite de scanner toutes les entités ; fallback
+    sur `all_entities` si non fourni (ex. tests unitaires)."""
     sx, sy, count = 0.0, 0.0, 0
     herd_r_sq = HERD_RADIUS * HERD_RADIUS
     ex, ey = entity.x, entity.y
     etype = entity.etype
-    for e in all_entities:
+    _scan = (_grid_neighbors(entity_grid, entity.ix, entity.iy, reach=1)
+             if entity_grid is not None else all_entities)
+    for e in _scan:
         if e is entity or not e.alive or e.etype != etype:
             continue
         dx = ex - e.x; dy = ey - e.y
@@ -391,6 +396,16 @@ def _find_predator_nearby(entity: Entity, entities: list[Entity],
     return None
 
 
+def _grid_neighbors(grid: dict, ix: int, iy: int, reach: int = 1):
+    """Itère les entités des cellules 8×8 autour de (ix,iy), sur `reach` cellules de
+    rayon (3×3 par défaut ≈ 24×24 tuiles). Sert aux voisinages (troupeau, répulsion)
+    pour éviter les scans O(n) par entité → complexité ~O(n) au lieu de O(n²)."""
+    cx, cy = ix >> 3, iy >> 3
+    for gcx in range(cx - reach, cx + reach + 1):
+        for gcy in range(cy - reach, cy + reach + 1):
+            yield from grid.get((gcx, gcy), ())
+
+
 def _find_water_spot(entity: Entity, world: "World", max_r: int = 40) -> "tuple[float,float]|None":
     """Retourne le prochain pas (flow field) vers la tuile bord-eau la plus proche.
     L'entité appelle cette fonction à chaque tick : elle suit le flow field case par case,
@@ -464,9 +479,10 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 temp_c: float = 12.0, species_counts: dict = None,
                 raining: bool = False, heatwave: bool = False,
                 clan_bldg: dict = None, predators: list = None,
-                predator_grid: dict = None):
+                predator_grid: dict = None, entity_grid: dict = None):
     """clan_bldg : {clan_id: {btype: [Building]}} pré-calculé dans step() pour éviter O(n²).
-    predators : liste pré-filtrée des prédateurs actifs pour _find_predator_nearby."""
+    predators : liste pré-filtrée des prédateurs actifs pour _find_predator_nearby.
+    entity_grid : grille spatiale 8×8 de toutes les entités (troupeau, répulsion)."""
     if not entity.alive:
         return
 
@@ -481,10 +497,18 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
     # Index de bâtiments du clan (évite les list comprehensions répétées)
     _cb = clan_bldg.get(entity.clan_id, {}) if clan_bldg and entity.clan_id is not None else {}
 
-    # Sanity clamp : corrige la vitesse si elle a dévié hors de ±60% de la spec de base
+    # Sanity clamp : recadre un trait qui a dérivé hors de [0.4×, 1.8×] de la spec
+    # de base (la mutation héréditaire ±5%/naissance n'a qu'un plancher → sans borne
+    # haute, vision et hunger_rate dérivent sur des milliers de générations).
     _spec_spd = entity.spec.speed
     if not (_spec_spd * 0.40 <= entity.traits["speed"] <= _spec_spd * 1.80):
         entity.traits["speed"] = round(_spec_spd * random.uniform(0.95, 1.05), 4)
+    _spec_vis = entity.spec.vision
+    if not (max(1, _spec_vis * 0.40) <= entity.traits["vision"] <= _spec_vis * 1.80):
+        entity.traits["vision"] = max(1, round(_spec_vis * random.uniform(0.95, 1.05)))
+    _spec_hr = entity.spec.hunger_rate
+    if not (_spec_hr * 0.40 <= entity.traits["hunger_rate"] <= _spec_hr * 1.80):
+        entity.traits["hunger_rate"] = round(_spec_hr * random.uniform(0.95, 1.05), 5)
 
     # Vitesse effective ce tick (pluie ralentit les humains sans modifier le trait permanent)
     _eff_speed = (round(entity.traits["speed"] * RAIN_SPEED_MULT, 4)
@@ -632,6 +656,11 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                 if _dist_hitbox(entity, prey) < catch_r:
                     prey.alive = False
                     prey.state = State.DEAD
+                    # Compteur vivant : décrémente pour que la préservation d'espèce
+                    # (<30) et le cap de naissances voient les morts DE CE TICK →
+                    # empêche N prédateurs de tuer N proies sous le seuil en un tick.
+                    if species_counts is not None:
+                        species_counts[prey.etype.value] = species_counts.get(prey.etype.value, 0) - 1
                     entity.hunger = max(0, entity.hunger - spec.eat_meat)
                     events.append({"type": "kill",
                                    "predator": entity.etype.value,
@@ -654,6 +683,8 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     if d < 0.8:
                         e.alive = False
                         e.state = State.DEAD
+                        if species_counts is not None:
+                            species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
                         entity.hunger = max(0, entity.hunger - 25)
                         events.append({"type": "clan_fight",
                                        "attacker_clan": entity.clan_id,
@@ -773,13 +804,17 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
             and entity.clan_id is not None):
         clan_houses = _cb.get("house", [])
         if clan_houses:
-            # Préfère une maison avec de la place libre; si tout est plein, jette le bois
+            # Cible : pour déposer du bois, préférer une maison avec de la place ;
+            # pour la pierre (non capée) ou si tout est plein, n'importe quelle maison.
+            # `nearest` est TOUJOURS défini ici (l'ancien code laissait un chemin où il
+            # ne l'était pas → UnboundLocalError quand un mineur portait de la pierre et
+            # que toutes les maisons étaient pleines de bois).
             _houses_with_space = [h for h in clan_houses if h.wood < MAX_WOOD_PER_HOUSE]
-            if not _houses_with_space:
-                entity.wood = 0   # tout plein → abandonne le bois, fait autre chose
-            else:
-                nearest = min(_houses_with_space, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
-            dist_to_house = _dist(entity.x, entity.y, nearest.x, nearest.y) if _houses_with_space else 999
+            if entity.wood > 0 and not _houses_with_space:
+                entity.wood = 0   # bois plein partout → on l'abandonne (comportement d'origine)
+            _target_pool = _houses_with_space if (entity.wood > 0 and _houses_with_space) else clan_houses
+            nearest = min(_target_pool, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
+            dist_to_house = _dist(entity.x, entity.y, nearest.x, nearest.y)
             if dist_to_house < 1.5:
                 # Adjacent : dépose (bois capé, pierre non capée)
                 _wood_space = max(0, MAX_WOOD_PER_HOUSE - nearest.wood)
@@ -1408,7 +1443,7 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
     entity.state = State.WANDERING
     # Troupeau : espèces avec can_herd suivent le groupe s'il y en a un proche
     if entity.spec.can_herd:
-        if _herd_move(entity, all_entities, world):
+        if _herd_move(entity, all_entities, world, entity_grid):
             return
     # Humains : biais vers le territoire du clan (rayon proportionnel à la satiété)
     if (entity.etype == EntityType.HUMAN and entity.clan_id is not None
@@ -1430,7 +1465,9 @@ def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
                     break
     # Répulsion légère entre humains trop proches (évite l'entassement)
     if entity.etype == EntityType.HUMAN:
-        for other in all_entities:
+        _rep_scan = (_grid_neighbors(entity_grid, entity.ix, entity.iy, reach=1)
+                     if entity_grid is not None else all_entities)
+        for other in _rep_scan:
             if other is entity or not other.alive or other.etype != EntityType.HUMAN:
                 continue
             d = _dist(entity.x, entity.y, other.x, other.y)
@@ -1647,7 +1684,6 @@ class Simulation:
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
 
         # Grille spatiale des prédateurs (cellule 8×8 tuiles) pour accélérer la détection
-        _GCELL = 8
         predator_grid: dict = {}
         for _p in active_predators:
             _key = (_p.ix >> 3, _p.iy >> 3)
@@ -1655,67 +1691,31 @@ class Simulation:
                 predator_grid[_key] = []
             predator_grid[_key].append(_p)
 
+        # Grille spatiale générique de TOUTES les entités vivantes (troupeau, répulsion)
+        # → évite les scans O(n) par entité (poste CPU n°1 : _herd_move).
+        entity_grid: dict = {}
+        for _e in self.entities:
+            if not _e.alive:
+                continue
+            _ek = (_e.ix >> 3, _e.iy >> 3)
+            if _ek not in entity_grid:
+                entity_grid[_ek] = []
+            entity_grid[_ek].append(_e)
+
         for e in self.entities:
             tick_entity(e, self.world, self.entities, births, tick_events,
                         self.tick_count, season, clans_dict, self.buildings,
                         temp_c, species_counts, self.raining, self.heatwave,
-                        clan_bldg, active_predators, predator_grid)
+                        clan_bldg, active_predators, predator_grid, entity_grid)
 
         # Traiter les constructions (dédoublonnage intra-tick inclus)
         new_this_tick: list[Building] = []
+        # NB : la CRÉATION des vrais bâtiments passe uniquement par la promotion
+        # des chantiers `site_*` (plus bas). Les anciens handlers `build_*` ici
+        # étaient du code mort (les events `build_*` ne sont émis qu'À la promotion,
+        # après cette boucle) — retirés le 2026-07-09.
         for ev in tick_events:
-            if ev["type"] == "build_house":
-                all_houses = self.buildings + new_this_tick
-                too_close = any(
-                    _dist(ev["x"], ev["y"], b.x, b.y) < BUILDING_SPECS["house"].min_dist
-                    for b in all_houses
-                )
-                if not too_close:
-                    b = Building(id=self._next_building_id,
-                                 clan_id=ev["clan_id"], x=ev["x"], y=ev["y"],
-                                 btype="house")
-                    self._next_building_id += 1
-                    new_this_tick.append(b)
-            elif ev["type"] == "build_wheatfield":
-                all_fields = [b for b in self.buildings + new_this_tick
-                              if b.btype == "wheatfield" and b.clan_id == ev["clan_id"]]
-                too_close = any(
-                    _dist(ev["x"], ev["y"], b.x, b.y) < BUILDING_SPECS["wheatfield"].min_dist
-                    for b in all_fields
-                )
-                if not too_close:
-                    b = Building(id=self._next_building_id,
-                                 clan_id=ev["clan_id"], x=ev["x"], y=ev["y"],
-                                 btype="wheatfield", stage=1, grow_ticks=0)
-                    self._next_building_id += 1
-                    new_this_tick.append(b)
-            elif ev["type"] == "build_mill":
-                all_mills = [b for b in self.buildings + new_this_tick
-                             if b.btype == "mill" and b.clan_id == ev["clan_id"]]
-                too_close = any(
-                    _dist(ev["x"], ev["y"], b.x, b.y) < BUILDING_SPECS["mill"].min_dist
-                    for b in all_mills
-                )
-                if not too_close:
-                    b = Building(id=self._next_building_id,
-                                 clan_id=ev["clan_id"], x=ev["x"], y=ev["y"],
-                                 btype="mill")
-                    self._next_building_id += 1
-                    new_this_tick.append(b)
-            elif ev["type"] == "build_well":
-                all_wells = [b for b in self.buildings + new_this_tick
-                             if b.btype == "well"]
-                too_close = any(
-                    _dist(ev["x"], ev["y"], b.x, b.y) < BUILDING_SPECS["well"].min_dist
-                    for b in all_wells
-                )
-                if not too_close:
-                    b = Building(id=self._next_building_id,
-                                 clan_id=ev["clan_id"], x=ev["x"], y=ev["y"],
-                                 btype="well")
-                    self._next_building_id += 1
-                    new_this_tick.append(b)
-            elif ev["type"] == "start_site":
+            if ev["type"] == "start_site":
                 btype = ev["btype"]
                 # Ne créer le site que s'il n'en existe pas déjà un du même type pour ce clan
                 already = any(

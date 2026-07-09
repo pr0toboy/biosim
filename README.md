@@ -8,7 +8,7 @@ Simulateur de vie style WorldBox, observable en temps réel via navigateur. Aucu
 
 ## Fonctionnalités
 
-- Monde procédural (fBm + domain warping) avec 6 biomes : eau, rivière, prairie, forêt, désert, montagne
+- Monde procédural (fBm + domain warping), 7 types de terrain : eau, rivière, prairie, forêt, désert, montagne, + terre battue (*dirt* = herbe surpâturée, état dérivé)
 - 9 espèces animales avec traits héréditaires et mutations
 - 4 clans humains avec bâtiments, outils, agriculture et pêche
 - Saisons, météo dynamique (pluie, orages, canicules, incendies de forêt)
@@ -44,13 +44,26 @@ Contenu :
 [Unit]
 Description=BioSim Life Simulator
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 User=<your_user>
 WorkingDirectory=/home/<your_user>/biosim
+# Écoute sur 0.0.0.0:8080 par défaut. Pour restreindre au loopback (derrière un
+# reverse-proxy / tunnel), décommenter :
+# Environment=BIOSIM_HOST=127.0.0.1
+# Environment=BIOSIM_PORT=8080
 ExecStart=/usr/bin/python3 server.py
 Restart=always
 RestartSec=5
+# Durcissement (defense-in-depth : pas de RCE connue, mais le service tourne sous
+# ton compte → on limite ce qu'il peut atteindre si une vuln émergeait) :
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
@@ -83,7 +96,7 @@ biosim/
 ## Monde
 
 - Taille : **220×160 tuiles**
-- 6 biomes : eau, rivière, prairie, forêt, désert, montagne
+- 7 types de terrain : eau, rivière, prairie, forêt, désert, montagne, + terre battue (dirt, état dérivé du surpâturage)
 - Génération par bruit fBm avec domain warping
 - Fertilité du sol (`fertility_grid`) : dégradation par pâturage, régénération lente
 - Arbres (`tree_grid`) : abattage et repousse (~625 ticks)
@@ -200,9 +213,10 @@ biosim/
 
 ## Performance
 
-- ~6–7 ms/tick sur matériel ARM (Raspberry Pi 5 ou équivalent)
-- Cap entités : 5 000
-- Monde 220×160 avec NumPy vectorisé (regen, fertilité, arbres)
+- Coût d'un tick sur Raspberry Pi 5 (mesuré) : ~15-20 ms à ~200 entités, montant avec la population (grille spatiale pour garder les voisinages ~linéaires).
+- Cap de population : `MAX_PER_SPECIES = 200` par espèce (9 espèces → ~1800 entités max théorique). **Pas de cap global** à 5000.
+- Monde 220×160, NumPy vectorisé (regen nourriture/fertilité/arbres/roches/feu).
+- `psutil` est **optionnel** (monitoring CPU/RAM de `/api/sysinfo`) ; sans lui, ces champs valent `null`.
 
 ---
 
