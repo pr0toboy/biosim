@@ -6,7 +6,9 @@ import random
 import math
 import json
 import os
+import time
 import numpy as np
+from collections import deque
 from dataclasses import dataclass, asdict
 from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
@@ -256,6 +258,7 @@ def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "Wor
         entity._stuck_ticks += 1
     if entity._stuck_ticks >= STUCK_TICKS_RESET:
         # Cible inaccessible : reset + annule chantier planifié + échappée aléatoire
+        world._stuck_resets += 1   # métrique I0 (hors sortie step → hash neutre)
         entity.target_x = None
         entity.target_y = None
         entity._build_target_type = None
@@ -1593,6 +1596,9 @@ class Simulation:
         self.rain_ticks_left: int = 0
         self.heatwave: bool = False
         self.heatwave_ticks_left: int = 0
+        # Observabilité (I0) : durées des derniers ticks (ms), pour /api/metrics.
+        # Hors sortie de step() → neutre pour le hash déterministe.
+        self._step_ms: deque = deque(maxlen=512)
 
     def populate(self, counts: dict[EntityType, int] = None):
         """Spawn initial des entités sur des cases marchables."""
@@ -1699,6 +1705,7 @@ class Simulation:
 
     def step(self) -> dict:
         """Avance d'un tick. Retourne les données à broadcaster."""
+        _t0 = time.perf_counter()
         self.tick_count += 1
         season = get_season(self.tick_count)
         temp_c = get_temperature(self.tick_count)
@@ -1971,6 +1978,9 @@ class Simulation:
         self.world._chop_changes.clear()
         self.world._mine_changes.clear()
 
+        # Métrique de durée (hors dict retourné → hash neutre)
+        self._step_ms.append((time.perf_counter() - _t0) * 1000.0)
+
         return {
             "tick":         self.tick_count,
             "season":       season,
@@ -2070,3 +2080,29 @@ class Simulation:
     def load(self, path: str):
         with open(path) as f:
             self.load_state(json.load(f))
+
+    # ── Observabilité (I0) ───────────────────────────────────────────────────
+    def metrics(self) -> dict:
+        """Métriques d'observabilité (endpoint /api/metrics). Baseline du
+        pathfinding : taux de blocage (_stuck_resets) + distribution du temps de
+        step. Purement dérivé de l'état → ne modifie rien."""
+        ms = list(self._step_ms)
+        ms_sorted = sorted(ms)
+
+        def _pct(p: float) -> float:
+            if not ms_sorted:
+                return 0.0
+            k = min(len(ms_sorted) - 1, int(p / 100.0 * len(ms_sorted)))
+            return round(ms_sorted[k], 2)
+
+        return {
+            "tick": self.tick_count,
+            "entities": len(self.entities),
+            "stuck_resets_total": int(self.world._stuck_resets),
+            "step_ms": {
+                "avg": round(sum(ms) / len(ms), 2) if ms else 0.0,
+                "p50": _pct(50), "p95": _pct(95),
+                "max": round(max(ms), 2) if ms else 0.0,
+                "n": len(ms),
+            },
+        }

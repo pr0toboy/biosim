@@ -182,6 +182,12 @@ async def sysinfo():
     return _get_sysinfo()
 
 
+@app.get("/api/metrics")
+async def metrics():
+    async with state_lock:
+        return sim.metrics()
+
+
 @app.post("/api/pause")
 async def pause():
     global sim_running

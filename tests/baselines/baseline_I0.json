@@ -1,0 +1,163 @@
+{
+  "increment": "I0",
+  "runs": [
+    {
+      "world": [
+        140,
+        100
+      ],
+      "seed": 101,
+      "ticks": 2000,
+      "pop_final": 1571,
+      "pop_min": 1044,
+      "pop_max": 1571,
+      "pop_samples": [
+        1044,
+        1571
+      ],
+      "stuck_resets_total": 425,
+      "stuck_resets_per_1k_ticks": 212.5,
+      "stuck_resets_per_Mentity_tick": 162.5,
+      "step_ms": {
+        "avg": 106.13,
+        "p50": 100.87,
+        "p95": 155.91,
+        "max": 312.74,
+        "n": 512
+      }
+    },
+    {
+      "world": [
+        140,
+        100
+      ],
+      "seed": 202,
+      "ticks": 2000,
+      "pop_final": 1470,
+      "pop_min": 1068,
+      "pop_max": 1470,
+      "pop_samples": [
+        1068,
+        1470
+      ],
+      "stuck_resets_total": 688,
+      "stuck_resets_per_1k_ticks": 344.0,
+      "stuck_resets_per_Mentity_tick": 271.1,
+      "step_ms": {
+        "avg": 111.19,
+        "p50": 106.06,
+        "p95": 171.03,
+        "max": 405.53,
+        "n": 512
+      }
+    },
+    {
+      "world": [
+        140,
+        100
+      ],
+      "seed": 303,
+      "ticks": 2000,
+      "pop_final": 1440,
+      "pop_min": 1049,
+      "pop_max": 1440,
+      "pop_samples": [
+        1049,
+        1440
+      ],
+      "stuck_resets_total": 387,
+      "stuck_resets_per_1k_ticks": 193.5,
+      "stuck_resets_per_Mentity_tick": 155.5,
+      "step_ms": {
+        "avg": 104.4,
+        "p50": 100.39,
+        "p95": 141.42,
+        "max": 244.99,
+        "n": 512
+      }
+    },
+    {
+      "world": [
+        140,
+        100
+      ],
+      "seed": 404,
+      "ticks": 2000,
+      "pop_final": 1517,
+      "pop_min": 979,
+      "pop_max": 1517,
+      "pop_samples": [
+        979,
+        1517
+      ],
+      "stuck_resets_total": 303,
+      "stuck_resets_per_1k_ticks": 151.5,
+      "stuck_resets_per_Mentity_tick": 121.4,
+      "step_ms": {
+        "avg": 82.14,
+        "p50": 80.25,
+        "p95": 111.89,
+        "max": 163.67,
+        "n": 512
+      }
+    },
+    {
+      "world": [
+        140,
+        100
+      ],
+      "seed": 505,
+      "ticks": 2000,
+      "pop_final": 1504,
+      "pop_min": 1044,
+      "pop_max": 1504,
+      "pop_samples": [
+        1044,
+        1504
+      ],
+      "stuck_resets_total": 166,
+      "stuck_resets_per_1k_ticks": 83.0,
+      "stuck_resets_per_Mentity_tick": 65.1,
+      "step_ms": {
+        "avg": 82.13,
+        "p50": 78.55,
+        "p95": 116.14,
+        "max": 219.83,
+        "n": 512
+      }
+    },
+    {
+      "world": [
+        220,
+        160
+      ],
+      "seed": 700,
+      "ticks": 10000,
+      "pop_final": 1599,
+      "pop_min": 955,
+      "pop_max": 1602,
+      "pop_samples": [
+        955,
+        1394,
+        1602,
+        1572,
+        1549,
+        1445,
+        1527,
+        1582,
+        1593,
+        1599
+      ],
+      "stuck_resets_total": 6192,
+      "stuck_resets_per_1k_ticks": 619.2,
+      "stuck_resets_per_Mentity_tick": 417.9,
+      "step_ms": {
+        "avg": 197.36,
+        "p50": 174.79,
+        "p95": 374.75,
+        "max": 593.55,
+        "n": 512
+      }
+    }
+  ]
+}

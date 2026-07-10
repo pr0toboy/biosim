@@ -114,6 +114,10 @@ class World:
         self._biome_changes: list = []   # changements GRASS↔DIRT ce tick
         self._chop_changes: list = []    # arbres abattus ce tick [(x, y), ...]
         self._mine_changes: list = []    # roches minées ce tick [(x, y), ...]
+        # Métrique d'observabilité (I0) : nombre cumulé de resets de cible pour
+        # cause de blocage (_move_toward). NON inclus dans la sortie de step() →
+        # neutre pour le hash déterministe. Indicateur n°1 du succès du pathfinding.
+        self._stuck_resets: int = 0
         # ── Masques de navigation pré-calculés (invariants : l'eau ne bouge pas) ──
         _water = (self.biome_grid == int(Biome.WATER)) | (self.biome_grid == int(Biome.RIVER))
         self._walkable          = ~_water                     # bool, terrestres
