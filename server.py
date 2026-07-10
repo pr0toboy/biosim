@@ -54,6 +54,12 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 # ── Clients WebSocket connectés ──────────────────────────────────────────────
 clients: set[WebSocket] = set()
 
+# Verrou d'état : sérialise sim.step() (offloadé dans un thread executor) et les
+# lectures sim.full_state() faites sur l'event-loop (/api/world, init WS). Sans lui,
+# un full_state pourrait itérer sim.entities pendant que step() la remplace → lecture
+# incohérente ou "list changed size during iteration".
+state_lock = asyncio.Lock()
+
 # ── Vitesse : ticks par seconde ──────────────────────────────────────────────
 tick_interval = 0.5   # secondes entre chaque tick (modifiable via API)
 sim_running   = True
@@ -88,10 +94,16 @@ async def _broadcast(msg: str):
 async def simulation_loop():
     global tick_interval, sim_running
     consecutive_errors = 0
+    loop = asyncio.get_running_loop()
     while True:
         if sim_running and clients:
             try:
-                data = sim.step()
+                # step() est offloadé dans un thread : un tick long (forte population)
+                # ne gèle plus l'event-loop → WS, API et nouvelles connexions restent
+                # réactifs pendant le calcul. Le state_lock garantit qu'aucun full_state
+                # ne lit l'état pendant que step() le mute.
+                async with state_lock:
+                    data = await loop.run_in_executor(None, sim.step)
             except Exception:
                 consecutive_errors += 1
                 traceback.print_exc()
@@ -102,6 +114,8 @@ async def simulation_loop():
                 await asyncio.sleep(tick_interval)
                 continue
             consecutive_errors = 0
+            # dumps + broadcast HORS du verrou : `data` est un snapshot de primitifs,
+            # inutile de bloquer les ticks/full_state pendant la sérialisation + I/O réseau.
             msg = json.dumps({"type": "tick", "data": data})
             await _broadcast(msg)
         await asyncio.sleep(tick_interval)
@@ -122,7 +136,8 @@ async def index():
 
 @app.get("/api/world")
 async def get_world():
-    return sim.full_state()
+    async with state_lock:
+        return sim.full_state()
 
 
 @app.post("/api/speed")
@@ -153,11 +168,14 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1013)  # 1013 = Try Again Later
         return
     clients.add(websocket)
-    # Envoie l'état complet au nouveau client
+    # Envoie l'état complet au nouveau client. Le snapshot est pris sous state_lock
+    # (cohérent vs step()), puis sérialisé/envoyé hors verrou (I/O réseau).
     try:
+        async with state_lock:
+            init_state = sim.full_state()
         await websocket.send_text(json.dumps({
             "type": "init",
-            "data": sim.full_state()
+            "data": init_state
         }))
         while True:
             # Garde la connexion ouverte, attend des messages (ping/pong)
