@@ -184,6 +184,41 @@ def test_c1bis_toolless_human_crafts_without_depositing():
           f"(pick={h.pick}, tool={h.tool}, bois maison {house.wood})")
 
 
+def test_c2_hungry_harvester_eats_not_feeds_mill():
+    """Régression C2 : un récolteur AFFAMÉ mange sa part au lieu de tout livrer au
+    moulin (avant, le blé partait intégralement au moulin et le récolteur mourait
+    de faim = trou noir alimentaire). Un récolteur RASSASIÉ, lui, livre le surplus."""
+    world = World(width=60, height=45, seed=7)
+    lx, ly = _find_land_tile(world)
+    world.food_grid[:] = 0.0   # pas de nourriture sauvage → force le passage par la récolte
+
+    def _setup(hunger):
+        h = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)  # MALE → saute la repro
+        h.clan_id = 1; h.hunger = hunger; h.thirst = 10.0
+        h.wood = 0; h.stone = 0; h.pick = "stone_pick"; h.tool = "axe"  # pas de craft/dépôt
+        field = Building(id=1, clan_id=1, x=lx, y=ly, btype="wheatfield")
+        field.stage = 4  # mûr, adjacent
+        mill = Building(id=2, clan_id=1, x=lx, y=ly, btype="mill")
+        mill.wheat = 0; mill.bread = 0  # capacité libre, pas de pain (sinon il mange le pain)
+        cb = {1: {"wheatfield": [field], "mill": [mill]}}  # 1 champ → pas de build-moulin ; pas de maison → pas de build-champ
+        return h, field, mill, cb
+
+    # Affamé → mange, ne livre rien
+    h, field, mill, cb = _setup(50.0)
+    tick_entity(h, world, [h], [], [], tick=1, clan_bldg=cb, species_counts={"human": 5})
+    assert field.stage == 1, f"le champ n'a pas été récolté (bloc 4.3a non atteint, stage={field.stage})"
+    assert mill.wheat == 0, f"le récolteur affamé a quand même nourri le moulin: wheat={mill.wheat}"
+    assert h.hunger < 50.0, f"le récolteur affamé n'a pas mangé: hunger={h.hunger}"
+
+    # Rassasié → livre le surplus au moulin, ne mange pas
+    h2, field2, mill2, cb2 = _setup(10.0)
+    tick_entity(h2, world, [h2], [], [], tick=1, clan_bldg=cb2, species_counts={"human": 5})
+    assert field2.stage == 1, f"le champ n'a pas été récolté (rassasié), stage={field2.stage}"
+    assert mill2.wheat == 1, f"le récolteur rassasié n'a pas livré au moulin: wheat={mill2.wheat}"
+    print(f"  test_c2_hungry_harvester_eats_not_feeds_mill OK "
+          f"(affamé: hunger 50→{h.hunger:.0f}, moulin {mill.wheat} ; rassasié: moulin {mill2.wheat})")
+
+
 def _find_pair_land_tiles(world, sep=4):
     """Deux tuiles terrestres alignées, distantes de `sep` (∈ ]3, vision])."""
     for y in range(world.height):
@@ -268,6 +303,7 @@ if __name__ == "__main__":
                test_preservation_live_counter, test_water_stranded_entity_rescued,
                test_c1bis_toolless_human_crafts_without_depositing,
                test_e2_female_seeks_distant_mate,
+               test_c2_hungry_harvester_eats_not_feeds_mill,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:

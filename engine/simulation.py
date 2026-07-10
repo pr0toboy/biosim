@@ -208,6 +208,17 @@ def _dist(ax, ay, bx, by) -> float:
     return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
 
 
+def _tile_near_water(world, x: int, y: int, r: int = 6) -> bool:
+    """True s'il existe une tuile d'eau dans un rayon de `r` tuiles autour de (x,y).
+    Condition de cuisson d'un moulin (production) — réutilisée au placement (C3)
+    pour ne pas bâtir de moulin qui ne cuira jamais."""
+    return any(
+        int(world.biome_grid[y + dy, x + dx]) in WATER_BIOMES
+        for dy in range(-r, r + 1) for dx in range(-r, r + 1)
+        if world.is_valid(x + dx, y + dy)
+    )
+
+
 def _dist_hitbox(entity: Entity, target: Entity) -> float:
     """Distance minimale entre les tuiles du hitbox de entity et target.
     Utilise numpy pour les entités multi-tuiles (hitbox_width > 1 ou hitbox_height > 1).
@@ -1232,6 +1243,11 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                             mx, my = field.x + ddx, field.y + ddy
                             if not world.is_valid(mx, my) or not world.is_walkable(mx, my):
                                 continue
+                            # C3 : ne bâtir un moulin QUE près de l'eau — sinon il ne
+                            # cuit jamais (même test que la production) et le blé livré
+                            # y pourrit : trou noir alimentaire permanent.
+                            if not _tile_near_water(world, mx, my):
+                                continue
                             if any(_dist(mx, my, b.x, b.y) < bspec_m.min_dist
                                    for b in (buildings or []) if b.btype == "mill"):
                                 continue
@@ -1302,7 +1318,12 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             ripe_adj.stage = 1
             ripe_adj.grow_ticks = 0
             ripe_adj.watered_ticks = 0
-            mill_dst = next((m for m in clan_mills if m.wheat < MILL_MAX_BREAD * 2), None)
+            # C2 : le récolteur mange sa part SI il a faim (il a récolté pour ça).
+            # Le moulin ne reçoit du grain que d'un fermier rassasié (surplus).
+            # Avant, tout le blé partait au moulin même quand le récolteur mourait
+            # de faim → l'agriculture était un trou noir alimentaire.
+            mill_dst = (next((m for m in clan_mills if m.wheat < MILL_MAX_BREAD * 2), None)
+                        if entity.hunger < WHEAT_HUNGER_THRESH else None)
             if mill_dst is not None:
                 mill_dst.wheat += 1
             else:
@@ -1555,9 +1576,17 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             and entity.target_x is not None):
         clan = clans.get(entity.clan_id)
         if clan and _dist(clan.cx, clan.cy, entity.target_x, entity.target_y) > 75:
-            entity.state = State.EXPLORING
-            _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
-            return True
+            # C4 : arrivé à destination → libère la cible et laisse choisir une
+            # nouvelle tâche. Sans ça, _move_toward ne bouge plus (déjà sur place)
+            # mais le return True garde l'humain figé en EXPLORING des centaines de
+            # ticks, jusqu'à ce que faim/soif casse la condition.
+            if _dist(entity.x, entity.y, entity.target_x, entity.target_y) < 0.5:
+                entity.target_x = None
+                entity.target_y = None
+            else:
+                entity.state = State.EXPLORING
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
     # 4.7 Exploration (humain sans tâche urgente : explore loin du clan)
     if (entity.etype == EntityType.HUMAN
             and entity.clan_id is not None
@@ -1923,12 +1952,7 @@ class Simulation:
                 b.mill_ticks = 0
                 continue
             # Vérifie qu'une tuile d'eau est accessible dans un rayon de 6 tuiles
-            has_water = any(
-                int(self.world.biome_grid[b.y + dy, b.x + dx]) in WATER_BIOMES
-                for dy in range(-6, 7) for dx in range(-6, 7)
-                if self.world.is_valid(b.x + dx, b.y + dy)
-            )
-            if not has_water:
+            if not _tile_near_water(self.world, b.x, b.y):
                 continue
             b.mill_ticks += 1
             if b.mill_ticks >= MILL_BREAD_TICKS:
