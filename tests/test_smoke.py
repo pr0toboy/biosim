@@ -219,6 +219,42 @@ def test_c2_hungry_harvester_eats_not_feeds_mill():
           f"(affamé: hunger 50→{h.hunger:.0f}, moulin {mill.wheat} ; rassasié: moulin {mill2.wheat})")
 
 
+def test_e8_dead_clan_leaves_ruins_then_fade():
+    """Régression E8 : à l'extinction d'un clan, ses structures durables deviennent
+    des RUINES (btype=ruin, clan_id=-1) + un événement clan_extinct est émis — au
+    lieu de disparaître en silence. Les ruines s'effacent après RUIN_LIFETIME ticks
+    (borne la mémoire → invariant infini)."""
+    from engine.simulation import Clan, RUIN_LIFETIME
+    world = World(width=60, height=45, seed=7)
+    sim = Simulation(world)
+    lx, ly = _find_land_tile(world)
+
+    chief = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    chief.clan_id = 7
+    sim.entities = [chief]
+    sim.clans = [Clan(id=7, cx=float(lx), cy=float(ly), color="#fff", chief_id=chief.id)]
+    house = Building(id=1, clan_id=7, x=lx, y=ly, btype="house", wood=10)
+    well  = Building(id=2, clan_id=7, x=min(lx + 1, world.width - 1), y=ly, btype="well")
+    sim.buildings = [house, well]
+
+    chief.alive = False   # le clan n'a plus aucun humain vivant → éteint ce tick
+    data = sim.step()
+
+    ruins = [b for b in sim.buildings if b.btype == "ruin"]
+    assert len(ruins) == 2, f"maison+puit auraient dû devenir des ruines: {[b.btype for b in sim.buildings]}"
+    assert all(r.clan_id == -1 for r in ruins), "les ruines devraient être orphelines (clan_id=-1)"
+    assert not any(c.id == 7 for c in sim.clans), "le clan éteint n'a pas été retiré"
+    ext = [ev for ev in data["events"] if ev.get("type") == "clan_extinct"]
+    assert ext and ext[0]["ruins"] == 2, f"événement clan_extinct manquant/incorrect: {ext}"
+
+    # Les ruines s'effacent avec le temps (la nature les reprend)
+    for _ in range(RUIN_LIFETIME + 5):
+        sim.step()
+    assert not any(b.btype == "ruin" for b in sim.buildings), "les ruines ne se sont pas effacées"
+    print(f"  test_e8_dead_clan_leaves_ruins_then_fade OK "
+          f"(2 ruines + event, effacées après {RUIN_LIFETIME} ticks)")
+
+
 def _find_pair_land_tiles(world, sep=4):
     """Deux tuiles terrestres alignées, distantes de `sep` (∈ ]3, vision])."""
     for y in range(world.height):
@@ -304,6 +340,7 @@ if __name__ == "__main__":
                test_c1bis_toolless_human_crafts_without_depositing,
                test_e2_female_seeks_distant_mate,
                test_c2_hungry_harvester_eats_not_feeds_mill,
+               test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:

@@ -52,6 +52,7 @@ class Building:
     mill_ticks: int = 0     # mill : ticks de cuisson en cours
     work_done: int = 0      # ticks de travail déjà effectués sur un chantier
     work_needed: int = 0    # ticks de travail total nécessaires pour terminer
+    ruin_ticks: int = 0     # ruine : ticks restants avant que la nature la reprenne (0 = pas une ruine)
 
     def to_dict(self):
         d = {"id": self.id, "clan_id": self.clan_id,
@@ -66,6 +67,8 @@ class Building:
         elif self.btype == "mill":
             d["wheat"] = self.wheat
             d["bread"] = self.bread
+        elif self.btype == "ruin":
+            d["ruin_ticks"] = self.ruin_ticks   # front : fondu quand la ruine s'efface
         return d
 
 
@@ -130,6 +133,10 @@ MILL_BREAD_COST_WHEAT  = 1    # 1 récolte de blé (stockée) par pain
 MILL_BREAD_TICKS       = 80   # ticks de production d'un pain
 MILL_BREAD_FOOD        = 65.0 # réduction de faim en mangeant un pain
 MILL_MAX_BREAD         = 5    # stock max de pains dans un moulin
+
+# ── Ruines ─────────────────────────────────────────────────────────────────────
+RUIN_LIFETIME = 2500   # ticks qu'une ruine (bâtiment d'un clan éteint) reste visible
+                       # avant que la nature la reprenne (borne la mémoire = invariant infini)
 
 # ── Saisons ──────────────────────────────────────────────────────────────────
 TICKS_PER_SEASON = 300   # 1200 ticks = 1 année complète
@@ -2043,15 +2050,44 @@ class Simulation:
         # Purge les morts
         self.entities = [e for e in self.entities if e.alive]
 
-        # Supprimer les bâtiments des clans entièrement éteints
+        # Clans entièrement éteints : leurs structures durables (maison/moulin/puit)
+        # deviennent des RUINES (E8) au lieu de disparaître en silence — récit
+        # émergent + info visible. Le reste (feu de camp, chantiers) s'efface.
         alive_clan_ids = {e.clan_id for e in self.entities
                           if e.alive and e.etype == EntityType.HUMAN
                           and e.clan_id is not None}
         dead_clan_ids = {c.id for c in self.clans} - alive_clan_ids
         if dead_clan_ids:
-            self.buildings = [b for b in self.buildings
-                              if b.clan_id not in dead_clan_ids]
+            clans_by_id = {c.id: c for c in self.clans}
+            ruins_per_clan = {}
+            kept = []
+            for b in self.buildings:
+                if b.clan_id not in dead_clan_ids:
+                    kept.append(b)
+                elif b.btype in ("house", "mill", "well"):
+                    ruins_per_clan[b.clan_id] = ruins_per_clan.get(b.clan_id, 0) + 1
+                    b.btype = "ruin"
+                    b.clan_id = -1            # orphelin : ne matche plus aucun clan vivant
+                    b.ruin_ticks = RUIN_LIFETIME
+                    kept.append(b)
+                # feu de camp + site_* d'un clan mort → pas de ruine (effacés)
+            self.buildings = kept
+            for cid in dead_clan_ids:
+                c = clans_by_id.get(cid)
+                tick_events.append({"type": "clan_extinct", "clan_id": cid,
+                                    "x": int(c.cx) if c else 0,
+                                    "y": int(c.cy) if c else 0,
+                                    "ruins": ruins_per_clan.get(cid, 0)})
             self.clans = [c for c in self.clans if c.id not in dead_clan_ids]
+
+        # Décroissance des ruines : la nature les reprend (borne la mémoire → le
+        # jeu tourne à l'infini sans accumulation de bâtiments morts).
+        if any(b.btype == "ruin" for b in self.buildings):
+            for b in self.buildings:
+                if b.btype == "ruin":
+                    b.ruin_ticks -= 1
+            self.buildings = [b for b in self.buildings
+                              if b.btype != "ruin" or b.ruin_ticks > 0]
 
         # Log événements
         self.events_log.extend(tick_events)

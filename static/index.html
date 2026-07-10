@@ -990,6 +990,19 @@ function drawBuildings(c, T) {
         c.fillStyle = "#fbbf24";
         c.fillText("🌾", (b.x + 0.5) * T, b.y * T - 1);
       }
+    } else if (b.btype === "ruin") {
+      // Ruine d'un clan éteint (E8) : gravats gris, s'estompent en fin de vie.
+      const life = Math.max(0, Math.min(1, (b.ruin_ticks ?? 2500) / 2500));
+      const a = 0.35 + 0.5 * life;   // fondu quand la nature reprend la ruine
+      c.save();
+      c.globalAlpha = a;
+      c.fillStyle = "#4b5563";       // pierre grise
+      // deux pans de mur brisés + un tas de gravats
+      c.fillRect(b.x * T + T * 0.12, b.y * T + T * 0.45, T * 0.22, T * 0.45);
+      c.fillRect(b.x * T + T * 0.58, b.y * T + T * 0.30, T * 0.24, T * 0.60);
+      c.fillStyle = "#6b7280";
+      c.fillRect(b.x * T + T * 0.30, b.y * T + T * 0.68, T * 0.42, T * 0.22);
+      c.restore();
     }
   });
 }
@@ -1131,6 +1144,11 @@ function addEvent(ev) {
     const icon = ev.btype === "campfire" ? "🔥" : "🏠";
     div.textContent = `${icon}★ Niveau 2 — Clan ${ev.clan_id + 1} (${ev.btype})`;
     if (cn) { div.style.borderColor = "#93c5fd"; div.style.color = "#93c5fd"; }
+  } else if (ev.type === "clan_extinct") {
+    div.className = "ev-item";
+    const r = ev.ruins ?? 0;
+    div.textContent = `💀 Clan ${ev.clan_id + 1} éteint — ${r} ruine${r > 1 ? "s" : ""} laissée${r > 1 ? "s" : ""}`;
+    div.style.borderColor = "#6b7280"; div.style.color = "#9ca3af";
   } else if (ev.type === "build_house") {
     div.className = "ev-item build_house";
     const cn = clans.find(c => c.id === ev.clan_id);
@@ -1292,6 +1310,9 @@ function buildingInfoHTML(b) {
   } else if (b.btype === "wheatfield") {
     return `<b style="color:${cColor}">🌱 Champ — ${cLabel}</b>
       <div class="tt-row"><span>Stade</span><span>${b.stage ?? 1} / 4</span></div>`;
+  } else if (b.btype === "ruin") {
+    return `<b style="color:#9ca3af">🏚 Ruines</b>
+      <div class="tt-row" style="color:#94a3b8;font-size:0.9em"><span>Vestiges d'un clan éteint — reprises peu à peu par la nature</span></div>`;
   } else if (b.btype.startsWith("site_")) {
     const bname = {house:"maison",mill:"moulin",well:"puit",wheatfield:"champ"}[b.btype.slice(5)] || b.btype.slice(5);
     const pct = b.work_needed > 0 ? Math.round((b.work_done ?? 0) / b.work_needed * 100) : 0;
