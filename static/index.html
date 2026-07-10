@@ -452,7 +452,10 @@ function resizeCanvas() {
 window.addEventListener("resize", resizeCanvas);
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
-const ws = new WebSocket(`ws://${location.host}/ws`);
+// wss:// obligatoire quand la page est servie en HTTPS (ex. via tailscale serve) :
+// un navigateur bloque un ws:// non sécurisé depuis une page https (mixed content).
+const _wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+const ws = new WebSocket(`${_wsProto}//${location.host}/ws`);
 ws.onopen  = () => setStatus("Connecté", true);
 ws.onclose = () => setStatus("Déconnecté", false);
 ws.onerror = () => setStatus("Erreur WS", false);
