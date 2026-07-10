@@ -19,6 +19,18 @@ from .world import Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD, FERTILITY
 N_CLANS = 4
 CLAN_COLORS = ["#e74c3c", "#3498db", "#27ae60", "#9b59b6"]
 
+# ── Âges technologiques (bloc civilisation A1) ─────────────────────────────────
+# Colonne vertébrale de la progression : un clan accumule de la SCIENCE (selon ses
+# bâtiments + sa population) et franchit des âges à des seuils. L'âge est visible
+# (badge feu de camp, événement, infobulle) et donne un bonus de capacité de
+# population → un clan avancé devient une plus grande cité. Les futurs blocs
+# (forge/fer, économie…) se brancheront sur `clan.age >= X`.
+AGE_NAMES = ["Bois", "Pierre", "Fer", "Acier"]
+AGE_SCIENCE_THRESHOLDS = [0, 700, 2500, 6000]   # science cumulée requise pour l'âge i
+SCIENCE_PER_BUILDING   = 0.20   # science/tick par bâtiment durable du clan
+SCIENCE_PER_POP        = 0.05   # science/tick par humain vivant du clan
+AGE_POP_BONUS          = 2      # capacité de population supplémentaire par âge franchi
+
 @dataclass
 class Clan:
     id: int
@@ -26,10 +38,14 @@ class Clan:
     cy: float
     color: str
     chief_id: int
+    science: float = 0.0   # savoir accumulé (bâtiments + population) — pilote les âges
+    age: int = 0           # âge technologique : index dans AGE_NAMES (0 = Bois)
 
     def to_dict(self):
         return {"id": self.id, "cx": self.cx, "cy": self.cy,
-                "color": self.color, "chief_id": self.chief_id}
+                "color": self.color, "chief_id": self.chief_id,
+                "science": round(self.science, 1), "age": self.age,
+                "age_name": AGE_NAMES[min(self.age, len(AGE_NAMES) - 1)]}
 
 
 _next_building_id = 0
@@ -1038,6 +1054,9 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
         if entity.spec.can_build and entity.clan_id is not None:
             base = BUILDING_SPECS["house"].pop_bonus
             cap = sum(base * b.level for b in _cb.get("house", []))
+            _clan_age = clans.get(entity.clan_id) if clans else None
+            if _clan_age is not None:
+                cap += AGE_POP_BONUS * _clan_age.age   # bonus d'âge (A1)
             clan_pop = sum(1 for e in all_entities
                            if e.alive and e.etype == EntityType.HUMAN
                            and e.clan_id == entity.clan_id)
@@ -1177,6 +1196,9 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             if bspec.max_per_clan == 0 or _total_h < bspec.max_per_clan:
                 # Ne construire que si la population dépasse ~70% de la capacité actuelle
                 _pop_cap_h = sum(bspec.pop_bonus * b.level for b in clan_houses)
+                _clan_age_h = clans.get(entity.clan_id) if clans else None
+                if _clan_age_h is not None:
+                    _pop_cap_h += AGE_POP_BONUS * _clan_age_h.age   # bonus d'âge (A1)
                 _clan_pop_h = sum(1 for e in all_entities
                                   if e.alive and e.etype == EntityType.HUMAN
                                   and e.clan_id == entity.clan_id)
@@ -2088,6 +2110,28 @@ class Simulation:
                     b.ruin_ticks -= 1
             self.buildings = [b for b in self.buildings
                               if b.btype != "ruin" or b.ruin_ticks > 0]
+
+        # ── Science & âges technologiques (bloc A1) ──────────────────────────
+        # Chaque clan vivant accumule de la science (bâtiments durables + pop) et
+        # franchit ses âges. Événement `clan_age_up` à chaque passage → visible.
+        if self.clans:
+            _DURABLE = ("house", "mill", "well", "wheatfield")
+            _bld_per_clan: dict = {}
+            for b in self.buildings:
+                if b.btype in _DURABLE:
+                    _bld_per_clan[b.clan_id] = _bld_per_clan.get(b.clan_id, 0) + 1
+            _pop_per_clan: dict = {}
+            for e in self.entities:
+                if e.alive and e.etype == EntityType.HUMAN and e.clan_id is not None:
+                    _pop_per_clan[e.clan_id] = _pop_per_clan.get(e.clan_id, 0) + 1
+            for c in self.clans:
+                c.science += (_bld_per_clan.get(c.id, 0) * SCIENCE_PER_BUILDING
+                              + _pop_per_clan.get(c.id, 0) * SCIENCE_PER_POP)
+                while (c.age + 1 < len(AGE_NAMES)
+                       and c.science >= AGE_SCIENCE_THRESHOLDS[c.age + 1]):
+                    c.age += 1
+                    tick_events.append({"type": "clan_age_up", "clan_id": c.id,
+                                        "age": c.age, "age_name": AGE_NAMES[c.age]})
 
         # Log événements
         self.events_log.extend(tick_events)

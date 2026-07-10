@@ -816,6 +816,14 @@ function drawAll() {
       ctx.fillStyle = "#fcd34d";
       ctx.fillText("★", px, py + T * 0.85);
     }
+    // Badge d'âge technologique (A1) : nom de l'âge au-dessus du feu, dès Âge 1
+    const cAge = clans.find(c => c.id === b.clan_id);
+    if (cAge && (cAge.age ?? 0) > 0) {
+      ctx.font = `${Math.max(5, T * 0.5)}px monospace`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#c4b5fd";
+      ctx.fillText(`⚒${cAge.age_name}`, px, py - T * 0.7);
+    }
   });
 
   // (chantiers en cours dessinés dans drawBuildings via site_* btype)
@@ -1149,6 +1157,12 @@ function addEvent(ev) {
     const r = ev.ruins ?? 0;
     div.textContent = `💀 Clan ${ev.clan_id + 1} éteint — ${r} ruine${r > 1 ? "s" : ""} laissée${r > 1 ? "s" : ""}`;
     div.style.borderColor = "#6b7280"; div.style.color = "#9ca3af";
+  } else if (ev.type === "clan_age_up") {
+    div.className = "ev-item build_house";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `🎓 Clan ${ev.clan_id + 1} entre dans l'Âge du/de la ${ev.age_name}`;
+    div.style.borderColor = "#a78bfa"; div.style.color = "#c4b5fd";
+    if (cn) div.style.borderColor = cn.color;
   } else if (ev.type === "build_house") {
     div.className = "ev-item build_house";
     const cn = clans.find(c => c.id === ev.clan_id);
@@ -1282,8 +1296,13 @@ function buildingInfoHTML(b) {
     const upgradeNote = b.level < 2
       ? `<div class="tt-row" style="color:#94a3b8;font-size:0.85em"><span>Amélioration L2</span><span>🪵5 🪨20</span></div>`
       : "";
+    const ageName = cn ? (cn.age_name ?? "Bois") : "Bois";
+    const ageIdx  = cn ? (cn.age ?? 0) : 0;
+    const sci     = cn ? Math.round(cn.science ?? 0) : 0;
     return `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
       <div class="tt-row"><span>Niveau feu</span><span>${lvl}</span></div>
+      <div class="tt-row"><span>🎓 Âge</span><span>${"★".repeat(ageIdx)} ${ageName}</span></div>
+      <div class="tt-row" style="color:#94a3b8;font-size:0.85em"><span>Science</span><span>${sci}</span></div>
       <hr style="border-color:#334155;margin:4px 0">
       <div class="tt-row"><span>👥 Population</span><span>${curPop.length} / ${totalPop || "?"}</span></div>
       <div class="tt-row"><span>🏠 Maisons</span><span>${clanHouses.length}</span></div>
@@ -1409,7 +1428,8 @@ canvas.addEventListener("mousemove", (ev) => {
       let html = "";
       if (closestB.btype === "campfire") {
         html = `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
-          <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>`;
+          <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>
+          <div class="tt-row"><span>🎓 Âge</span><span>${cn ? (cn.age_name ?? "Bois") : "Bois"}</span></div>`;
       } else if (closestB.btype === "house") {
         html = `<b style="color:${cColor}">🏠 Maison — ${cLabel}</b>
           <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>

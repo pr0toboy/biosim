@@ -219,6 +219,34 @@ def test_c2_hungry_harvester_eats_not_feeds_mill():
           f"(affamé: hunger 50→{h.hunger:.0f}, moulin {mill.wheat} ; rassasié: moulin {mill2.wheat})")
 
 
+def test_a1_clan_gains_science_and_ages_up():
+    """Bloc A1 (âges/tech) : un clan accumule de la science (bâtiments + pop) et
+    franchit un âge au seuil, avec un événement clan_age_up visible."""
+    from engine.simulation import Clan, AGE_SCIENCE_THRESHOLDS, AGE_NAMES
+    world = World(width=60, height=45, seed=7)
+    sim = Simulation(world)
+    lx, ly = _find_land_tile(world)
+    h = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    h.clan_id = 0
+    sim.entities = [h]
+    sim.clans = [Clan(id=0, cx=float(lx), cy=float(ly), color="#fff", chief_id=h.id)]
+    sim.buildings = [Building(id=1, clan_id=0, x=lx, y=ly, btype="house")]
+
+    # (1) la science augmente (1 bâtiment + 1 humain vivant)
+    sim.step()
+    assert sim.clans[0].science > 0, "la science du clan n'augmente pas"
+    assert sim.clans[0].age == 0, "le clan ne devrait pas encore avoir changé d'âge"
+
+    # (2) au franchissement du seuil → âge +1 + événement clan_age_up
+    sim.clans[0].science = AGE_SCIENCE_THRESHOLDS[1] - 0.01
+    data = sim.step()
+    assert sim.clans[0].age == 1, f"le clan n'est pas passé à l'Âge 1 (age={sim.clans[0].age})"
+    assert any(ev.get("type") == "clan_age_up" and ev.get("age_name") == AGE_NAMES[1]
+               for ev in data["events"]), "événement clan_age_up manquant"
+    print(f"  test_a1_clan_gains_science_and_ages_up OK "
+          f"(science {sim.clans[0].science:.1f}, Âge → {AGE_NAMES[sim.clans[0].age]})")
+
+
 def test_e8_dead_clan_leaves_ruins_then_fade():
     """Régression E8 : à l'extinction d'un clan, ses structures durables deviennent
     des RUINES (btype=ruin, clan_id=-1) + un événement clan_extinct est émis — au
@@ -340,6 +368,7 @@ if __name__ == "__main__":
                test_c1bis_toolless_human_crafts_without_depositing,
                test_e2_female_seeks_distant_mate,
                test_c2_hungry_harvester_eats_not_feeds_mill,
+               test_a1_clan_gains_science_and_ages_up,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
