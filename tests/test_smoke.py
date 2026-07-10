@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.world import World
 from engine.simulation import (
     Simulation, Building, tick_entity, MAX_PER_SPECIES, MAX_WOOD_PER_HOUSE,
-    MAX_STONE_CARRY,
+    MAX_STONE_CARRY, _dist,
 )
 from engine.entities import EntityType, spawn, Sex
 
@@ -184,6 +184,44 @@ def test_c1bis_toolless_human_crafts_without_depositing():
           f"(pick={h.pick}, tool={h.tool}, bois maison {house.wood})")
 
 
+def _find_pair_land_tiles(world, sep=4):
+    """Deux tuiles terrestres alignées, distantes de `sep` (∈ ]3, vision])."""
+    for y in range(world.height):
+        for x in range(world.width - sep):
+            if world.is_walkable(x, y, False) and world.is_walkable(x + sep, y, False):
+                return (x, y), (x + sep, y)
+    raise RuntimeError("aucune paire de tuiles terrestres alignées")
+
+
+def test_e2_female_seeks_distant_mate():
+    """Régression E2 : une femelle éligible SANS mâle adjacent (<3) mais avec un
+    mâle éligible EN VISION (ici à 4 tuiles) doit passer en SEEKING_MATE et s'en
+    RAPPROCHER — au lieu de rester à attendre un croisement au hasard. Sans E2, la
+    repro n'arrive qu'à faible probabilité → goulot fatal à basse densité."""
+    from engine.entities import State
+    world = World(width=120, height=90, seed=7)
+    (fx, fy), (mx, my) = _find_pair_land_tiles(world, sep=4)
+
+    female = spawn(EntityType.SHEEP, fx, fy, Sex.FEMALE)
+    male   = spawn(EntityType.SHEEP, mx, my, Sex.MALE)
+    for s in (female, male):
+        s.hunger = 20.0            # bien nourri : < repro_hunger_min (50), pas de "va manger"
+        s.thirst = 10.0
+        s.repro_cooldown_left = 0
+        s.age = female.spec.max_age * 0.5   # > 20% du max_age → adulte fertile
+    d0 = _dist(female.x, female.y, male.x, male.y)
+
+    tick_entity(female, world, [female, male], [], [], tick=1, season="spring",
+                species_counts={"sheep": 20})
+
+    assert female.state == State.SEEKING_MATE, (
+        f"la femelle n'a pas cherché de partenaire (état {female.state})")
+    assert female.gestation_left == 0, "accouplement à distance interdit (doit d'abord se rapprocher)"
+    d1 = _dist(female.x, female.y, male.x, male.y)
+    assert d1 < d0, f"la femelle ne s'est pas rapprochée du mâle: {d0:.2f} → {d1:.2f}"
+    print(f"  test_e2_female_seeks_distant_mate OK (SEEKING_MATE, dist {d0:.2f} → {d1:.2f})")
+
+
 def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
     """Persistance : (1) round-trip sans perte (état identique après load) ;
     (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
@@ -229,6 +267,7 @@ if __name__ == "__main__":
     for fn in (test_deposit_no_crash_when_houses_full,
                test_preservation_live_counter, test_water_stranded_entity_rescued,
                test_c1bis_toolless_human_crafts_without_depositing,
+               test_e2_female_seeks_distant_mate,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:

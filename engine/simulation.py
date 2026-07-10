@@ -1043,6 +1043,29 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 entity.repro_cooldown_left = spec.repro_cooldown
                 partner.repro_cooldown_left = spec.repro_cooldown
                 return True
+            # E2 : aucun partenaire adjacent (<3) → viser le mâle éligible le plus
+            # proche EN VISION et s'en approcher. Sans ça, la repro n'arrive que si
+            # deux éligibles se croisent par hasard → goulot fatal à basse densité
+            # (recolonisation, requins isolés). État SEEKING_MATE enfin utilisé pour
+            # du déplacement. Même filtre clan que la recherche adjacente ci-dessus.
+            suitor, best_d = None, spec.vision * spec.vision
+            ex, ey = entity.x, entity.y
+            for e in all_entities:
+                if (e is entity or not e.alive
+                        or e.etype != entity.etype
+                        or e.sex != Sex.MALE
+                        or e.hunger >= spec.repro_hunger_min):
+                    continue
+                if entity.clan_id is not None and e.clan_id != entity.clan_id:
+                    continue
+                dx = ex - e.x; dy = ey - e.y; d = dx*dx + dy*dy
+                if d < best_d:
+                    best_d = d; suitor = e
+            if suitor is not None:
+                entity.state = State.SEEKING_MATE
+                entity.target_x = float(suitor.x); entity.target_y = float(suitor.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
     # 4.24 Se déplacer vers le chantier planifié et le démarrer une fois sur place
     if (entity.spec.can_build
             and entity._build_target_type is not None
