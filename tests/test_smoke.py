@@ -159,10 +159,51 @@ def test_preservation_live_counter():
     print("  test_preservation_live_counter OK (1 seul mouton tué, seuil respecté)")
 
 
+def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
+    """Persistance : (1) round-trip sans perte (état identique après load) ;
+    (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
+    (état + RNG restaurés). Le RNG étant global au process, on enregistre la trace
+    de référence AVANT le load, puis load (qui restaure le RNG au point de save)
+    et on rejoue : les deux traces doivent coïncider."""
+    import tempfile
+
+    world = World(width=90, height=70, seed=seed)
+    sim = Simulation(world)
+    sim.populate()
+    for _ in range(ticks):
+        sim.step()
+
+    path = tempfile.mktemp(suffix=".json")
+    try:
+        sim.save(path)
+
+        # (1) round-trip immédiat dans un sim neuf
+        sim2 = Simulation(World(width=10, height=10, seed=1))
+        sim2.load(path)
+        a0, b0 = sim.full_state(), sim2.full_state()
+        assert a0["entities"] == b0["entities"], "entités différentes après load"
+        assert a0["buildings"] == b0["buildings"], "bâtiments différents après load"
+        assert a0["clans"] == b0["clans"], "clans différents après load"
+        assert a0["tick"] == b0["tick"], "tick différent après load"
+
+        # (2) reprise exacte (séquentiel car RNG global)
+        ref = [sim.step() for _ in range(resume)]
+        sim3 = Simulation(World(width=10, height=10, seed=1))
+        sim3.load(path)
+        rep = [sim3.step() for _ in range(resume)]
+        assert ref == rep, "la reprise post-load diverge de l'original"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+    print(f"  test_save_load_roundtrip_and_resume OK "
+          f"(round-trip {len(a0['entities'])} entités + {resume} ticks rejoués identiques)")
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (test_deposit_no_crash_when_houses_full,
                test_preservation_live_counter, test_water_stranded_entity_rescued,
+               test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:
             fn()

@@ -242,6 +242,16 @@ def _new_id():
     _next_id += 1
     return _next_id
 
+def get_id_counter() -> int:
+    """Valeur courante du compteur d'IDs (pour la sauvegarde d'état)."""
+    return _next_id
+
+def set_id_counter(n: int):
+    """Restaure le compteur d'IDs après un chargement (les nouveaux spawns ne
+    doivent pas réutiliser un id déjà pris)."""
+    global _next_id
+    _next_id = n
+
 
 # ── Classe entité ───────────────────────────────────────────────────────────
 class Entity:
@@ -342,6 +352,63 @@ class Entity:
                    int(self.traits["vision"]),
                    round(self.traits["hunger_rate"], 4)]
         return d
+
+    # ── Sérialisation d'état complet (sauvegarde/reprise) ────────────────────
+    # to_dict() = format compact pour le WIRE (front). to_state() = état INTERNE
+    # complet et sans perte pour la persistance. spec/_etype_str/_sex_str sont
+    # dérivés de etype/sex → non stockés, reconstruits dans from_state().
+    def to_state(self) -> dict:
+        return {
+            "id": self.id, "etype": self._etype_str, "x": self.x, "y": self.y,
+            "age": self.age, "hunger": self.hunger, "sex": self._sex_str,
+            "state": self.state.value,
+            "repro_cooldown_left": self.repro_cooldown_left,
+            "gestation_left": self.gestation_left, "alive": self.alive,
+            "target_x": self.target_x, "target_y": self.target_y,
+            "target_id": self.target_id,
+            "_move_frac_x": self._move_frac_x, "_move_frac_y": self._move_frac_y,
+            "clan_id": self.clan_id, "traits": self.traits,
+            "wood": self.wood, "stone": self.stone, "meat": self.meat,
+            "building_ticks_left": self.building_ticks_left,
+            "building_type": self.building_type,
+            "tool": self.tool, "pick": self.pick, "sickle": self.sickle,
+            "watering_can": self.watering_can, "can_filled": self.can_filled,
+            "fishing_rod": self.fishing_rod, "thirst": self.thirst,
+            "_stuck_ticks": self._stuck_ticks,
+            "chop_cooldown_left": self.chop_cooldown_left,
+            "_build_target_x": self._build_target_x,
+            "_build_target_y": self._build_target_y,
+            "_build_target_type": self._build_target_type,
+        }
+
+    @classmethod
+    def from_state(cls, d: dict) -> "Entity":
+        """Reconstruit une entité depuis to_state() SANS repasser par __init__
+        (qui tire de l'aléatoire) : bypass via __new__ + affectation directe."""
+        e = cls.__new__(cls)
+        etype = EntityType(d["etype"])
+        e.id = d["id"]; e.etype = etype; e.spec = SPECS[etype]
+        e.x = d["x"]; e.y = d["y"]; e.age = d["age"]; e.hunger = d["hunger"]
+        e.sex = Sex(d["sex"]); e.state = State(d["state"])
+        e.repro_cooldown_left = d["repro_cooldown_left"]
+        e.gestation_left = d["gestation_left"]; e.alive = d["alive"]
+        e.target_x = d["target_x"]; e.target_y = d["target_y"]
+        e.target_id = d["target_id"]
+        e._move_frac_x = d["_move_frac_x"]; e._move_frac_y = d["_move_frac_y"]
+        e.clan_id = d["clan_id"]; e.traits = d["traits"]
+        e.wood = d["wood"]; e.stone = d["stone"]; e.meat = d["meat"]
+        e.building_ticks_left = d["building_ticks_left"]
+        e.building_type = d["building_type"]
+        e.tool = d["tool"]; e.pick = d["pick"]; e.sickle = d["sickle"]
+        e.watering_can = d["watering_can"]; e.can_filled = d["can_filled"]
+        e.fishing_rod = d["fishing_rod"]; e.thirst = d["thirst"]
+        e._stuck_ticks = d["_stuck_ticks"]
+        e.chop_cooldown_left = d["chop_cooldown_left"]
+        e._build_target_x = d["_build_target_x"]
+        e._build_target_y = d["_build_target_y"]
+        e._build_target_type = d["_build_target_type"]
+        e._etype_str = etype.value; e._sex_str = e.sex.value
+        return e
 
 
 # ── Factory ─────────────────────────────────────────────────────────────────

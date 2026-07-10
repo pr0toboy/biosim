@@ -4,10 +4,13 @@ Appelée à chaque tick. Gère IA, déplacements, reproduction, mort.
 """
 import random
 import math
+import json
+import os
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import TYPE_CHECKING
-from .entities import Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS
+from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
+                       get_id_counter, set_id_counter)
 from .world import Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD, FERTILITY_TRAMPLE
 
 # ── Clans ─────────────────────────────────────────────────────────────────────
@@ -2009,3 +2012,61 @@ class Simulation:
             "clans":     [c.to_dict() for c in self.clans],
             "buildings": [b.to_dict() for b in self.buildings],
         }
+
+    # ── Sauvegarde / reprise ─────────────────────────────────────────────────
+    def save_state(self) -> dict:
+        """Snapshot complet et sans perte de l'état de la simulation. Inclut
+        l'état des RNG (random + numpy) pour une reprise EXACTE : un sim rechargé
+        continue le même flux aléatoire que l'original."""
+        np_s = np.random.get_state()
+        return {
+            "version": 1,
+            "tick_count": self.tick_count,
+            "raining": self.raining, "storming": self.storming,
+            "rain_ticks_left": self.rain_ticks_left,
+            "heatwave": self.heatwave, "heatwave_ticks_left": self.heatwave_ticks_left,
+            "_next_building_id": self._next_building_id,
+            "entity_id_counter": get_id_counter(),
+            "py_random_state": list(random.getstate()),
+            "np_random_state": [np_s[0], np_s[1].tolist(), int(np_s[2]),
+                                int(np_s[3]), float(np_s[4])],
+            "world": self.world.to_state(),
+            "entities": [e.to_state() for e in self.entities],
+            "clans": [asdict(c) for c in self.clans],
+            "buildings": [asdict(b) for b in self.buildings],
+        }
+
+    def load_state(self, d: dict):
+        """Restaure un snapshot save_state(). Remplace intégralement l'état."""
+        from .world import World
+        # World.from_state re-seed random/np dans __init__ → on restaure les RNG
+        # APRÈS, sinon la reprise repartirait sur le flux de la génération initiale.
+        self.world = World.from_state(d["world"])
+        self.tick_count = d["tick_count"]
+        self.raining = d["raining"]; self.storming = d["storming"]
+        self.rain_ticks_left = d["rain_ticks_left"]
+        self.heatwave = d["heatwave"]
+        self.heatwave_ticks_left = d["heatwave_ticks_left"]
+        self._next_building_id = d["_next_building_id"]
+        set_id_counter(d["entity_id_counter"])
+        self.entities = [Entity.from_state(e) for e in d["entities"]]
+        self.clans = [Clan(**c) for c in d["clans"]]
+        self.buildings = [Building(**b) for b in d["buildings"]]
+        self.events_log = []
+        self.stats_history = []
+        prs = d["py_random_state"]
+        random.setstate((prs[0], tuple(prs[1]), prs[2]))
+        nrs = d["np_random_state"]
+        np.random.set_state((nrs[0], np.array(nrs[1], dtype=np.uint32),
+                             nrs[2], nrs[3], nrs[4]))
+
+    def save(self, path: str):
+        """Écrit un snapshot JSON de façon atomique (tmp + os.replace)."""
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.save_state(), f, separators=(",", ":"))
+        os.replace(tmp, path)
+
+    def load(self, path: str):
+        with open(path) as f:
+            self.load_state(json.load(f))

@@ -2,10 +2,22 @@
 BioSim — Moteur de simulation
 World: grille, biomes, ressources
 """
+import base64
 import random
 from collections import deque
 import numpy as np
 from enum import IntEnum
+
+
+def _grid_to_b64(arr: np.ndarray) -> dict:
+    """Encode une grille numpy en base64 (compact + sans perte) pour la sauvegarde."""
+    return {"b64": base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode("ascii"),
+            "dtype": str(arr.dtype), "shape": list(arr.shape)}
+
+
+def _grid_from_b64(d: dict) -> np.ndarray:
+    a = np.frombuffer(base64.b64decode(d["b64"]), dtype=np.dtype(d["dtype"]))
+    return a.reshape(d["shape"]).copy()
 
 class Biome(IntEnum):
     WATER   = 0
@@ -516,3 +528,36 @@ class World:
             "depleted_rocks": self.get_depleted_rocks(),
             "fires":          self.get_fires(),
         }
+
+    # ── Sauvegarde / reprise ─────────────────────────────────────────────────
+    # On ne sérialise QUE les grilles MUTABLES. Les masques d'invariants
+    # (_forest/_mountain/_orig_grass/_walkable/_near_water/_nearest_water_tile)
+    # ne dépendent que de biomes qui ne changent jamais (forêt/montagne/eau/
+    # herbe-d'origine) → régénérés à l'identique par World(seed) au chargement.
+    def to_state(self) -> dict:
+        return {
+            "seed": self.seed, "width": self.width, "height": self.height,
+            "biome_grid":     _grid_to_b64(self.biome_grid),
+            "food_grid":      _grid_to_b64(self.food_grid),
+            "tree_grid":      _grid_to_b64(self.tree_grid),
+            "stone_grid":     _grid_to_b64(self.stone_grid),
+            "fertility_grid": _grid_to_b64(self.fertility_grid),
+            "fire_grid":      _grid_to_b64(self.fire_grid),
+        }
+
+    @classmethod
+    def from_state(cls, d: dict) -> "World":
+        w = cls(width=d["width"], height=d["height"], seed=d["seed"])
+        w.biome_grid     = _grid_from_b64(d["biome_grid"])
+        w.food_grid      = _grid_from_b64(d["food_grid"])
+        w.tree_grid      = _grid_from_b64(d["tree_grid"])
+        w.stone_grid     = _grid_from_b64(d["stone_grid"])
+        w.fertility_grid = _grid_from_b64(d["fertility_grid"])
+        w.fire_grid      = _grid_from_b64(d["fire_grid"])
+        # _max_grid / _regen_grid dépendent du biome (0 sur DIRT) → recomputer
+        # depuis le biome chargé pour rester cohérents avec l'état surpâturé.
+        w._max_grid   = w._build_max_grid()
+        w._regen_grid = w._build_regen_grid()
+        # Buffers de changements intra-tick : repartent vides.
+        w._biome_changes = []; w._chop_changes = []; w._mine_changes = []
+        return w

@@ -15,6 +15,10 @@ env/
 *.db
 *.sqlite
 *.sqlite3
+# Sauvegardes d'état (persistance) — jamais versionnées
+save.json
+save.json.tmp
+*.save.json
 
 # Claude Code (config locale)
 .claude/

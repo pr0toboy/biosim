@@ -68,6 +68,22 @@ MAX_WS_CLIENTS         = 64   # plafond de connexions WebSocket simultanées (an
 MAX_CONSECUTIVE_ERRORS = 20   # au-delà, on laisse la boucle crasher (systemd redémarre)
 _SEND_TIMEOUT          = 2.0  # timeout d'envoi par client (un client lent ne gèle plus tout)
 
+# ── Persistance ───────────────────────────────────────────────────────────────
+# Défauts inactifs → comportement inchangé (monde neuf à chaque démarrage). Les
+# endpoints /api/save et /api/load restent disponibles à la demande.
+SAVE_PATH       = os.environ.get("BIOSIM_SAVE_PATH",
+                                 os.path.join(os.path.dirname(__file__), "save.json"))
+AUTOSAVE_TICKS  = int(os.environ.get("BIOSIM_AUTOSAVE_TICKS", "0"))  # 0 = autosave off
+LOAD_ON_START   = bool(os.environ.get("BIOSIM_LOAD_ON_START"))       # charge SAVE_PATH au boot
+
+
+def _write_save(snap: dict):
+    """Écrit le snapshot JSON de façon atomique (appelé dans un thread executor)."""
+    tmp = SAVE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(snap, f, separators=(",", ":"))
+    os.replace(tmp, SAVE_PATH)
+
 
 # ── Loop de simulation (tourne en arrière-plan) ─────────────────────────────
 async def _send_one(ws: WebSocket, msg: str):
@@ -118,11 +134,24 @@ async def simulation_loop():
             # inutile de bloquer les ticks/full_state pendant la sérialisation + I/O réseau.
             msg = json.dumps({"type": "tick", "data": data})
             await _broadcast(msg)
+            # Autosave optionnel : snapshot sous verrou (pas de step concurrent),
+            # écriture disque hors verrou (I/O) → ne fige pas la boucle.
+            if AUTOSAVE_TICKS and data["tick"] % AUTOSAVE_TICKS == 0:
+                async with state_lock:
+                    snap = sim.save_state()
+                await loop.run_in_executor(None, _write_save, snap)
         await asyncio.sleep(tick_interval)
 
 
 @app.on_event("startup")
 async def startup():
+    # Reprise optionnelle depuis un save au démarrage (défaut : monde neuf).
+    if LOAD_ON_START and os.path.exists(SAVE_PATH):
+        try:
+            sim.load(SAVE_PATH)
+            print(f"[biosim] état rechargé depuis {SAVE_PATH} (tick {sim.tick_count})")
+        except Exception:
+            traceback.print_exc()
     asyncio.create_task(simulation_loop())
 
 
@@ -158,6 +187,31 @@ async def pause():
     global sim_running
     sim_running = not sim_running
     return {"running": sim_running}
+
+
+@app.post("/api/save")
+async def api_save():
+    # Snapshot sous verrou (cohérent vs step), écriture disque hors verrou.
+    async with state_lock:
+        snap = sim.save_state()
+    await asyncio.get_running_loop().run_in_executor(None, _write_save, snap)
+    return {"ok": True, "path": SAVE_PATH, "tick": snap["tick_count"],
+            "entities": len(snap["entities"])}
+
+
+@app.post("/api/load")
+async def api_load():
+    if not os.path.exists(SAVE_PATH):
+        return {"ok": False, "error": "aucun fichier de sauvegarde"}
+    # Chargement sous verrou du début à la fin (mutation intégrale de l'état).
+    async with state_lock:
+        try:
+            sim.load(SAVE_PATH)
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        tick, n = sim.tick_count, len(sim.entities)
+    return {"ok": True, "tick": tick, "entities": n}
 
 
 @app.websocket("/ws")
