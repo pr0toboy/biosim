@@ -143,6 +143,23 @@ async def simulation_loop():
         await asyncio.sleep(tick_interval)
 
 
+def _sim_task_done(task: "asyncio.Task"):
+    """B1 : si la boucle de simulation meurt (bug déterministe → `raise` après
+    MAX_CONSECUTIVE_ERRORS), on termine le PROCESS pour de vrai. Une exception
+    dans une task asyncio ne tue pas uvicorn → sans ça la sim reste gelée, le
+    serveur vivant, et systemd aveugle (l'intention « systemd redémarre propre »
+    ne se réalisait jamais). os._exit(1) → Restart=always relance réellement.
+    Un arrêt propre du serveur annule la task → on ne tue rien dans ce cas."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        traceback.print_exc()
+    print("[biosim] boucle de simulation terminée → arrêt du process (redémarrage systemd)",
+          flush=True)
+    os._exit(1)
+
+
 @app.on_event("startup")
 async def startup():
     # Reprise optionnelle depuis un save au démarrage (défaut : monde neuf).
@@ -152,7 +169,11 @@ async def startup():
             print(f"[biosim] état rechargé depuis {SAVE_PATH} (tick {sim.tick_count})")
         except Exception:
             traceback.print_exc()
-    asyncio.create_task(simulation_loop())
+    # Garder la ref (sinon le GC peut ramasser la task en plein vol) + callback de
+    # fin qui fait redémarrer le process si la boucle meurt (B1).
+    task = asyncio.create_task(simulation_loop())
+    task.add_done_callback(_sim_task_done)
+    app.state.sim_task = task
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
