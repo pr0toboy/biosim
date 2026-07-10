@@ -159,6 +159,31 @@ def test_preservation_live_counter():
     print("  test_preservation_live_counter OK (1 seul mouton tué, seuil respecté)")
 
 
+def test_c1bis_toolless_human_crafts_without_depositing():
+    """Régression C1bis : un humain sans outil, adjacent à une maison du clan qui a
+    du bois en stock, DOIT fabriquer une pioche/hache même s'il ne transporte rien
+    à déposer. Sans le découplage craft↔dépôt, la chaîne d'outils se fige quand le
+    bois du clan est capé (plus personne ne dépose → plus personne ne fabrique)."""
+    world = World(width=60, height=45, seed=7)
+    lx, ly = _find_land_tile(world)
+    h = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    h.clan_id = 1
+    h.hunger = 10.0
+    h.thirst = 10.0
+    h.pick = None
+    h.tool = None
+    h.wood = 0
+    h.stone = 0
+    house = Building(id=1, clan_id=1, x=lx, y=ly, btype="house", wood=50, stone=0)
+    tick_entity(h, world, [h], [], [], tick=1,
+                clan_bldg={1: {"house": [house]}}, species_counts={"human": 5})
+    assert (h.pick is not None or h.tool is not None), (
+        "l'humain sans outil n'a rien fabriqué alors qu'une maison du clan avait le bois")
+    assert house.wood < 50, "aucune ressource consommée → pas de fabrication"
+    print(f"  test_c1bis_toolless_human_crafts_without_depositing OK "
+          f"(pick={h.pick}, tool={h.tool}, bois maison {house.wood})")
+
+
 def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
     """Persistance : (1) round-trip sans perte (état identique après load) ;
     (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
@@ -203,6 +228,7 @@ if __name__ == "__main__":
     failures = 0
     for fn in (test_deposit_no_crash_when_houses_full,
                test_preservation_live_counter, test_water_stranded_entity_rescued,
+               test_c1bis_toolless_human_crafts_without_depositing,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:

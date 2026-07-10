@@ -78,6 +78,11 @@ PICK_WOOD_COST      = 8    # bois stocké pour fabriquer une pioche en bois
 STONE_PICK_COST     = 5    # pierre stockée pour upgrader → pioche en pierre
 STONE_PICK_BONUS    = 1    # pierre bonus par minage avec pioche pierre (total 1+1=2)
 MAX_STONE_CARRY     = 3    # pierre max transportable par un humain
+# En dessous de ce stock de pierre TOTAL dans le clan, un mineur cherche la montagne
+# minable la plus proche sur TOUTE la carte (pas seulement en vision) — sinon un clan
+# sans montagne en vue ne mine jamais (→ ni puit, ni moulin, ni niveau 2). Au-dessus,
+# on n'envoie plus les mineurs traverser la carte en continu (garde-fou perf). (C1)
+CLAN_STONE_BOOTSTRAP = 20
 
 # ── Champ de blé ──────────────────────────────────────────────────────────────
 WHEAT_TICKS_PER_STAGE  = 180   # ticks pour passer d'un stade au suivant (×3 = 540 total)
@@ -508,6 +513,39 @@ def _drink_or_seek_water(entity: Entity, world: "World", events: list[dict],
     return False
 
 
+def _try_craft(entity: Entity, house, events: list) -> bool:
+    """Fabrique le prochain outil prioritaire finançable par `house` (bois/pierre
+    stockés) : pioche bois > hache bois > pioche pierre > hache pierre > arrosoir >
+    faucille > canne. Retourne True si un outil a été fabriqué. Partagé par le dépôt
+    (3.5) et la fabrication découplée (C1bis) — sans ce découplage, quand le bois du
+    clan est capé plus personne ne dépose donc plus personne ne fabrique, et les
+    humains nés ensuite restent sans outil (chaîne pierre/bois figée)."""
+    if entity.pick is None and house.wood >= PICK_WOOD_COST:
+        house.wood -= PICK_WOOD_COST; entity.pick = "wood_pick"
+        events.append({"type": "craft_pick", "pick": "wood_pick", "clan_id": entity.clan_id})
+    elif entity.tool is None and house.wood >= AXE_CRAFT_COST:
+        house.wood -= AXE_CRAFT_COST; entity.tool = "axe"
+        events.append({"type": "craft_axe", "tool": "axe", "clan_id": entity.clan_id})
+    elif entity.pick == "wood_pick" and house.stone >= STONE_PICK_COST:
+        house.stone -= STONE_PICK_COST; entity.pick = "stone_pick"
+        events.append({"type": "craft_pick", "pick": "stone_pick", "clan_id": entity.clan_id})
+    elif entity.tool == "axe" and house.stone >= STONE_AXE_COST:
+        house.stone -= STONE_AXE_COST; entity.tool = "stone_axe"
+        events.append({"type": "craft_axe", "tool": "stone_axe", "clan_id": entity.clan_id})
+    elif entity.watering_can is None and house.wood >= WATERING_CAN_WOOD_COST:
+        house.wood -= WATERING_CAN_WOOD_COST; entity.watering_can = "watering_can"
+        events.append({"type": "craft_watering_can", "clan_id": entity.clan_id})
+    elif entity.sickle is None and house.stone >= SICKLE_STONE_COST:
+        house.stone -= SICKLE_STONE_COST; entity.sickle = "sickle"
+        events.append({"type": "craft_sickle", "clan_id": entity.clan_id})
+    elif entity.fishing_rod is None and house.wood >= FISHING_ROD_WOOD_COST:
+        house.wood -= FISHING_ROD_WOOD_COST; entity.fishing_rod = "fishing_rod"
+        events.append({"type": "craft_fishing_rod", "clan_id": entity.clan_id})
+    else:
+        return False
+    return True
+
+
 class _TickCtx:
     """Contexte tick-global partagé par TOUTES les entités d'un même tick.
     Construit une seule fois par step() (au lieu de repasser 16 arguments à chaque
@@ -918,42 +956,8 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 nearest.wood  += min(entity.wood, _wood_space)
                 entity.wood   = max(0, entity.wood - _wood_space)
                 nearest.stone += entity.stone; entity.stone = 0
-                # Fabrication d'outils (priorité : pioche bois > hache bois > pioche pierre > hache pierre)
-                if entity.pick is None and nearest.wood >= PICK_WOOD_COST:
-                    nearest.wood -= PICK_WOOD_COST
-                    entity.pick = "wood_pick"
-                    events.append({"type": "craft_pick", "pick": "wood_pick",
-                                   "clan_id": entity.clan_id})
-                elif entity.tool is None and nearest.wood >= AXE_CRAFT_COST:
-                    nearest.wood -= AXE_CRAFT_COST
-                    entity.tool = "axe"
-                    events.append({"type": "craft_axe", "tool": "axe",
-                                   "clan_id": entity.clan_id})
-                elif entity.pick == "wood_pick" and nearest.stone >= STONE_PICK_COST:
-                    nearest.stone -= STONE_PICK_COST
-                    entity.pick = "stone_pick"
-                    events.append({"type": "craft_pick", "pick": "stone_pick",
-                                   "clan_id": entity.clan_id})
-                elif entity.tool == "axe" and nearest.stone >= STONE_AXE_COST:
-                    nearest.stone -= STONE_AXE_COST
-                    entity.tool = "stone_axe"
-                    events.append({"type": "craft_axe", "tool": "stone_axe",
-                                   "clan_id": entity.clan_id})
-                elif entity.watering_can is None and nearest.wood >= WATERING_CAN_WOOD_COST:
-                    nearest.wood -= WATERING_CAN_WOOD_COST
-                    entity.watering_can = "watering_can"
-                    events.append({"type": "craft_watering_can",
-                                   "clan_id": entity.clan_id})
-                elif entity.sickle is None and nearest.stone >= SICKLE_STONE_COST:
-                    nearest.stone -= SICKLE_STONE_COST
-                    entity.sickle = "sickle"
-                    events.append({"type": "craft_sickle",
-                                   "clan_id": entity.clan_id})
-                elif entity.fishing_rod is None and nearest.wood >= FISHING_ROD_WOOD_COST:
-                    nearest.wood -= FISHING_ROD_WOOD_COST
-                    entity.fishing_rod = "fishing_rod"
-                    events.append({"type": "craft_fishing_rod",
-                                   "clan_id": entity.clan_id})
+                # Fabrication d'outils (cascade partagée avec C1bis, cf. _try_craft)
+                _try_craft(entity, nearest, events)
             elif entity.wood >= MAX_CARRY or entity.stone >= MAX_STONE_CARRY:
                 # Portée pleine → aller déposer
                 entity.state = State.WANDERING
@@ -962,6 +966,30 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _move_toward(entity, entity.target_x, entity.target_y,
                              _eff_speed, world)
                 return True
+    # C1bis : fabrication d'outils DÉCOUPLÉE du dépôt. Un humain qui manque un outil
+    # de base (pioche OU hache) va à la maison du clan qui a le stock et le fabrique,
+    # même sans rien à déposer. Sinon, une fois le bois du clan capé (plus de dépôt),
+    # les humains nés ensuite restent sans outil → coupe/minage qui s'éteint (chaîne
+    # figée même avec de la pierre en stock).
+    if (entity.spec.can_build and entity.clan_id is not None
+            and entity.hunger < 70
+            and (entity.pick is None or entity.tool is None)):
+        _craftable = [h for h in _cb.get("house", [])
+                      if (entity.pick is None and h.wood >= PICK_WOOD_COST)
+                      or (entity.tool is None and h.wood >= AXE_CRAFT_COST)]
+        if _craftable:
+            _hc = min(_craftable, key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
+            if _dist(entity.x, entity.y, _hc.x, _hc.y) < 1.5:
+                if _try_craft(entity, _hc, events):
+                    entity.state = State.BUILDING
+                    return True
+            else:
+                entity.state = State.BUILDING
+                entity.target_x = float(_hc.x)
+                entity.target_y = float(_hc.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
+
     # 4.1 Travailler sur un chantier en cours du clan (n'importe quel humain peut contribuer)
     # Ne pas interrompre un humain qui se rend déjà sur son propre chantier planifié
     if (entity.spec.can_build and entity.clan_id is not None and entity.hunger < 80
@@ -1476,6 +1504,25 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             _move_toward(entity, entity.target_x, entity.target_y,
                          _eff_speed * 0.8, world)
             return True
+        # Aucune roche visible → chercher la montagne minable la plus proche sur
+        # TOUTE la carte (symétrie exacte avec le scan bois plus haut). Sans ça, un
+        # clan éloigné de toute montagne ne mine jamais → chaîne pierre cassée : pas
+        # de puit/moulin/niveau 2 (C1). Gardé au stock de pierre du clan pour ne pas
+        # envoyer tous les mineurs à l'autre bout de la carte en permanence.
+        _clan_stone_stored = sum(b.stone for b in _cb.get("house", []))
+        if _clan_stone_stored < CLAN_STONE_BOOTSTRAP:
+            rock_tiles = np.argwhere(
+                world._mountain_mask & (world.stone_grid >= STONE_STUMP_THRESHOLD)
+            )
+            if len(rock_tiles):
+                dists = (rock_tiles[:, 1] - entity.x)**2 + (rock_tiles[:, 0] - entity.y)**2
+                best = rock_tiles[int(np.argmin(dists))]
+                entity.state = State.MINING
+                entity.target_x = float(best[1])
+                entity.target_y = float(best[0])
+                _move_toward(entity, entity.target_x, entity.target_y,
+                             _eff_speed * 0.8, world)
+                return True
     # 4.65 Continuation d'une exploration longue distance déjà engagée
     if (entity.etype == EntityType.HUMAN
             and entity.clan_id is not None
