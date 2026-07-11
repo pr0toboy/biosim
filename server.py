@@ -78,10 +78,13 @@ LOAD_ON_START   = bool(os.environ.get("BIOSIM_LOAD_ON_START"))       # charge SA
 
 
 def _write_save(snap: dict):
-    """Écrit le snapshot JSON de façon atomique (appelé dans un thread executor)."""
+    """Écrit le snapshot JSON de façon atomique + rotation 1 niveau (.prev) :
+    si l'écriture du nouveau save était corrompue en amont, le précédent survit."""
     tmp = SAVE_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(snap, f, separators=(",", ":"))
+    if os.path.exists(SAVE_PATH):
+        os.replace(SAVE_PATH, SAVE_PATH + ".prev")
     os.replace(tmp, SAVE_PATH)
 
 

@@ -46,3 +46,4 @@ logs/
 # Distribution / packaging
 *.tar.gz
 *.zip
+save.json.prev
