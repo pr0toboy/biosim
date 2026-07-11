@@ -44,6 +44,7 @@ class State(str, Enum):
     SEEKING_WATER = "seeking_water"
     DRINKING      = "drinking"
     EXPLORING     = "exploring"
+    TRADING       = "trading"    # marchand en mission caravane (bloc D1)
     DEAD          = "dead"
 
 
@@ -143,6 +144,13 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         wood_cost=14, stone_cost=12,
         build_time=70, pop_bonus=0,
         min_dist=6, min_from_fire=3, max_from_fire=18,
+        max_per_clan=1,
+    ),
+    "market": BuildingSpec(  # bloc D1 : Âge de Pierre (age >= 1). Bois SEUL — coût
+        btype="market",      # pierre rendrait le marché inconstructible précisément
+        wood_cost=14, stone_cost=0,   # chez l'acheteur pauvre-pierre (sonde : seed7
+        build_time=50, pop_bonus=0,   # = 0 pierre en pool sur 3500 ticks).
+        min_dist=6, min_from_fire=3, max_from_fire=10,   # place du village, visible
         max_per_clan=1,
     ),
 }
@@ -274,6 +282,7 @@ class Entity:
         "_stuck_ticks", "chop_cooldown_left",
         "_etype_str", "_sex_str",
         "_build_target_x", "_build_target_y", "_build_target_type",
+        "cargo_wood", "cargo_stone", "trade_phase", "trade_dest_cid", "trade_ticks",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -304,6 +313,13 @@ class Entity:
         self.building_type: Optional[str] = None  # "house", "wheatfield", …
         self.tool: Optional[str] = None   # None, "axe", "stone_axe", "iron_axe"
         self.pick: Optional[str] = None   # None, "wood_pick", "stone_pick", "iron_pick"
+        # Mission caravane (bloc D1). cargo_* ≠ wood/stone : la cargaison n'est
+        # jamais happée par le dépôt 3.5 et peut dépasser MAX_CARRY.
+        self.cargo_wood: int = 0
+        self.cargo_stone: int = 0
+        self.trade_phase: Optional[str] = None      # None | "load" | "out" | "home"
+        self.trade_dest_cid: Optional[int] = None   # clan destination
+        self.trade_ticks: int = 0                   # anti-zombie (timeout mission)
         self.sickle: Optional[str] = None        # None, "sickle"
         self.watering_can: Optional[str] = None  # None, "watering_can"
         self.can_filled: bool = False             # arrosoir rempli d'eau
@@ -353,6 +369,9 @@ class Entity:
             d["wcan"]      = self.watering_can   # watering_can
             d["can_filled"]= self.can_filled
             d["rod"]       = self.fishing_rod
+        if self.trade_phase is not None:
+            d["cargo"] = [self.cargo_wood, self.cargo_stone]   # ballot visible (D1)
+            d["dest"] = self.trade_dest_cid                    # « → clan N » au tooltip
         if self.state == State.BUILDING and self.target_x is not None:
             d["tx"] = int(round(self.target_x))
             d["ty"] = int(round(self.target_y))
@@ -389,6 +408,9 @@ class Entity:
             "_build_target_x": self._build_target_x,
             "_build_target_y": self._build_target_y,
             "_build_target_type": self._build_target_type,
+            "cargo_wood": self.cargo_wood, "cargo_stone": self.cargo_stone,
+            "trade_phase": self.trade_phase, "trade_dest_cid": self.trade_dest_cid,
+            "trade_ticks": self.trade_ticks,
         }
 
     @classmethod
@@ -418,6 +440,12 @@ class Entity:
         e._build_target_x = d["_build_target_x"]
         e._build_target_y = d["_build_target_y"]
         e._build_target_type = d["_build_target_type"]
+        # Mission caravane (D1) — compat vieux saves via d.get
+        e.cargo_wood = d.get("cargo_wood", 0)
+        e.cargo_stone = d.get("cargo_stone", 0)
+        e.trade_phase = d.get("trade_phase")
+        e.trade_dest_cid = d.get("trade_dest_cid")
+        e.trade_ticks = d.get("trade_ticks", 0)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

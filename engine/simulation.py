@@ -125,6 +125,25 @@ FORGE_MAX_IRON     = 20    # stock de fer max dans une forge (cap de dépôt)
 # affamerait la chaîne PIERRE). Entre RESTOCK et MAX, seul le dépôt remplit.
 IRON_RESTOCK_THRESHOLD = 8
 
+# ── Économie / troc (bloc D1 « Marchés & caravanes ») ──────────────────────────
+# Route unique : A (riche-bois, pauvre-pierre) ACHÈTE de la pierre à B
+# (thésauriseur) en payant en bois. Seuils calibrés sur pools MESURÉS (sonde
+# 2×3500 ticks, scratchpad/probe_s*.jsonl) : bois de clan mûr = 100-165 (sature),
+# pierre = 0-19 chronique chez les pauvres vs 300-6000 chez le thésauriseur.
+MARKET_AGE           = 1     # Âge de Pierre requis pour bâtir un marché
+TRADE_CHECK_PERIOD   = 120   # ticks entre 2 évaluations de routes (dérivé de tick_count)
+TRADE_WOOD_LOT       = 12    # bois emporté par caravane (cargo dédié, hors MAX_CARRY)
+TRADE_STONE_PRICE    = 6     # pierre rapportée (= coût d'un puit → l'import débloque)
+TRADE_WOOD_SURPLUS   = 60    # pool bois min de l'acheteur A (peut payer)
+TRADE_STONE_DEFICIT  = 30    # pool pierre max de A (> CLAN_STONE_BOOTSTRAP=20 →
+                             # l'import COMPLÈTE le minage C1 sans le remplacer)
+TRADE_STONE_SURPLUS  = 60    # pool pierre min du vendeur B (thésauriseurs seulement)
+TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
+MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
+MARKET_DRAIN_PERIOD  = 4     # 1 ressource étal→maisons tous les N ticks
+MERCHANT_HUNGER_MAX  = 50    # éligibilité au recrutement d'un marchand
+MERCHANT_THIRST_MAX  = 45
+
 # ── Champ de blé ──────────────────────────────────────────────────────────────
 WHEAT_TICKS_PER_STAGE  = 180   # ticks pour passer d'un stade au suivant (×3 = 540 total)
 WHEAT_HARVEST_FOOD     = 45.0  # réduction de faim lors de la récolte
@@ -617,6 +636,149 @@ def _spend_pool_stone(houses, amount: int) -> bool:
     return True
 
 
+def _spend_pool_wood(houses, amount: int) -> bool:
+    """Dépense `amount` de bois depuis le POOL des maisons (tout-ou-rien, greedy).
+    Miroir exact de _spend_pool_stone. (D1 : chargement de caravane.)"""
+    if sum(h.wood for h in houses) < amount:
+        return False
+    left = amount
+    for h in houses:
+        take = min(h.wood, left)
+        h.wood -= take; left -= take
+        if left <= 0:
+            break
+    return True
+
+
+def _take_pool_stone(houses, want: int) -> int:
+    """Prélève JUSQU'À `want` de pierre du pool (partiel autorisé). Retourne le
+    prélevé réel. (D1 : le vendeur donne ce qu'il a au moment de l'échange.)"""
+    got = 0
+    for h in houses:
+        take = min(h.stone, want - got)
+        h.stone -= take; got += take
+        if got >= want:
+            break
+    return got
+
+
+def _add_pool_wood(houses, n: int):
+    """Répartit `n` bois dans les maisons en respectant MAX_WOOD_PER_HOUSE
+    (surplus perdu = comportement d'origine du dépôt). (D1 : drain d'étal, abort.)"""
+    for h in houses:
+        space = MAX_WOOD_PER_HOUSE - h.wood
+        if space <= 0:
+            continue
+        put = min(space, n)
+        h.wood += put; n -= put
+        if n <= 0:
+            break
+
+
+def _add_pool_stone(houses, n: int):
+    """Ajoute `n` pierre à la 1re maison (la pierre n'est pas capée, cf. dépôt 3.5)."""
+    if houses and n > 0:
+        houses[0].stone += n
+
+
+def _clear_trade(entity: Entity):
+    """Efface proprement une mission caravane (D1)."""
+    entity.trade_phase = None
+    entity.trade_dest_cid = None
+    entity.trade_ticks = 0
+    entity.cargo_wood = 0
+    entity.cargo_stone = 0
+
+
+def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
+    """Mission caravane (D1) : load (charge le bois au marché maison, atomique
+    pool→cargo) → out (échange au marché destination : bois → étal B, pierre du
+    pool B → cargo) → home (dépose sur l'étal maison, drainé ensuite vers les
+    maisons). Un bien n'existe qu'à UN endroit ; chaque transfert est atomique en
+    un tick → aucun chemin de duplication/fuite. La survie (_vitals/_beh_survival)
+    reste PRIORITAIRE dans la cascade : la mission se met en pause, ne s'annule
+    pas. Filet : timeout → abort qui re-crédite la cargaison au pool."""
+    world = ctx.world; events = ctx.events
+    entity.trade_ticks += 1
+    if entity.trade_ticks > TRADE_TIMEOUT:
+        houses = _cb.get("house", [])
+        if houses:   # re-crédit (perte bornée à un lot si plus de maisons)
+            _add_pool_wood(houses, entity.cargo_wood)
+            _add_pool_stone(houses, entity.cargo_stone)
+        events.append({"type": "trade_aborted", "clan_id": entity.clan_id})
+        _clear_trade(entity)
+        return False
+    phase = entity.trade_phase
+    if phase == "load":
+        mkts = _cb.get("market", [])
+        if not mkts:   # marché maison disparu avant chargement → rien n'a bougé
+            _clear_trade(entity)
+            return False
+        mkt = mkts[0]
+        if _dist(entity.x, entity.y, mkt.x, mkt.y) < 1.5:
+            if _spend_pool_wood(_cb.get("house", []), TRADE_WOOD_LOT):
+                entity.cargo_wood = TRADE_WOOD_LOT
+                entity.trade_phase = "out"
+                events.append({"type": "trade_depart", "clan_id": entity.clan_id,
+                               "dest_clan_id": entity.trade_dest_cid,
+                               "wood": TRADE_WOOD_LOT})
+            else:   # pool fondu entre-temps : mission annulée, rien n'a été déduit
+                _clear_trade(entity)
+            return True
+        entity.state = State.TRADING
+        entity.target_x = float(mkt.x); entity.target_y = float(mkt.y)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    if phase == "out":
+        dest_cb = (ctx.clan_bldg or {}).get(entity.trade_dest_cid, {})
+        dmkts = dest_cb.get("market", [])
+        if not dmkts:   # clan B éteint (E8 a ruiné son marché) → demi-tour, cargo intact
+            entity.trade_phase = "home"
+            return True
+        dmkt = dmkts[0]
+        if _dist(entity.x, entity.y, dmkt.x, dmkt.y) < 1.5:
+            got = _take_pool_stone(dest_cb.get("house", []), TRADE_STONE_PRICE)
+            if got > 0:   # échange atomique : bois → étal B, pierre → cargo
+                dmkt.wood = min(MARKET_MAX_STOCK, dmkt.wood + entity.cargo_wood)
+                entity.cargo_wood = 0
+                entity.cargo_stone = got
+                events.append({"type": "trade_exchange", "clan_id": entity.clan_id,
+                               "dest_clan_id": entity.trade_dest_cid,
+                               "wood": TRADE_WOOD_LOT, "stone": got,
+                               "x": dmkt.x, "y": dmkt.y})
+            # got == 0 (B vidé en route) → il garde son bois et rentre
+            entity.trade_phase = "home"
+            return True
+        entity.state = State.TRADING
+        entity.target_x = float(dmkt.x); entity.target_y = float(dmkt.y)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    if phase == "home":
+        mkts = _cb.get("market", [])
+        if not mkts:   # défensif (impossible tant que le clan vit) → re-crédit direct
+            houses = _cb.get("house", [])
+            if houses:
+                _add_pool_wood(houses, entity.cargo_wood)
+                _add_pool_stone(houses, entity.cargo_stone)
+            _clear_trade(entity)
+            return False
+        mkt = mkts[0]
+        if _dist(entity.x, entity.y, mkt.x, mkt.y) < 1.5:
+            mkt.stone = min(MARKET_MAX_STOCK, mkt.stone + entity.cargo_stone)
+            mkt.wood = min(MARKET_MAX_STOCK, mkt.wood + entity.cargo_wood)  # invendu visible
+            events.append({"type": "trade_complete", "clan_id": entity.clan_id,
+                           "dest_clan_id": entity.trade_dest_cid,
+                           "stone": entity.cargo_stone, "wood_back": entity.cargo_wood})
+            _clear_trade(entity)
+            return True
+        entity.state = State.TRADING
+        entity.target_x = float(mkt.x); entity.target_y = float(mkt.y)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    _clear_trade(entity)   # phase inconnue (save corrompu) → reset défensif
+    return False
+
+
 def _try_forge_upgrade(entity: Entity, forge, events: list) -> bool:
     """Bloc B : à la forge, upgrade un outil PIERRE → FER en consommant le fer
     stocké. Pioche pierre → pioche fer, puis hache pierre → hache fer."""
@@ -879,14 +1041,18 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                                    "prey": prey.etype.value,
                                    "x": entity.ix, "y": entity.iy})
                 return True
-    # 2b. Conflit inter-clan (humains très affamés attaquent clan ennemi)
+    # 2b. Conflit inter-clan (humains très affamés attaquent clan ennemi).
+    # Trêve marchande (D1) : un marchand n'attaque pas, une caravane n'est pas
+    # attaquée — sinon toute route passant en vision d'ennemis affamés mourrait.
     if (entity.etype == EntityType.HUMAN and entity.clan_id is not None
-            and entity.hunger > 65 and clans):
+            and entity.hunger > 65 and clans
+            and entity.trade_phase is None):
         for e in all_entities:
             if (e is not entity and e.alive
                     and e.etype == EntityType.HUMAN
                     and e.clan_id is not None
-                    and e.clan_id != entity.clan_id):
+                    and e.clan_id != entity.clan_id
+                    and e.trade_phase is None):
                 d = _dist(entity.x, entity.y, e.x, e.y)
                 if d < entity.traits["vision"]:
                     entity.state = State.HUNTING
@@ -1021,6 +1187,12 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     predators = ctx.predators; predator_grid = ctx.predator_grid
     entity_grid = ctx.entity_grid
     spec = entity.spec
+    # 3.4 Mission caravane (D1) — en tête : un marchand en mission n'est jamais
+    # happé par un chantier/craft/repro. La survie (blocs amont de la cascade)
+    # reste prioritaire : la mission se met en pause, ne s'annule pas.
+    if entity.trade_phase is not None:
+        if _beh_trade(entity, ctx, _cb, _eff_speed):
+            return True
     # 3.5 Dépôt des ressources à la maison du clan
     if ((entity.spec.can_chop or entity.spec.can_mine)
             and (entity.wood > 0 or entity.stone > 0)
@@ -1263,6 +1435,11 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         if _spend_pool_stone(clan_houses_t, bspec_t.stone_cost):
                             dw.wood -= bspec_t.wood_cost
                             can_build_t = True
+                elif btype_t == "market":  # bloc D1 : bois seul, d'une maison
+                    dw = max(clan_houses_t, key=lambda b: b.wood) if clan_houses_t else None
+                    if dw and dw.wood >= bspec_t.wood_cost:
+                        dw.wood -= bspec_t.wood_cost
+                        can_build_t = True
                 elif btype_t == "wheatfield":
                     can_build_t = True  # pas de coût en ressources
             if can_build_t:
@@ -1479,6 +1656,49 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         entity._build_target_x = float(fx); entity._build_target_y = float(fy)
                         entity.state = State.BUILDING
                         entity.target_x = float(fx); entity.target_y = float(fy)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
+                        return True
+    # 4.29 Construction d'un MARCHÉ (bloc D1) : clan de l'Âge de Pierre, ≥2 maisons,
+    # pas encore de marché. Bois seul (un coût pierre le rendrait inconstructible
+    # précisément chez l'acheteur pauvre-pierre). Placement près du feu (place du
+    # village). Miroir du bloc forge 4.28.
+    if (entity.spec.can_build
+            and entity.clan_id is not None
+            and entity.building_type is None
+            and entity._build_target_type is None
+            and entity.hunger < 65
+            and clans):
+        _clan_mk = clans.get(entity.clan_id)
+        if _clan_mk is not None and _clan_mk.age >= MARKET_AGE:
+            bspec_mk  = BUILDING_SPECS["market"]
+            clan_mks  = _cb.get("market", [])
+            clan_sites_mk = _cb.get("site_market", [])
+            clan_houses = _cb.get("house", [])
+            if (len(clan_houses) >= 2 and not clan_sites_mk
+                    and (bspec_mk.max_per_clan == 0
+                         or len(clan_mks) < bspec_mk.max_per_clan)):
+                donor = max(clan_houses, key=lambda b: b.wood)
+                already_planned_mk = (
+                    any(ev.get("type") == "start_site" and ev.get("btype") == "market"
+                        and ev.get("clan_id") == entity.clan_id for ev in events)
+                    or any(e._build_target_type == "market" and e.clan_id == entity.clan_id
+                           for e in all_entities if e.alive and e is not entity))
+                if donor.wood >= bspec_mk.wood_cost and not already_planned_mk:
+                    for _ in range(30):
+                        angle = random.uniform(0, 2 * math.pi)
+                        dist  = random.uniform(bspec_mk.min_from_fire, bspec_mk.max_from_fire)
+                        mx2 = int(_clan_mk.cx + math.cos(angle) * dist)
+                        my2 = int(_clan_mk.cy + math.sin(angle) * dist)
+                        if not world.is_valid(mx2, my2) or not world.is_walkable(mx2, my2):
+                            continue
+                        if any(_dist(mx2, my2, b.x, b.y) < bspec_mk.min_dist
+                               for b in (buildings or []) if b.btype == "market"):
+                            continue
+                        entity._build_target_type = "market"
+                        entity._build_target_x = float(mx2); entity._build_target_y = float(my2)
+                        entity.state = State.BUILDING
+                        entity.target_x = float(mx2); entity.target_y = float(my2)
                         _move_toward(entity, entity.target_x, entity.target_y,
                                      _eff_speed, world)
                         return True
@@ -2107,6 +2327,12 @@ class Simulation:
                 clan_bldg[_cid][_b.btype] = []
             clan_bldg[_cid][_b.btype].append(_b)
 
+        # Dispatch des caravanes (D1) : évaluation périodique des routes de troc.
+        # 100 % sans RNG (paires triées, nearest + tie-break id) → hash-neutre
+        # tant qu'aucun marché n'existe.
+        if self.tick_count % TRADE_CHECK_PERIOD == 0 and len(self.clans) >= 2:
+            self._dispatch_caravans(clan_bldg, tick_events)
+
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
 
@@ -2171,6 +2397,10 @@ class Simulation:
                 tick_events.append({"type": f"build_{real_btype}",
                                     "clan_id": b.clan_id,
                                     "x": b.x, "y": b.y})
+
+        # Drain des étals de marché (D1) : les imports réintègrent les maisons
+        if self.tick_count % MARKET_DRAIN_PERIOD == 0:
+            self._drain_markets(clan_bldg)
 
         # Production de pain dans les moulins
         for b in self.buildings:
@@ -2285,7 +2515,7 @@ class Simulation:
             for b in self.buildings:
                 if b.clan_id not in dead_clan_ids:
                     kept.append(b)
-                elif b.btype in ("house", "mill", "well", "forge"):
+                elif b.btype in ("house", "mill", "well", "forge", "market"):
                     ruins_per_clan[b.clan_id] = ruins_per_clan.get(b.clan_id, 0) + 1
                     b.btype = "ruin"
                     b.clan_id = -1            # orphelin : ne matche plus aucun clan vivant
@@ -2314,7 +2544,7 @@ class Simulation:
         # Chaque clan vivant accumule de la science (bâtiments durables + pop) et
         # franchit ses âges. Événement `clan_age_up` à chaque passage → visible.
         if self.clans:
-            _DURABLE = ("house", "mill", "well", "wheatfield", "forge")
+            _DURABLE = ("house", "mill", "well", "wheatfield", "forge", "market")
             _bld_per_clan: dict = {}
             for b in self.buildings:
                 if b.btype in _DURABLE:
@@ -2381,12 +2611,78 @@ class Simulation:
             counts[e.etype.value] += 1
         return {"populations": counts, "total": len(self.entities)}
 
+    # ── Économie / caravanes (bloc D1) ───────────────────────────────────────
+    def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
+        """Évalue les routes de troc et recrute AU PLUS UNE caravane par appel.
+        Route : A (pool bois ≥ SURPLUS, pierre < DEFICIT, marché fini) achète à
+        B = le plus PROCHE des clans à marché fini et pierre ≥ SURPLUS.
+        Aucun RNG (ordres triés par id, nearest en tie-break id) → déterministe
+        et hash-neutre tant qu'aucun marché n'existe."""
+        busy = set()
+        candidates: dict[int, list] = {}
+        for e in self.entities:
+            if not e.alive or e.etype != EntityType.HUMAN or e.clan_id is None:
+                continue
+            if e.trade_phase is not None:
+                busy.add(e.clan_id)          # max 1 marchand par clan
+            elif (e.hunger < MERCHANT_HUNGER_MAX and e.thirst < MERCHANT_THIRST_MAX
+                    and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
+                    and e.iron == 0 and e._build_target_type is None):
+                candidates.setdefault(e.clan_id, []).append(e)
+
+        def pool_wood(cid):  return sum(h.wood for h in clan_bldg.get(cid, {}).get("house", []))
+        def pool_stone(cid): return sum(h.stone for h in clan_bldg.get(cid, {}).get("house", []))
+        def market(cid):
+            mks = clan_bldg.get(cid, {}).get("market", [])
+            return mks[0] if mks else None
+
+        for a in sorted(self.clans, key=lambda c: c.id):
+            mka = market(a.id)
+            if (mka is None or a.id in busy or a.id not in candidates
+                    or pool_wood(a.id) < TRADE_WOOD_SURPLUS
+                    or pool_stone(a.id) >= TRADE_STONE_DEFICIT):
+                continue
+            sellers = [c for c in sorted(self.clans, key=lambda c: c.id)
+                       if c.id != a.id and market(c.id) is not None
+                       and pool_stone(c.id) >= TRADE_STONE_SURPLUS]
+            if not sellers:
+                continue
+            b = min(sellers, key=lambda c: (_dist(mka.x, mka.y,
+                                                  market(c.id).x, market(c.id).y), c.id))
+            merch = min(candidates[a.id],
+                        key=lambda e: (_dist(e.x, e.y, mka.x, mka.y), e.id))
+            merch.trade_phase = "load"
+            merch.trade_dest_cid = b.id
+            merch.trade_ticks = 0
+            merch.state = State.TRADING
+            tick_events.append({"type": "trade_deal", "clan_id": a.id,
+                                "dest_clan_id": b.id,
+                                "wood": TRADE_WOOD_LOT, "stone": TRADE_STONE_PRICE})
+            return   # une seule caravane lancée par évaluation
+
+    def _drain_markets(self, clan_bldg: dict):
+        """Étal → maisons : 1 bois + 1 pierre par marché tous les MARKET_DRAIN_PERIOD
+        ticks. Les imports réintègrent l'économie normale ; les piles de l'étal
+        fondent à vue (spectacle). Ordre de liste sérialisé → déterministe."""
+        for cid, groups in clan_bldg.items():
+            for mkt in groups.get("market", []):
+                houses = groups.get("house", [])
+                if not houses:
+                    continue
+                if mkt.wood > 0:
+                    h = next((h for h in houses if h.wood < MAX_WOOD_PER_HOUSE), None)
+                    if h is not None:
+                        mkt.wood -= 1; h.wood += 1
+                if mkt.stone > 0:
+                    mkt.stone -= 1; houses[0].stone += 1
+
     # ── Chroniques du monde (bloc K) ─────────────────────────────────────────
     _SPECIES_FR = {"boar": "sangliers", "chicken": "poules", "horned_sheep": "mouflons",
                    "horse": "chevaux", "human": "humains", "pig": "cochons",
                    "sheep": "moutons", "fish": "poissons", "shark": "requins"}
     _FIRST_BUILD_FR = {"house": "sa première maison", "mill": "son premier moulin",
-                       "well": "son premier puit", "forge": "sa forge"}
+                       "well": "son premier puit", "forge": "sa forge",
+                       "market": "son premier marché"}
     CHRONICLE_MAX = 600   # cap mémoire : le monde tourne à l'infini, pas ses annales
 
     def _update_chronicle(self, tick_events: list[dict]):
@@ -2406,7 +2702,7 @@ class Simulation:
                 add({"t": t, "kind": "extinct", "msg":
                      f"Le clan {ev['clan_id'] + 1} s'éteint"
                      + (f" — {r} ruine{'s' if r > 1 else ''} demeure{'nt' if r > 1 else ''}" if r else "")})
-            elif et in ("build_house", "build_mill", "build_well", "build_forge"):
+            elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)
                 if key not in self._chronicle_seen:
@@ -2425,6 +2721,13 @@ class Simulation:
                     self._chronicle_seen.add(key)
                     add({"t": t, "kind": "build", "msg":
                          f"Le grand feu du clan {ev['clan_id'] + 1} rayonne (niveau 2)"})
+            elif et == "trade_complete":
+                a, b = ev.get("clan_id"), ev.get("dest_clan_id")
+                key = ("first_trade", min(a, b), max(a, b))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "trade", "msg":
+                         f"Une route commerciale s'ouvre entre le clan {a + 1} et le clan {b + 1}"})
             elif et == "heatwave_start":
                 add({"t": t, "kind": "weather", "msg": "Une canicule s'abat sur le monde"})
         # Espèces disparues / revenues (comparaison avec le tick précédent).

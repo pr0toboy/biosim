@@ -357,6 +357,138 @@ def test_e2_female_seeks_distant_mate():
     print(f"  test_e2_female_seeks_distant_mate OK (SEEKING_MATE, dist {d0:.2f} → {d1:.2f})")
 
 
+def _find_walkable_row_segment(world, length):
+    """Un segment horizontal de `length+1` tuiles terrestres consécutives →
+    route de caravane garantie marchable en ligne droite."""
+    for y in range(world.height):
+        run = 0
+        for x in range(world.width):
+            run = run + 1 if world.is_walkable(x, y, False) else 0
+            if run >= length + 1:
+                return (x - length, y), (x, y)
+    raise RuntimeError("aucun segment terrestre assez long")
+
+
+def _d1_rig(a_stone=22, b_stone=100):
+    """Rig caravane (D1) : 2 clans à l'Âge de Pierre, marchés finis, route droite
+    marchable. Pièges neutralisés : pool bois=100 (=CLAN_WOOD_CAP → pas de coupe),
+    stone_grid=0 (pas de minage), pick+tool posés (pas de craft C1bis),
+    tick_count=119 (dispatch au 1er step, avant tout autre comportement)."""
+    from engine.simulation import Clan, TRADE_CHECK_PERIOD
+    world = World(width=60, height=45, seed=7)
+    world.stone_grid[:] = 0.0
+    sim = Simulation(world)
+    (ax, ay), (bx, by) = _find_walkable_row_segment(world, 20)
+
+    def mk_clan(cid, x, y, stone):
+        h = spawn(EntityType.HUMAN, x, y, Sex.MALE)
+        h.clan_id = cid; h.hunger = 10.0; h.thirst = 10.0
+        h.wood = 0; h.stone = 0; h.iron = 0
+        h.pick = "stone_pick"; h.tool = "stone_axe"   # bloque le craft découplé
+        house = Building(id=cid * 10 + 1, clan_id=cid, x=x, y=y, btype="house",
+                         wood=100, stone=stone)
+        market = Building(id=cid * 10 + 2, clan_id=cid, x=x, y=y, btype="market")
+        return h, house, market
+
+    ha, house_a, mkt_a = mk_clan(0, ax, ay, a_stone)
+    hb, house_b, mkt_b = mk_clan(1, bx, by, b_stone)
+    sim.entities = [ha, hb]
+    sim.clans = [Clan(id=0, cx=float(ax), cy=float(ay), color="#f00", chief_id=ha.id, age=1),
+                 Clan(id=1, cx=float(bx), cy=float(by), color="#00f", chief_id=hb.id, age=1)]
+    sim.buildings = [house_a, mkt_a, house_b, mkt_b]
+    sim.tick_count = TRADE_CHECK_PERIOD - 1
+    return sim, ha, hb, house_a, mkt_a, house_b, mkt_b
+
+
+def test_d1_caravan_roundtrip_conserves_resources():
+    """D1 : cycle caravane complet (deal → chargement −12 bois pool A → échange
+    −6 pierre pool B / +12 bois étal B → retour +pierre étal A → drain vers les
+    maisons), avec CONSERVATION de Σbois et Σpierre vérifiée à chaque tick."""
+    from engine.simulation import TRADE_WOOD_LOT, TRADE_STONE_PRICE
+    sim, ha, hb, house_a, mkt_a, house_b, mkt_b = _d1_rig()
+
+    def totals():
+        w = house_a.wood + house_b.wood + mkt_a.wood + mkt_b.wood + \
+            ha.cargo_wood + hb.cargo_wood + ha.wood + hb.wood
+        s = house_a.stone + house_b.stone + mkt_a.stone + mkt_b.stone + \
+            ha.cargo_stone + hb.cargo_stone + ha.stone + hb.stone
+        return w, s
+
+    w0, s0 = totals()
+    seen = set()
+    for _ in range(800):
+        data = sim.step()
+        for ev in data["events"]:
+            if ev.get("type", "").startswith("trade_"):
+                seen.add(ev["type"])
+        w, s = totals()
+        assert (w, s) == (w0, s0), f"conservation violée: bois {w0}->{w}, pierre {s0}->{s}"
+        if "trade_complete" in seen:
+            break
+    assert {"trade_deal", "trade_depart", "trade_exchange", "trade_complete"} <= seen, \
+        f"cycle incomplet: {seen}"
+    assert mkt_b.wood == TRADE_WOOD_LOT, f"étal B: {mkt_b.wood} bois (attendu {TRADE_WOOD_LOT})"
+    assert house_b.stone == 100 - TRADE_STONE_PRICE, f"pool B: {house_b.stone}"
+    # la pierre importée est chez A (étal, en cours de drain, ou déjà en maison)
+    assert mkt_a.stone + house_a.stone == 22 + TRADE_STONE_PRICE, \
+        f"pierre A: étal {mkt_a.stone} + maison {house_a.stone}"
+    assert ha.trade_phase is None and ha.cargo_wood == 0 and ha.cargo_stone == 0
+    print(f"  test_d1_caravan_roundtrip_conserves_resources OK "
+          f"(cycle complet, Σ conservées, +{TRADE_STONE_PRICE} pierre importée)")
+
+
+def test_d1_no_trade_without_complementary_surplus():
+    """D1 : pas d'excédents complémentaires → ZÉRO caravane (anti-ping-pong).
+    (a) personne n'est pauvre en pierre ; (b) personne ne peut vendre."""
+    for a_stone, b_stone, label in ((100, 100, "A riche"), (10, 10, "B pauvre")):
+        sim, *_ = _d1_rig(a_stone=a_stone, b_stone=b_stone)
+        deals = 0
+        for _ in range(400):
+            data = sim.step()
+            deals += sum(1 for ev in data["events"] if ev.get("type") == "trade_deal")
+        assert deals == 0, f"{label}: {deals} deal(s) émis sans complémentarité"
+    print("  test_d1_no_trade_without_complementary_surplus OK (0 deal dans les 2 rigs)")
+
+
+def test_d1_dest_ruined_merchant_returns_and_replay():
+    """D1 : clan destination éteint en cours de route → demi-tour cargaison
+    intacte + bois recyclé chez A ; puis save/load EN PLEINE MISSION → replay
+    byte-à-byte (les 5 champs trade suffisent)."""
+    sim, ha, hb, house_a, mkt_a, house_b, mkt_b = _d1_rig()
+    for _ in range(400):
+        sim.step()
+        if ha.trade_phase == "out" and ha.cargo_wood > 0:
+            break
+    assert ha.trade_phase == "out", f"jamais parti (phase={ha.trade_phase})"
+    hb.alive = False   # clan B s'éteint → E8 ruine son marché au tick suivant
+    for _ in range(400):
+        sim.step()
+        if ha.trade_phase is None:
+            break
+    assert ha.trade_phase is None, "mission jamais terminée après ruine de la destination"
+    assert mkt_b.btype == "ruin", f"marché B pas ruiné: {mkt_b.btype}"
+    assert ha.cargo_wood == 0 and ha.cargo_stone == 0
+    # le lot de bois est revenu chez A (étal en drain ou maisons), rien créé ni perdu
+    assert house_a.wood + mkt_a.wood == 100, \
+        f"bois A: maison {house_a.wood} + étal {mkt_a.wood} (attendu 100 au total)"
+
+    # Replay byte-à-byte depuis une mission EN TRANSIT (rig neuf)
+    sim2, ha2, *_ = _d1_rig()
+    for _ in range(400):
+        sim2.step()
+        if ha2.trade_phase == "out":
+            break
+    assert ha2.trade_phase == "out"
+    snap = sim2.save_state()
+    ref = [sim2.step() for _ in range(100)]
+    sim3 = Simulation(World(width=10, height=10, seed=1))
+    sim3.load_state(snap)
+    rep = [sim3.step() for _ in range(100)]
+    assert ref == rep, "replay divergent avec une caravane en mission"
+    print("  test_d1_dest_ruined_merchant_returns_and_replay OK "
+          "(demi-tour propre + replay 100 ticks identiques en mission)")
+
+
 def test_k_chronicle_records_and_persists():
     """Bloc K : les annales enregistrent les jalons (dérivées des tick_events, sans
     toucher la sortie de step() → guard intact), dédupliquent les « premières fois »
@@ -440,6 +572,9 @@ if __name__ == "__main__":
                test_c2_hungry_harvester_eats_not_feeds_mill,
                test_a1_clan_gains_science_and_ages_up,
                test_b_forge_upgrades_stone_tools_to_iron,
+               test_d1_caravan_roundtrip_conserves_resources,
+               test_d1_no_trade_without_complementary_surplus,
+               test_d1_dest_ruined_merchant_returns_and_replay,
                test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
