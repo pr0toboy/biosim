@@ -45,6 +45,8 @@ class State(str, Enum):
     DRINKING      = "drinking"
     EXPLORING     = "exploring"
     TRADING       = "trading"    # marchand en mission caravane (bloc D1)
+    PRAYING       = "praying"    # en procession / agenouillé à l'office (bloc C1)
+    PILGRIMAGE    = "pilgrimage" # pèlerin vers l'église d'un autre clan (bloc C1)
     DEAD          = "dead"
 
 
@@ -151,6 +153,13 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         wood_cost=14, stone_cost=0,   # chez l'acheteur pauvre-pierre (sonde : seed7
         build_time=50, pop_bonus=0,   # = 0 pierre en pool sur 3500 ticks).
         min_dist=6, min_from_fire=3, max_from_fire=10,   # place du village, visible
+        max_per_clan=1,
+    ),
+    "church": BuildingSpec(  # bloc C1 : Âge d'ACIER (age >= 3) — 1er débouché de l'âge final.
+        btype="church",      # Pierre payée au POOL clan (10 payable : forge=12 s'y construit,
+        wood_cost=16, stone_cost=10,   # et les imports pierre D1/D2 nourrissent enfin un bâtiment).
+        build_time=80, pop_bonus=0,
+        min_dist=6, min_from_fire=3, max_from_fire=12,
         max_per_clan=1,
     ),
 }
@@ -284,6 +293,7 @@ class Entity:
         "_build_target_x", "_build_target_y", "_build_target_type",
         "cargo_wood", "cargo_stone", "cargo_iron", "trade_phase", "trade_dest_cid",
         "trade_ticks", "trade_good", "trade_pay",
+        "pray_ticks", "blessed_ticks", "pilgrim_phase", "pilgrim_dest_cid", "pilgrim_ticks",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -322,6 +332,13 @@ class Entity:
         self.trade_phase: Optional[str] = None      # None | "load" | "out" | "home"
         self.trade_good: Optional[str] = None       # D2 : bien acheté ("stone"|"iron")
         self.trade_pay: Optional[str] = None        # D2 : bien de paiement ("wood"|"stone")
+        # Foi (bloc C1). L'offrande du pèlerin voyage dans cargo_wood (EXCLUSIVITÉ
+        # avec les missions caravane : les 2 dispatches exigent l'autre phase à None).
+        self.pray_ticks: int = 0                    # progression d'agenouillement
+        self.blessed_ticks: int = 0                 # compte à rebours de bénédiction
+        self.pilgrim_phase: Optional[str] = None    # None | "load" | "out" | "home"
+        self.pilgrim_dest_cid: Optional[int] = None
+        self.pilgrim_ticks: int = 0                 # anti-zombie (timeout mission)
         self.trade_dest_cid: Optional[int] = None   # clan destination
         self.trade_ticks: int = 0                   # anti-zombie (timeout mission)
         self.sickle: Optional[str] = None        # None, "sickle"
@@ -377,6 +394,12 @@ class Entity:
             d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron]  # ballot (D1/D2)
             d["dest"] = self.trade_dest_cid                    # « → clan N » au tooltip
             d["good"] = self.trade_good                        # bien recherché (D2)
+        if self.blessed_ticks > 0:
+            d["bl"] = 1                                        # halo doré (C1)
+        if self.pilgrim_phase is not None:
+            d["pil"] = 1                                       # pèlerin (C1)
+            d["pdest"] = self.pilgrim_dest_cid
+            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron]  # fagot d'offrande
         if self.state == State.BUILDING and self.target_x is not None:
             d["tx"] = int(round(self.target_x))
             d["ty"] = int(round(self.target_y))
@@ -418,6 +441,10 @@ class Entity:
             "trade_phase": self.trade_phase, "trade_dest_cid": self.trade_dest_cid,
             "trade_ticks": self.trade_ticks,
             "trade_good": self.trade_good, "trade_pay": self.trade_pay,
+            "pray_ticks": self.pray_ticks, "blessed_ticks": self.blessed_ticks,
+            "pilgrim_phase": self.pilgrim_phase,
+            "pilgrim_dest_cid": self.pilgrim_dest_cid,
+            "pilgrim_ticks": self.pilgrim_ticks,
         }
 
     @classmethod
@@ -458,6 +485,12 @@ class Entity:
         _tp = e.trade_phase
         e.trade_good = d.get("trade_good", "stone" if _tp else None)
         e.trade_pay = d.get("trade_pay", "wood" if _tp else None)
+        # Foi (C1) — compat vieux saves
+        e.pray_ticks = d.get("pray_ticks", 0)
+        e.blessed_ticks = d.get("blessed_ticks", 0)
+        e.pilgrim_phase = d.get("pilgrim_phase")
+        e.pilgrim_dest_cid = d.get("pilgrim_dest_cid")
+        e.pilgrim_ticks = d.get("pilgrim_ticks", 0)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

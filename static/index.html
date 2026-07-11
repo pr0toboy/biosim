@@ -150,6 +150,7 @@
   .chron-item.iron    { border-color: #94a3b8; color: #d3dce6; }
   .chron-item.weather { border-color: #f59e0b; color: #fcd34d; }
   .chron-item.trade   { border-color: #f1c40f; color: #fde68a; }
+  .chron-item.faith   { border-color: #aed6f1; color: #d6eaf8; }
   .chron-item.build   { border-color: #fbbf24; color: #fde68a; }
 
   /* ── Tooltip entité ── */
@@ -337,7 +338,7 @@ const STATE_ICONS = {
   eating: "🍴", fleeing: "!", hunting: "⚔",
   seeking_mate: "♥", chopping: "🪓", building: "🏗", farming: "🌾", resting: "z",
   seeking_water: "💧", drinking: "🥤", mining: "⛏", exploring: "🧭",
-  trading: "🐫", dead: "✝"
+  trading: "🐫", praying: "🙏", pilgrimage: "🚶", dead: "✝"
 };
 
 // ── Sprites terrain ──────────────────────────────────────────────────────────
@@ -449,6 +450,7 @@ let fires           = new Map(); // "x,y" → intensité (0-100)
 let buildings       = [];        // [{id, clan_id, x, y, btype}, ...]
 let paused          = false;
 let currentTick  = 0;
+let bellRings    = [];   // anneaux d'onde des cloches (C1) : {x, y, age}
 let currentSeason = "spring";
 let currentTemp  = null;
 let currentRain     = false;
@@ -843,6 +845,16 @@ function drawAll() {
 
   // Maisons construites
   drawBuildings(ctx, T);
+  // Ondes de cloche (C1) : anneau expansif ~40 ticks depuis le clocher
+  bellRings = bellRings.filter(r => r.age < 40);
+  bellRings.forEach(r => {
+    r.age++;
+    ctx.beginPath();
+    ctx.arc((r.x + 0.5) * T, (r.y + 0.5) * T, T * (0.5 + r.age * 0.35), 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(174,214,241,${Math.max(0, 1 - r.age / 40)})`;
+    ctx.lineWidth = Math.max(1, T * 0.08);
+    ctx.stroke();
+  });
 
   // Feux de camp (buildings de type campfire)
   buildings.filter(b => b.btype === "campfire").forEach(b => {
@@ -891,12 +903,23 @@ function drawAll() {
     const cx = (e.x + 0.5) * T;
     const cy = (e.y + 0.5) * T;
     // Cercle d'état (hunting / fleeing / trading) dessiné avant le sprite
-    if (e.s === "hunting" || e.s === "fleeing" || e.s === "trading") {
+    if (e.s === "hunting" || e.s === "fleeing" || e.s === "trading"
+        || e.s === "praying" || e.s === "pilgrimage") {
       ctx.beginPath();
       ctx.arc(cx, cy, T * 0.52, 0, Math.PI * 2);
       ctx.strokeStyle = e.s === "hunting" ? "#ff4444"
-                       : e.s === "trading" ? "#f1c40f" : "#44aaff";
+                       : e.s === "trading" ? "#f1c40f"
+                       : e.s === "praying" ? "#aed6f1"
+                       : e.s === "pilgrimage" ? "#ecf0f1" : "#44aaff";
       ctx.lineWidth = T * 0.14;
+      ctx.stroke();
+    }
+    // Halo doré du béni (C1) : la grâce diffuse dans le village
+    if (e.bl) {
+      ctx.beginPath();
+      ctx.arc(cx, cy - T * 0.55, T * 0.22, Math.PI, 2 * Math.PI);
+      ctx.strokeStyle = "#f9e79f";
+      ctx.lineWidth = Math.max(1, T * 0.08);
       ctx.stroke();
     }
     // Ballot de caravane (D1) : pastille cargaison au-dessus du marchand
@@ -908,6 +931,7 @@ function drawAll() {
         ctx.fillRect(cx - T * 0.04, cy - T * 0.66, T * 0.08, T * 0.08);
       }
     }
+    const kneel = e.s === "praying" ? Math.max(1, T * 0.08) : 0;   // posture (C1)
     const isChief = e.t === "human" && clans.some(c => c.chief_id === e.id);
     const sp = ENTITY_SPRITES[isChief ? "human_chief" : e.t];
     if (sp && sp.img.complete && sp.img.naturalWidth > 0) {
@@ -919,7 +943,7 @@ function drawAll() {
         ctx.drawImage(sp.img, sp.col * S, sp.row * S, srcW, srcH,
                       cx - dstW / 2, cy - dstH / 2, dstW, dstH);
       } else {
-        ctx.drawImage(sp.img, sp.col * S, sp.row * S, S, S, cx - S / 2, cy - S / 2, S, S);
+        ctx.drawImage(sp.img, sp.col * S, sp.row * S, S, S, cx - S / 2, cy - S / 2 + kneel, S, S);
       }
     } else {
       // Fallback cercle coloré
@@ -1107,6 +1131,36 @@ function drawBuildings(c, T) {
         c.textAlign = "center";
         c.fillStyle = cnM ? cnM.color : "#e5e7eb";
         c.fillText(wants.join(" "), (b.x + 0.5) * T, (b.y + 1) * T + T * 0.5);
+      }
+    } else if (b.btype === "church") {
+      // Église (C1) : corps pierre, clocher + croix couleur clan, vitrail, cierges.
+      const cnC = clans.find(cc => cc.id === b.clan_id);
+      c.fillStyle = "#9ca3af";                                       // corps pierre
+      c.fillRect(b.x * T + T * 0.15, b.y * T + T * 0.38, T * 0.70, T * 0.52);
+      c.fillStyle = "#6b7280";                                       // clocher
+      c.fillRect(b.x * T + T * 0.38, b.y * T + T * 0.06, T * 0.24, T * 0.36);
+      c.strokeStyle = cnC ? cnC.color : "#e5e7eb";                   // croix
+      c.lineWidth = Math.max(1, T * 0.06);
+      c.beginPath();
+      c.moveTo((b.x + 0.5) * T, b.y * T - T * 0.14);
+      c.lineTo((b.x + 0.5) * T, b.y * T + T * 0.06);
+      c.moveTo((b.x + 0.5) * T - T * 0.08, b.y * T - T * 0.07);
+      c.lineTo((b.x + 0.5) * T + T * 0.08, b.y * T - T * 0.07);
+      c.stroke();
+      c.fillStyle = "#7dd3fc";                                       // vitrail
+      c.fillRect(b.x * T + T * 0.44, b.y * T + T * 0.52, T * 0.12, T * 0.18);
+      // Cierges : la pile d'offrandes FOND à vue (flicker sinusoïdal)
+      const candles = Math.min(6, b.wood ?? 0);
+      for (let i = 0; i < candles; i++) {
+        const fl = 0.6 + 0.4 * Math.sin((currentTick * 3 + i * 7) * 0.3);
+        c.fillStyle = `rgba(251,191,36,${fl})`;
+        c.fillRect(b.x * T + T * (0.10 + i * 0.14), (b.y + 1) * T - T * 0.10, T * 0.06, T * 0.10);
+      }
+      if ((b.pil ?? 0) > 0) {                                        // renommée
+        c.font = `${Math.max(5, T * 0.45)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = "#fcd34d";
+        c.fillText(`✦${b.pil}`, (b.x + 0.5) * T, b.y * T - T * 0.3);
       }
     } else if (b.btype === "forge") {
       // Forge (bloc B) : enclume sombre sur socle, braise orange — procédural.
@@ -1368,6 +1422,26 @@ function addEvent(ev) {
     const cn = clans.find(c => c.id === ev.clan_id);
     div.textContent = `🏪 Marché construit — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
     if (cn) { div.style.borderColor = cn.color; div.style.color = "#f1c40f"; }
+  } else if (ev.type === "build_church") {
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    div.textContent = `⛪ Sanctuaire élevé — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
+    if (cn) { div.style.borderColor = cn.color; div.style.color = "#aed6f1"; }
+  } else if (ev.type === "church_bell") {
+    bellRings.push({ x: ev.x, y: ev.y, age: 0 });   // onde visuelle depuis le clocher
+    div.className = "ev-item";
+    div.textContent = `🔔 La cloche sonne au clan ${ev.clan_id + 1}`;
+    div.style.borderColor = "#aed6f1"; div.style.color = "#d6eaf8";
+  } else if (ev.type === "pilgrim_depart") {
+    div.className = "ev-item";
+    div.textContent = `🚶 Un pèlerin part du clan ${ev.clan_id + 1} vers le clan ${ev.dest_clan_id + 1}`;
+    div.style.borderColor = "#ecf0f1"; div.style.color = "#f8f9f9";
+  } else if (ev.type === "pilgrim_blessed") {
+    div.className = "ev-item";
+    div.textContent = `🙏 Un pèlerin du clan ${ev.clan_id + 1} est béni au clan ${ev.dest_clan_id + 1}`;
+    div.style.borderColor = "#f9e79f"; div.style.color = "#fcf3cf";
+  } else if (ev.type === "pilgrim_home" || ev.type === "pilgrim_aborted") {
+    return;   // silencieux (le récit passe par depart/blessed)
   } else if (ev.type === "trade_deal") {
     div.className = "ev-item";
     const gD = ev.good === "iron" ? "du fer" : "de la pierre";
@@ -1515,6 +1589,10 @@ function buildingInfoHTML(b) {
       <div class="tt-row"><span>🪨 Étal pierre</span><span>${b.stone ?? 0}</span></div>
       ${(b.iron ?? 0) > 0 ? `<div class="tt-row"><span>⛓ Étal fer</span><span>${b.iron}</span></div>` : ""}
       ${rowsQ.join("")}`;
+  } else if (b.btype === "church") {
+    return `<b style="color:${cColor}">⛪ Sanctuaire — ${cLabel}</b>
+      <div class="tt-row"><span>🕯 Offrandes</span><span>${b.wood ?? 0}</span></div>
+      <div class="tt-row"><span>✦ Pèlerins reçus</span><span>${b.pil ?? 0}</span></div>`;
   } else if (b.btype === "forge") {
     return `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
       <div class="tt-row"><span>⛓ Fer stocké</span><span>${b.iron ?? 0}</span></div>
@@ -1523,7 +1601,7 @@ function buildingInfoHTML(b) {
     return `<b style="color:#9ca3af">🏚 Ruines</b>
       <div class="tt-row" style="color:#94a3b8;font-size:0.9em"><span>Vestiges d'un clan éteint — reprises peu à peu par la nature</span></div>`;
   } else if (b.btype.startsWith("site_")) {
-    const bname = {house:"maison",mill:"moulin",well:"puit",wheatfield:"champ",forge:"forge",market:"marché"}[b.btype.slice(5)] || b.btype.slice(5);
+    const bname = {house:"maison",mill:"moulin",well:"puit",wheatfield:"champ",forge:"forge",market:"marché",church:"sanctuaire"}[b.btype.slice(5)] || b.btype.slice(5);
     const pct = b.work_needed > 0 ? Math.round((b.work_done ?? 0) / b.work_needed * 100) : 0;
     return `<b style="color:${cColor}">🏗 Chantier ${bname} — ${cLabel}</b>
       <div class="tt-row"><span>Progression</span><span>${pct}%</span></div>`;
@@ -1595,7 +1673,7 @@ canvas.addEventListener("mousemove", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
@@ -1627,7 +1705,7 @@ canvas.addEventListener("mousemove", (ev) => {
           <div class="tt-row"><span>🪵 Bois</span><span>${Math.floor(closestB.wood ?? 0)} / ${MAX_WOOD_PER_HOUSE}</span></div>
           <div class="tt-row"><span>🪨 Pierre</span><span>${closestB.stone ?? 0}</span></div>`;
       } else if (closestB.btype.startsWith("site_")) {
-        const bname = { house:"maison", mill:"moulin", well:"puit", wheatfield:"champ", forge:"forge", market:"marché" }[closestB.btype.slice(5)] || closestB.btype.slice(5);
+        const bname = { house:"maison", mill:"moulin", well:"puit", wheatfield:"champ", forge:"forge", market:"marché", church:"sanctuaire" }[closestB.btype.slice(5)] || closestB.btype.slice(5);
         const pct = closestB.work_needed > 0 ? Math.round((closestB.work_done ?? 0) / closestB.work_needed * 100) : 0;
         html = `<b style="color:${cColor}">🏗 Chantier ${bname} — ${cLabel}</b>
           <div class="tt-row"><span>Progression</span><span>${closestB.work_done ?? 0} / ${closestB.work_needed ?? 0} (${pct}%)</span></div>`;
@@ -1639,6 +1717,10 @@ canvas.addEventListener("mousemove", (ev) => {
           <div class="tt-row"><span>🪨</span><span>${closestB.stone ?? 0}</span></div>
           ${(closestB.rs ?? 0) > 0 ? `<div class="tt-row"><span>Cours 🪨</span><span>${closestB.rs}</span></div>` : ""}
           ${(closestB.ri ?? 0) > 0 ? `<div class="tt-row"><span>Cours ⛓</span><span>${closestB.ri}</span></div>` : ""}`;
+      } else if (closestB.btype === "church") {
+        html = `<b style="color:${cColor}">⛪ Sanctuaire — ${cLabel}</b>
+          <div class="tt-row"><span>🕯</span><span>${closestB.wood ?? 0}</span></div>
+          <div class="tt-row"><span>✦</span><span>${closestB.pil ?? 0}</span></div>`;
       } else if (closestB.btype === "forge") {
         html = `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
           <div class="tt-row"><span>⛓ Fer</span><span>${closestB.iron ?? 0}</span></div>`;
@@ -1861,7 +1943,7 @@ canvas.addEventListener("touchend", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT2 ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT2 ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>

@@ -71,6 +71,7 @@ class Building:
     work_needed: int = 0    # ticks de travail total nécessaires pour terminer
     ruin_ticks: int = 0     # ruine : ticks restants avant que la nature la reprenne (0 = pas une ruine)
     iron: int = 0           # forge : fer stocké (bloc B) ; market : fer d'étal (D2)
+    pilgrims_served: int = 0   # church : pèlerins bénis (renommée) — bloc C1
     rate_stone: int = 0     # market : cours affiché pierre/lot (D2, 0 = ne vend pas)
     rate_iron: int = 0      # market : cours affiché fer/lot (D2)
     wants_stone: int = 0    # market : 1 si le clan cherche de la pierre (D2)
@@ -97,6 +98,8 @@ class Building:
             d["iron"] = self.iron               # étal fer (D2)
             d["rs"] = self.rate_stone; d["ri"] = self.rate_iron   # cours affichés
             d["ws"] = self.wants_stone; d["wi"] = self.wants_iron # recherche
+        elif self.btype == "church":
+            d["pil"] = self.pilgrims_served     # renommée du sanctuaire (C1)
         return d
 
 
@@ -161,6 +164,26 @@ PAY_STONE_LOT    = 6     # lot de paiement pierre (équivalent du lot de 12 bois
 PAY_STONE_MIN    = 150   # pierre min du payeur pour payer en pierre (glut seulement)
 WOOD_VALUE_TIERS  = (20, 45, 90)   # rareté 3/2/1/0 chez le vendeur (choix du paiement)
 STONE_VALUE_TIERS = (12, 30, 60)
+
+# ── Société v1 (bloc C1 « Le Sanctuaire ») — constantes ratifiées panel C1 ──────
+CHURCH_AGE            = 3     # Acier : MESURÉ t1503-2106 (s7) / t1901-2070 (s42)
+CHURCH_SERVICE_PERIOD = 300   # 1 cloche/saison ; phase (tick + cid*37) % PERIOD → offices déphasés
+CHURCH_SERVICE_WINDOW = 70    # durée d'office (approche ≤26 tuiles + prière 16 < 70)
+CHURCH_CALL_RADIUS    = 26    # éligibles mesurés 7-44 par clan → processions garanties
+PRAY_RADIUS           = 2.5   # distance au parvis pour prier
+PRAY_DURATION         = 16    # ticks agenouillé avant bénédiction
+BLESS_DURATION        = 600   # ticks de bénédiction (2 saisons)
+BLESS_HUNGER_MULT     = 0.85  # SEUL effet : faim ralentie 15 % (quasi neutre en glut mesuré)
+PRAY_HUNGER_MAX       = 55    # éligibilité office (jamais au détriment de la survie)
+PRAY_THIRST_MAX       = 50
+OFFERING_WOOD         = 8     # offrande du pèlerin (lot fixe, tout-ou-rien au pool)
+PILGRIM_WOOD_MIN      = 30    # pool bois min du clan pèlerin (< SURPLUS=60 : les pauvres accèdent)
+PILGRIM_CHECK_PERIOD  = 240   # dispatch pèlerins APRÈS caravanes aux ticks communs (gardes croisées)
+PILGRIM_TIMEOUT       = 1600  # pire trajet mesuré 179 tuiles, couvert même à eff_speed 0.5
+CHURCH_FAME_GAP       = 3     # hystérésis (amendé 5→3 par le juge : fenêtre Acier serrée ~600 ticks)
+ALTAR_BURN_PERIOD     = 6     # 1 offrande consumée / 6 ticks (cierges — le puits économique)
+ALTAR_MAX             = 30    # cap de pile d'autel (surplus consumé immédiatement)
+CHURCH_FAME_MILESTONE = 10    # pèlerins reçus → chronique « le sanctuaire rayonne »
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4     # 1 ressource étal→maisons tous les N ticks
@@ -887,6 +910,90 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
     return False
 
 
+def _clear_pilgrim(entity: Entity):
+    """Efface proprement une mission de pèlerinage (C1)."""
+    entity.pilgrim_phase = None
+    entity.pilgrim_dest_cid = None
+    entity.pilgrim_ticks = 0
+
+
+def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
+    """Pèlerinage (C1) : load (charge l'offrande de bois au village) → out (la
+    dépose sur l'AUTEL de l'église étrangère : elle y BRÛLERA — puits économique —
+    contre une bénédiction, le 1er service acheté) → home (retour au feu de camp).
+    Miroir du pattern caravane D1 : phases atomiques, timeout re-créditant,
+    destination ruinée → demi-tour cargaison intacte SANS bénédiction."""
+    world = ctx.world; events = ctx.events
+    entity.pilgrim_ticks += 1
+    if entity.pilgrim_ticks > PILGRIM_TIMEOUT:
+        houses = _cb.get("house", [])
+        if houses and entity.cargo_wood:
+            _add_pool_wood(houses, entity.cargo_wood)
+        entity.cargo_wood = 0
+        events.append({"type": "pilgrim_aborted", "clan_id": entity.clan_id})
+        _clear_pilgrim(entity)
+        return False
+    phase = entity.pilgrim_phase
+    if phase == "load":
+        houses = _cb.get("house", [])
+        if not houses:
+            _clear_pilgrim(entity)
+            return False
+        h0 = houses[0]
+        if _dist(entity.x, entity.y, h0.x, h0.y) < 1.5:
+            if _spend_pool_wood(houses, OFFERING_WOOD):
+                entity.cargo_wood = OFFERING_WOOD
+                entity.pilgrim_phase = "out"
+            else:   # pool fondu : mission annulée, rien déduit
+                _clear_pilgrim(entity)
+            return True
+        entity.state = State.PILGRIMAGE
+        entity.target_x = float(h0.x); entity.target_y = float(h0.y)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    if phase == "out":
+        dest_cb = (ctx.clan_bldg or {}).get(entity.pilgrim_dest_cid, {})
+        churches = dest_cb.get("church", [])
+        if not churches:   # clan éteint → E8 a ruiné l'église : demi-tour, cargo intact
+            entity.pilgrim_phase = "home"
+            return True
+        ch = churches[0]
+        if _dist(entity.x, entity.y, ch.x, ch.y) < 1.5:
+            # Offrande déposée sur l'autel (surplus au-delà du cap = consumé aussitôt,
+            # même puits que la combustion) + bénédiction du pèlerin.
+            ch.wood = min(ALTAR_MAX, ch.wood + entity.cargo_wood)
+            entity.cargo_wood = 0
+            ch.pilgrims_served += 1
+            entity.blessed_ticks = BLESS_DURATION
+            events.append({"type": "pilgrim_blessed", "clan_id": entity.clan_id,
+                           "dest_clan_id": entity.pilgrim_dest_cid,
+                           "served": ch.pilgrims_served, "x": ch.x, "y": ch.y})
+            entity.pilgrim_phase = "home"
+            return True
+        entity.state = State.PILGRIMAGE
+        entity.target_x = float(ch.x); entity.target_y = float(ch.y)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    if phase == "home":
+        clan = (ctx.clans or {}).get(entity.clan_id)
+        if clan is None:   # défensif
+            _clear_pilgrim(entity)
+            return False
+        if _dist(entity.x, entity.y, clan.cx, clan.cy) < 2.0:
+            if entity.cargo_wood > 0:   # destination ruinée en route → re-crédit
+                _add_pool_wood(_cb.get("house", []), entity.cargo_wood)
+                entity.cargo_wood = 0
+            events.append({"type": "pilgrim_home", "clan_id": entity.clan_id})
+            _clear_pilgrim(entity)
+            return True
+        entity.state = State.PILGRIMAGE
+        entity.target_x = float(clan.cx); entity.target_y = float(clan.cy)
+        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+        return True
+    _clear_pilgrim(entity)   # phase inconnue → reset défensif
+    return False
+
+
 def _try_forge_upgrade(entity: Entity, forge, events: list) -> bool:
     """Bloc B : à la forge, upgrade un outil PIERRE → FER en consommant le fer
     stocké. Pioche pierre → pioche fer, puis hache pierre → hache fer."""
@@ -1010,7 +1117,10 @@ def _vitals(entity, ctx):
     spec = entity.spec
     # ── Vieillissement, faim & soif ───────────────────────────────────────
     entity.age    += 1
-    entity.hunger += entity.traits["hunger_rate"] * _hunger_mult(temp_c)
+    entity.hunger += (entity.traits["hunger_rate"] * _hunger_mult(temp_c)
+                      * (BLESS_HUNGER_MULT if entity.blessed_ticks > 0 else 1.0))
+    if entity.blessed_ticks > 0:   # la grâce s'estompe (jamais cumulée, rafraîchie)
+        entity.blessed_ticks -= 1
     if not spec.aquatic:
         entity.thirst += THIRST_RATE * _thirst_mult(temp_c)
         if heatwave:
@@ -1154,13 +1264,16 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
     # attaquée — sinon toute route passant en vision d'ennemis affamés mourrait.
     if (entity.etype == EntityType.HUMAN and entity.clan_id is not None
             and entity.hunger > 65 and clans
-            and entity.trade_phase is None):
+            and entity.trade_phase is None
+            and entity.pilgrim_phase is None
+            and entity.blessed_ticks == 0):   # Trêve de Dieu : un béni n'attaque pas (C1)
         for e in all_entities:
             if (e is not entity and e.alive
                     and e.etype == EntityType.HUMAN
                     and e.clan_id is not None
                     and e.clan_id != entity.clan_id
-                    and e.trade_phase is None):
+                    and e.trade_phase is None
+                    and e.pilgrim_phase is None):
                 d = _dist(entity.x, entity.y, e.x, e.y)
                 if d < entity.traits["vision"]:
                     entity.state = State.HUNTING
@@ -1301,6 +1414,38 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     if entity.trade_phase is not None:
         if _beh_trade(entity, ctx, _cb, _eff_speed):
             return True
+    # 3.4bis Mission de pèlerinage (C1) — même priorité que la caravane
+    if entity.pilgrim_phase is not None:
+        if _beh_pilgrim(entity, ctx, _cb, _eff_speed):
+            return True
+    # 3.45 OFFICE (C1) : la cloche a sonné → procession vers l'église du clan puis
+    # prière (PRAY_DURATION agenouillé) → bénédiction. Collectif, gratuit, borné à
+    # la fenêtre. La survie (blocs amont) reste prioritaire : un affamé saute l'office.
+    if (entity.spec.can_build and entity.clan_id is not None
+            and entity._build_target_type is None
+            and entity.trade_phase is None and entity.pilgrim_phase is None):
+        _churches = _cb.get("church", [])
+        if _churches:
+            _in_window = ((ctx.tick + entity.clan_id * 37) % CHURCH_SERVICE_PERIOD
+                          < CHURCH_SERVICE_WINDOW)
+            if not _in_window:
+                entity.pray_ticks = 0   # reset paresseux hors fenêtre
+            elif (entity.hunger < PRAY_HUNGER_MAX and entity.thirst < PRAY_THIRST_MAX):
+                _ch = _churches[0]
+                _d_ch = _dist(entity.x, entity.y, _ch.x, _ch.y)
+                if _d_ch <= CHURCH_CALL_RADIUS:
+                    if _d_ch > PRAY_RADIUS:
+                        entity.state = State.PRAYING   # la PROCESSION (théâtre vrai)
+                        entity.target_x = float(_ch.x); entity.target_y = float(_ch.y)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
+                        return True
+                    entity.state = State.PRAYING       # agenouillé au parvis
+                    entity.pray_ticks += 1
+                    if entity.pray_ticks >= PRAY_DURATION:
+                        entity.blessed_ticks = BLESS_DURATION   # rafraîchie, jamais cumulée
+                        entity.pray_ticks = 0
+                    return True
     # 3.5 Dépôt des ressources à la maison du clan
     if ((entity.spec.can_chop or entity.spec.can_mine)
             and (entity.wood > 0 or entity.stone > 0)
@@ -1536,6 +1681,13 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         dw.wood  -= bspec_t.wood_cost
                         ds.stone -= bspec_t.stone_cost
                         can_build_t = True
+                elif btype_t == "church":  # bloc C1 : bois donor + pierre du POOL (comme forge)
+                    dw = max(clan_houses_t, key=lambda b: b.wood) if clan_houses_t else None
+                    if (dw and dw.wood >= bspec_t.wood_cost
+                            and sum(h.stone for h in clan_houses_t) >= bspec_t.stone_cost):
+                        if _spend_pool_stone(clan_houses_t, bspec_t.stone_cost):
+                            dw.wood -= bspec_t.wood_cost
+                            can_build_t = True
                 elif btype_t == "forge":   # bloc B : bois d'une maison + pierre du POOL clan
                     dw = max(clan_houses_t, key=lambda b: b.wood) if clan_houses_t else None
                     if (dw and dw.wood >= bspec_t.wood_cost
@@ -1807,6 +1959,49 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         entity._build_target_x = float(mx2); entity._build_target_y = float(my2)
                         entity.state = State.BUILDING
                         entity.target_x = float(mx2); entity.target_y = float(my2)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
+                        return True
+    # 4.30 Construction d'une ÉGLISE (bloc C1) : clan de l'Âge d'ACIER, ≥2 maisons,
+    # pas encore d'église. Bois du donor + pierre au POOL (miroir forge 4.28).
+    if (entity.spec.can_build
+            and entity.clan_id is not None
+            and entity.building_type is None
+            and entity._build_target_type is None
+            and entity.hunger < 65
+            and clans):
+        _clan_ch = clans.get(entity.clan_id)
+        if _clan_ch is not None and _clan_ch.age >= CHURCH_AGE:
+            bspec_ch  = BUILDING_SPECS["church"]
+            clan_chs  = _cb.get("church", [])
+            clan_sites_ch = _cb.get("site_church", [])
+            clan_houses = _cb.get("house", [])
+            if (len(clan_houses) >= 2 and not clan_sites_ch
+                    and (bspec_ch.max_per_clan == 0
+                         or len(clan_chs) < bspec_ch.max_per_clan)):
+                donor = max(clan_houses, key=lambda b: b.wood)
+                has_res = (donor.wood >= bspec_ch.wood_cost
+                           and sum(h.stone for h in clan_houses) >= bspec_ch.stone_cost)
+                already_planned_ch = (
+                    any(ev.get("type") == "start_site" and ev.get("btype") == "church"
+                        and ev.get("clan_id") == entity.clan_id for ev in events)
+                    or any(e._build_target_type == "church" and e.clan_id == entity.clan_id
+                           for e in all_entities if e.alive and e is not entity))
+                if has_res and not already_planned_ch:
+                    for _ in range(30):
+                        angle = random.uniform(0, 2 * math.pi)
+                        dist  = random.uniform(bspec_ch.min_from_fire, bspec_ch.max_from_fire)
+                        cx2 = int(_clan_ch.cx + math.cos(angle) * dist)
+                        cy2 = int(_clan_ch.cy + math.sin(angle) * dist)
+                        if not world.is_valid(cx2, cy2) or not world.is_walkable(cx2, cy2):
+                            continue
+                        if any(_dist(cx2, cy2, b.x, b.y) < bspec_ch.min_dist
+                               for b in (buildings or []) if b.btype == "church"):
+                            continue
+                        entity._build_target_type = "church"
+                        entity._build_target_x = float(cx2); entity._build_target_y = float(cy2)
+                        entity.state = State.BUILDING
+                        entity.target_x = float(cx2); entity.target_y = float(cy2)
                         _move_toward(entity, entity.target_x, entity.target_y,
                                      _eff_speed, world)
                         return True
@@ -2444,6 +2639,9 @@ class Simulation:
         # tant qu'aucun marché n'existe.
         if self.tick_count % TRADE_CHECK_PERIOD == 0 and self.clans:
             self._dispatch_caravans(clan_bldg, tick_events)
+        # Pèlerinages (C1) : APRÈS les caravanes (gardes croisées → pas de double-booking)
+        if self.tick_count % PILGRIM_CHECK_PERIOD == 0 and len(self.clans) >= 2:
+            self._dispatch_pilgrims(clan_bldg, tick_events)
 
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
@@ -2513,6 +2711,9 @@ class Simulation:
         # Drain des étals de marché (D1) : les imports réintègrent les maisons
         if self.tick_count % MARKET_DRAIN_PERIOD == 0:
             self._drain_markets(clan_bldg)
+
+        # Églises (C1) : cloche des offices + combustion des offrandes
+        self._church_upkeep(clan_bldg, tick_events)
 
         # Production de pain dans les moulins
         for b in self.buildings:
@@ -2627,7 +2828,7 @@ class Simulation:
             for b in self.buildings:
                 if b.clan_id not in dead_clan_ids:
                     kept.append(b)
-                elif b.btype in ("house", "mill", "well", "forge", "market"):
+                elif b.btype in ("house", "mill", "well", "forge", "market", "church"):
                     ruins_per_clan[b.clan_id] = ruins_per_clan.get(b.clan_id, 0) + 1
                     b.btype = "ruin"
                     b.clan_id = -1            # orphelin : ne matche plus aucun clan vivant
@@ -2656,7 +2857,7 @@ class Simulation:
         # Chaque clan vivant accumule de la science (bâtiments durables + pop) et
         # franchit ses âges. Événement `clan_age_up` à chaque passage → visible.
         if self.clans:
-            _DURABLE = ("house", "mill", "well", "wheatfield", "forge", "market")
+            _DURABLE = ("house", "mill", "well", "wheatfield", "forge", "market", "church")
             _bld_per_clan: dict = {}
             for b in self.buildings:
                 if b.btype in _DURABLE:
@@ -2743,7 +2944,10 @@ class Simulation:
                 busy.add(e.clan_id)          # max 1 marchand par clan
             elif (e.hunger < MERCHANT_HUNGER_MAX and e.thirst < MERCHANT_THIRST_MAX
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
-                    and e.iron == 0 and e._build_target_type is None):
+                    and e.iron == 0 and e._build_target_type is None
+                    and e.pilgrim_phase is None):   # garde croisée (gate-review C1 :
+                    # sans elle, un pèlerin en mission était recrutable marchand →
+                    # offrande écrasée, Σ violée, bénédiction gratuite, renom fantôme)
                 candidates.setdefault(e.clan_id, []).append(e)
 
         def pool_wood(cid):  return sum(h.wood for h in clan_bldg.get(cid, {}).get("house", []))
@@ -2814,6 +3018,7 @@ class Simulation:
                 pay = max(pays, key=lambda p: p[1])[0] if len(pays) > 1 else pays[0][0]
                 merch = min(candidates[a.id],
                             key=lambda e: (_dist(e.x, e.y, mka.x, mka.y), e.id))
+                merch.pray_ticks = 0   # pas de prière reportée (gate-review C1)
                 merch.trade_phase = "load"
                 merch.trade_dest_cid = b.id
                 merch.trade_ticks = 0
@@ -2849,13 +3054,79 @@ class Simulation:
                     if f is not None:
                         mkt.iron -= 1; f.iron += 1
 
+    # ── Foi / pèlerinages (bloc C1) ──────────────────────────────────────────
+    def _dispatch_pilgrims(self, clan_bldg: dict, tick_events: list):
+        """Recrute AU PLUS UN pèlerin par appel. A pèlerine vers B ssi
+        renom(B) >= renom(A) + CHURCH_FAME_GAP (sans église : −999) → hystérésis
+        monotone : chaque visite renforce l'attracteur, UNE Compostelle émerge.
+        Appelé APRÈS _dispatch_caravans (gardes croisées trade/pilgrim aux deux
+        dispatches → pas de double-booking aux ticks communs). Sans RNG."""
+        busy = set()
+        candidates: dict[int, list] = {}
+        for e in self.entities:
+            if not e.alive or e.etype != EntityType.HUMAN or e.clan_id is None:
+                continue
+            if e.pilgrim_phase is not None:
+                busy.add(e.clan_id)          # max 1 pèlerin par clan
+            elif (e.hunger < MERCHANT_HUNGER_MAX and e.thirst < MERCHANT_THIRST_MAX
+                    and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
+                    and e.iron == 0 and e._build_target_type is None
+                    and e.trade_phase is None):
+                candidates.setdefault(e.clan_id, []).append(e)
+
+        def pool_wood(cid):
+            return sum(h.wood for h in clan_bldg.get(cid, {}).get("house", []))
+
+        def renom(cid):
+            chs = clan_bldg.get(cid, {}).get("church", [])
+            return chs[0].pilgrims_served if chs else -999
+
+        for a in sorted(self.clans, key=lambda c: c.id):
+            houses_a = clan_bldg.get(a.id, {}).get("house", [])
+            if (a.id in busy or a.id not in candidates or not houses_a
+                    or pool_wood(a.id) < PILGRIM_WOOD_MIN):
+                continue
+            ra = renom(a.id)
+            dests = [c for c in sorted(self.clans, key=lambda c: c.id)
+                     if c.id != a.id and clan_bldg.get(c.id, {}).get("church", [])
+                     and renom(c.id) >= ra + CHURCH_FAME_GAP]
+            if not dests:
+                continue
+            h0 = houses_a[0]
+            b = min(dests, key=lambda c: (_dist(h0.x, h0.y,
+                        clan_bldg[c.id]["church"][0].x,
+                        clan_bldg[c.id]["church"][0].y), c.id))
+            pil = min(candidates[a.id],
+                      key=lambda e: (_dist(e.x, e.y, h0.x, h0.y), e.id))
+            pil.pray_ticks = 0   # pas de prière reportée (gate-review C1)
+            pil.pilgrim_phase = "load"
+            pil.pilgrim_dest_cid = b.id
+            pil.pilgrim_ticks = 0
+            pil.state = State.PILGRIMAGE
+            tick_events.append({"type": "pilgrim_depart", "clan_id": a.id,
+                                "dest_clan_id": b.id})
+            return   # un seul pèlerin lancé par évaluation
+
+    def _church_upkeep(self, clan_bldg: dict, tick_events: list):
+        """Cloche (1 event par office, déphasé par clan) + cierges : l'offrande de
+        l'autel se CONSUME (1 bois / ALTAR_BURN_PERIOD ticks) — le puits économique.
+        L'étal du marché se drainait vers l'économie ; l'autel BRÛLE."""
+        for cid in sorted(clan_bldg):
+            for ch in clan_bldg[cid].get("church", []):
+                if (self.tick_count + cid * 37) % CHURCH_SERVICE_PERIOD == 0:
+                    tick_events.append({"type": "church_bell", "clan_id": cid,
+                                        "x": ch.x, "y": ch.y})
+                if self.tick_count % ALTAR_BURN_PERIOD == 0 and ch.wood > 0:
+                    ch.wood -= 1
+
     # ── Chroniques du monde (bloc K) ─────────────────────────────────────────
     _SPECIES_FR = {"boar": "sangliers", "chicken": "poules", "horned_sheep": "mouflons",
                    "horse": "chevaux", "human": "humains", "pig": "cochons",
                    "sheep": "moutons", "fish": "poissons", "shark": "requins"}
     _FIRST_BUILD_FR = {"house": "sa première maison", "mill": "son premier moulin",
                        "well": "son premier puit", "forge": "sa forge",
-                       "market": "son premier marché"}
+                       "market": "son premier marché",
+                       "church": "son premier sanctuaire"}
     CHRONICLE_MAX = 600   # cap mémoire : le monde tourne à l'infini, pas ses annales
 
     def _update_chronicle(self, tick_events: list[dict]):
@@ -2875,7 +3146,7 @@ class Simulation:
                 add({"t": t, "kind": "extinct", "msg":
                      f"Le clan {ev['clan_id'] + 1} s'éteint"
                      + (f" — {r} ruine{'s' if r > 1 else ''} demeure{'nt' if r > 1 else ''}" if r else "")})
-            elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market"):
+            elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)
                 if key not in self._chronicle_seen:
@@ -2927,6 +3198,25 @@ class Simulation:
                     self._chronicle_seen.add(key)
                     add({"t": t, "kind": "trade", "msg":
                          f"Au marché du clan {ev['clan_id'] + 1}, la pierre s'échange à parité contre le bois"})
+            elif et == "church_bell":
+                key = ("first_procession", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "faith", "msg":
+                         f"La cloche du clan {ev['clan_id'] + 1} sonne pour la première fois — le village se rassemble"})
+            elif et == "pilgrim_blessed":   # SUR bénédiction effective (leçon MAJOR gate D2)
+                a, b = ev.get("clan_id"), ev.get("dest_clan_id")
+                key = ("first_pilgrim", min(a, b), max(a, b))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "faith", "msg":
+                         f"Un pèlerin du clan {a + 1} vient prier au sanctuaire du clan {b + 1}"})
+                if ev.get("served") == CHURCH_FAME_MILESTONE:
+                    key = ("church_fame", b)
+                    if key not in self._chronicle_seen:
+                        self._chronicle_seen.add(key)
+                        add({"t": t, "kind": "faith", "msg":
+                             f"Le sanctuaire du clan {b + 1} rayonne au-delà des frontières"})
             elif et == "heatwave_start":
                 add({"t": t, "kind": "weather", "msg": "Une canicule s'abat sur le monde"})
         # Espèces disparues / revenues (comparaison avec le tick précédent).

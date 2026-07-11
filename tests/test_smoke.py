@@ -639,6 +639,225 @@ def test_d2_price_board_and_replay():
     print("  test_d2_price_board_and_replay OK (board 12 doré, 1 event, replay identique)")
 
 
+def _c1_rig(a_age=0, a_church=False, b_age=3, tick0=None):
+    """Rig C1 : clan A (pèlerin potentiel) + clan B (église, Acier). Pools bois à
+    100 (=CLAN_WOOD_CAP → pas de coupe → Σ bois testable), pierre/minage/craft
+    neutralisés comme aux rigs D1/D2."""
+    from engine.simulation import Clan, PILGRIM_CHECK_PERIOD
+    world = World(width=60, height=45, seed=7)
+    world.stone_grid[:] = 0.0
+    sim = Simulation(world)
+    (ax, ay), (bx, by) = _find_walkable_row_segment(world, 20)
+
+    def mk(cid, x, y, age, church):
+        h = spawn(EntityType.HUMAN, x, y, Sex.MALE)
+        h.clan_id = cid; h.hunger = 10.0; h.thirst = 10.0
+        h.wood = 0; h.stone = 0; h.iron = 0
+        h.pick = "iron_pick"; h.tool = "iron_axe"
+        houses = [Building(id=cid * 10 + 1, clan_id=cid, x=x, y=y, btype="house", wood=34),
+                  Building(id=cid * 10 + 2, clan_id=cid, x=x, y=y, btype="house", wood=33),
+                  Building(id=cid * 10 + 3, clan_id=cid, x=x, y=y, btype="house", wood=33)]
+        blds = list(houses)
+        # marché/puits/forge pré-construits : sinon un clan éligible bâtit
+        # (déduction bois/pierre au chantier) et casse la conservation Σ du test
+        blds.append(Building(id=cid * 10 + 4, clan_id=cid, x=x, y=y, btype="market"))
+        blds.append(Building(id=cid * 10 + 6, clan_id=cid, x=x, y=y, btype="well"))
+        blds.append(Building(id=cid * 10 + 7, clan_id=cid, x=x, y=y, btype="well"))
+        blds.append(Building(id=cid * 10 + 8, clan_id=cid, x=x, y=y, btype="forge"))
+        # 8 champs pré-construits (= cap/clan) : sinon l'humain passe sa vie à
+        # PLANTER (coût 0 mais _build_target_type posé → jamais candidat aux missions)
+        for k in range(8):
+            blds.append(Building(id=cid * 100 + 20 + k, clan_id=cid, x=x, y=y,
+                                 btype="wheatfield"))
+        if church:
+            blds.append(Building(id=cid * 10 + 5, clan_id=cid, x=x, y=y, btype="church"))
+        return h, houses, blds
+
+    ha, houses_a, blds_a = mk(0, ax, ay, a_age, a_church)
+    hb, houses_b, blds_b = mk(1, bx, by, b_age, True)
+    sim.entities = [ha, hb]
+    sim.clans = [Clan(id=0, cx=float(ax), cy=float(ay), color="#f00", chief_id=ha.id, age=a_age),
+                 Clan(id=1, cx=float(bx), cy=float(by), color="#00f", chief_id=hb.id, age=b_age)]
+    sim.buildings = blds_a + blds_b
+    sim.tick_count = (PILGRIM_CHECK_PERIOD - 1) if tick0 is None else tick0
+    return sim, ha, hb, houses_a, houses_b, blds_b[-1]
+
+
+def test_c1_office_procession_blessing_and_hunger():
+    """C1 office : à la cloche, les fidèles processionnent vers l'église (distances
+    décroissantes), s'agenouillent et sont bénis ; l'affamé est exclu ; l'effet de
+    la bénédiction sur la faim est RÉEL (vs contrôle non-béni à traits égaux)."""
+    from engine.simulation import Clan, State
+    world = World(width=60, height=45, seed=7)
+    world.stone_grid[:] = 0.0
+    world.food_grid[:] = 0.0   # personne ne mange → faim comparable
+    sim = Simulation(world)
+    # Rangée garantie marchable : l'église au bout, les fidèles alignés dessus
+    # (sinon _find_land_tile peut rendre un coin borde d'eau → fidèles noyés/coupés)
+    (lx, ly), _ = _find_walkable_row_segment(world, 16)
+    church = Building(id=1, clan_id=0, x=lx, y=ly, btype="church")
+    house = Building(id=2, clan_id=0, x=lx, y=ly, btype="house", wood=100)
+    fideles = []
+    for i in range(4):
+        h = spawn(EntityType.HUMAN, min(lx + 8 + i * 2, world.width - 1), ly, Sex.MALE)
+        h.clan_id = 0; h.hunger = 5.0; h.thirst = 5.0
+        h.pick = "iron_pick"; h.tool = "iron_axe"
+        h.traits = {"speed": 1.0, "vision": 8, "hunger_rate": 0.08}
+        fideles.append(h)
+    gourmand = spawn(EntityType.HUMAN, min(lx + 10, world.width - 1), ly, Sex.MALE)
+    gourmand.clan_id = 0; gourmand.hunger = 60.0; gourmand.thirst = 5.0   # > PRAY_HUNGER_MAX
+    gourmand.pick = "iron_pick"; gourmand.tool = "iron_axe"
+    gourmand.traits = dict(fideles[0].traits)
+    # Témoin : n'importe quelle tuile marchable à >28 de l'église (hors rayon d'appel)
+    tx = ty = None
+    for yy in range(world.height):
+        for xx in range(world.width):
+            if world.is_walkable(xx, yy, False) and _dist(xx, yy, lx, ly) > 28:
+                tx, ty = xx, yy
+                break
+        if tx is not None:
+            break
+    temoin = spawn(EntityType.HUMAN, tx, ty, Sex.MALE)  # hors rayon
+    temoin.clan_id = 0; temoin.hunger = 5.0; temoin.thirst = 5.0
+    temoin.pick = "iron_pick"; temoin.tool = "iron_axe"
+    temoin.traits = dict(fideles[0].traits)
+    sim.entities = fideles + [gourmand, temoin]
+    sim.clans = [Clan(id=0, cx=float(lx), cy=float(ly), color="#f00",
+                      chief_id=fideles[0].id, age=3)]
+    sim.buildings = [church, house]
+    sim.tick_count = 299   # 1er step → tick 300 : fenêtre d'office ouverte (cid 0)
+
+    d0 = [_dist(h.x, h.y, church.x, church.y) for h in fideles]
+    dmin = list(d0)   # distance min atteinte PENDANT la fenêtre (après, ils repartent)
+    prayed = set(); gourmand_prayed = False
+    for _ in range(220):
+        sim.step()
+        for i, h in enumerate(fideles):
+            if h.state == State.PRAYING:
+                prayed.add(i)
+            dmin[i] = min(dmin[i], _dist(h.x, h.y, church.x, church.y))
+        gourmand_prayed = gourmand_prayed or gourmand.state == State.PRAYING
+    blessed = sum(1 for h in fideles if h.blessed_ticks > 0)
+    assert len(prayed) >= 3, f"seulement {len(prayed)} fidèles en PRAYING"
+    assert sum(1 for a, b in zip(d0, dmin) if b < a - 1.0) >= 3, \
+        f"la procession ne converge pas: {[f'{a:.0f}->min{b:.0f}' for a, b in zip(d0, dmin)]}"
+    assert blessed >= 3, f"seulement {blessed} bénis"
+    assert not gourmand_prayed, "l'affamé (hunger 60 > 55) a participé à l'office"
+    assert temoin.blessed_ticks == 0, "le témoin hors rayon a été béni"
+    b0 = next(h for h in fideles if h.blessed_ticks > 0)
+    assert b0.hunger < temoin.hunger, \
+        f"bénédiction sans effet réel: béni {b0.hunger:.1f} vs témoin {temoin.hunger:.1f}"
+    print(f"  test_c1_office_procession_blessing_and_hunger OK "
+          f"({len(prayed)} fidèles, {blessed} bénis, faim {b0.hunger:.1f}<{temoin.hunger:.1f})")
+
+
+def test_c1_pilgrimage_pays_offering_and_conserves():
+    """C1 pèlerinage : A (sans église) envoie un pèlerin déposer 8 bois sur l'autel
+    de B contre bénédiction ; Σ bois conservée à CHAQUE tick (burn suspendu) ;
+    exclusivité trade/pilgrim ; puis le burn consume l'autel (le puits)."""
+    import engine.simulation as S
+    sim, ha, hb, houses_a, houses_b, church_b = _c1_rig()
+    # Opportunité caravane PENDANT la mission (gate-review C1), via le FER (la
+    # pierre déverrouillerait puits/moulins/upgrades → bruit de construction dans le
+    # ledger bois) : A (forge presque vide) achète du fer à B (forge pleine), payé
+    # en BOIS → le troc déplace du bois DANS le ledger (étals comptés). Sans la
+    # garde croisée pilgrim_phase du dispatch caravanes, le pèlerin serait recruté
+    # marchand et son offrande écrasée (Σ violée + bénédiction gratuite).
+    for b in sim.buildings:
+        if b.btype == "forge":
+            b.iron = 2 if b.clan_id == 0 else 18
+    old_burn = S.ALTAR_BURN_PERIOD
+    S.ALTAR_BURN_PERIOD = 10 ** 9   # burn suspendu pour la conservation pure
+    try:
+        def wood_total():
+            # ledger GÉNÉRAL : tout le bois du monde clos (bâtiments porteurs de
+            # stock + cargaisons + inventaires) — le troc D1/D2 peut légitimement
+            # déplacer du bois vers les étals pendant le pèlerinage
+            return (sum(b.wood for b in sim.buildings
+                        if b.btype in ("house", "market", "church"))
+                    + ha.cargo_wood + hb.cargo_wood + ha.wood + hb.wood)
+        w0 = wood_total()
+        seen = set()
+        for _ in range(900):
+            data = sim.step()
+            for ev in data["events"]:
+                if ev.get("type", "").startswith("pilgrim"):
+                    seen.add(ev["type"])
+            assert wood_total() == w0, f"Σ bois violée: {w0} -> {wood_total()}"
+            assert not (ha.trade_phase is not None and ha.pilgrim_phase is not None), \
+                "exclusivité trade/pilgrim violée (les DEUX missions actives)"
+            if "pilgrim_home" in seen:
+                break
+        assert {"pilgrim_depart", "pilgrim_blessed", "pilgrim_home"} <= seen, \
+            f"cycle incomplet: {seen}"
+        assert church_b.wood == 8, f"autel B: {church_b.wood} (attendu 8)"
+        assert church_b.pilgrims_served == 1
+        assert ha.blessed_ticks > 0, "pas béni après le dépôt (BLESS_DURATION=600 > trajet retour)"
+        assert ha.pilgrim_phase is None and ha.cargo_wood == 0
+    finally:
+        S.ALTAR_BURN_PERIOD = old_burn
+    for _ in range(8 * old_burn + 10):
+        sim.step()
+        if church_b.wood == 0:
+            break
+    assert church_b.wood == 0, f"l'autel ne se consume pas: {church_b.wood}"
+    print("  test_c1_pilgrimage_pays_offering_and_conserves OK "
+          "(8 bois offerts, Σ conservée, autel consumé)")
+
+
+def test_c1_dest_ruined_and_replay():
+    """C1 : église détruite (clan B éteint) pendant le trajet → demi-tour, offrande
+    re-créditée, AUCUNE bénédiction ; puis replay byte-à-byte en plein pèlerinage
+    ET en pleine prière."""
+    sim, ha, hb, houses_a, houses_b, church_b = _c1_rig()
+    for _ in range(500):
+        sim.step()
+        if ha.pilgrim_phase == "out" and ha.cargo_wood > 0:
+            break
+    assert ha.pilgrim_phase == "out", f"jamais parti ({ha.pilgrim_phase})"
+    hb.alive = False   # clan B s'éteint → E8 ruine son église
+    for _ in range(600):
+        sim.step()
+        if ha.pilgrim_phase is None:
+            break
+    assert ha.pilgrim_phase is None, "mission jamais close après ruine"
+    assert church_b.btype == "ruin"
+    assert ha.blessed_ticks == 0, "béni sans avoir déposé l'offrande"
+    assert sum(h.wood for h in houses_a) == 100, \
+        f"offrande non re-créditée: {sum(h.wood for h in houses_a)}"
+
+    # Replay en plein pèlerinage
+    sim2, ha2, *_ = _c1_rig()
+    for _ in range(500):
+        sim2.step()
+        if ha2.pilgrim_phase == "out":
+            break
+    assert ha2.pilgrim_phase == "out"
+    snap = sim2.save_state()
+    ref = [sim2.step() for _ in range(100)]
+    sim3 = Simulation(World(width=10, height=10, seed=1))
+    sim3.load_state(snap)
+    rep = [sim3.step() for _ in range(100)]
+    assert ref == rep, "replay divergent en plein pèlerinage"
+
+    # Replay en pleine prière (pray_ticks > 0)
+    sim4, ha4, hb4, _, _, church4 = _c1_rig(a_age=3, a_church=True, tick0=299)
+    from engine.simulation import State as St
+    for _ in range(120):
+        sim4.step()
+        if ha4.pray_ticks > 0:
+            break
+    assert ha4.pray_ticks > 0, "jamais en prière"
+    snap4 = sim4.save_state()
+    ref4 = [sim4.step() for _ in range(80)]
+    sim5 = Simulation(World(width=10, height=10, seed=1))
+    sim5.load_state(snap4)
+    rep4 = [sim5.step() for _ in range(80)]
+    assert ref4 == rep4, "replay divergent en pleine prière"
+    print("  test_c1_dest_ruined_and_replay OK "
+          "(demi-tour + re-crédit sans bénédiction ; replay OK en mission et en prière)")
+
+
 def test_k_chronicle_records_and_persists():
     """Bloc K : les annales enregistrent les jalons (dérivées des tick_events, sans
     toucher la sortie de step() → guard intact), dédupliquent les « premières fois »
@@ -728,6 +947,9 @@ if __name__ == "__main__":
                test_d2_iron_for_stone_roundtrip_conserves,
                test_d2_no_flip_and_refusal,
                test_d2_price_board_and_replay,
+               test_c1_office_procession_blessing_and_hunger,
+               test_c1_pilgrimage_pays_offering_and_conserves,
+               test_c1_dest_ruined_and_replay,
                test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
