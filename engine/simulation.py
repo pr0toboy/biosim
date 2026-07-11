@@ -13,7 +13,8 @@ from dataclasses import dataclass, asdict
 from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
                        get_id_counter, set_id_counter)
-from .world import Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD, FERTILITY_TRAMPLE
+from .world import (Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD,
+                    IRON_STUMP_THRESHOLD, FERTILITY_TRAMPLE)
 
 # ── Clans ─────────────────────────────────────────────────────────────────────
 N_CLANS = 4
@@ -69,6 +70,7 @@ class Building:
     work_done: int = 0      # ticks de travail déjà effectués sur un chantier
     work_needed: int = 0    # ticks de travail total nécessaires pour terminer
     ruin_ticks: int = 0     # ruine : ticks restants avant que la nature la reprenne (0 = pas une ruine)
+    iron: int = 0           # forge : fer stocké (livré par les mineurs) — bloc B
 
     def to_dict(self):
         d = {"id": self.id, "clan_id": self.clan_id,
@@ -85,6 +87,8 @@ class Building:
             d["bread"] = self.bread
         elif self.btype == "ruin":
             d["ruin_ticks"] = self.ruin_ticks   # front : fondu quand la ruine s'efface
+        elif self.btype == "forge":
+            d["iron"] = self.iron               # fer stocké à la forge (bloc B)
         return d
 
 
@@ -102,6 +106,24 @@ MAX_STONE_CARRY     = 3    # pierre max transportable par un humain
 # sans montagne en vue ne mine jamais (→ ni puit, ni moulin, ni niveau 2). Au-dessus,
 # on n'envoie plus les mineurs traverser la carte en continu (garde-fou perf). (C1)
 CLAN_STONE_BOOTSTRAP = 20
+
+# ── Fer & forge (bloc B) — réservé aux clans de l'Âge du Fer ───────────────────
+FER_AGE            = 2     # index d'âge « Fer » dans AGE_NAMES (Bois=0, Pierre=1, Fer=2)
+MAX_IRON_CARRY     = 3     # fer max transportable par un mineur
+IRON_PICK_COST     = 3     # fer (stocké à la forge) pour upgrader pioche pierre → fer
+IRON_AXE_COST      = 3     # fer pour upgrader hache pierre → fer
+IRON_PICK_BONUS    = 2     # pierre bonus par minage roche avec pioche fer (total 1+2=3
+                           # = portée pleine en UN coup). Sur le FER : aucun bonus —
+                           # IRON_PER_MINE=3 sature déjà MAX_IRON_CARRY (gate-review B).
+# Hache fer : le bonus de rendement serait mangé par MAX_CARRY=5 (2+8 capé → identique
+# pierre, prouvé au gate-review). Son vrai effet = COUPER PLUS VITE (cooldown réduit).
+IRON_AXE_COOLDOWN  = 6     # ticks entre 2 coupes avec hache fer (CHOP_COOLDOWN=12 sinon)
+FORGE_MAX_IRON     = 20    # stock de fer max dans une forge (cap de dépôt)
+# Hystérésis anti-pendule (gate-review B) : les mineurs ne partent en expédition fer
+# que si la forge passe SOUS ce seuil (l'upgrade en consomme 3 → si on rouvrait la
+# vanne dès iron < MAX, tout clan Fer enverrait ses mineurs au fer en permanence et
+# affamerait la chaîne PIERRE). Entre RESTOCK et MAX, seul le dépôt remplit.
+IRON_RESTOCK_THRESHOLD = 8
 
 # ── Champ de blé ──────────────────────────────────────────────────────────────
 WHEAT_TICKS_PER_STAGE  = 180   # ticks pour passer d'un stade au suivant (×3 = 540 total)
@@ -580,13 +602,43 @@ def _try_craft(entity: Entity, house, events: list) -> bool:
     return True
 
 
+def _spend_pool_stone(houses, amount: int) -> bool:
+    """Dépense `amount` de pierre depuis le POOL des maisons du clan (greedy). La
+    pierre étant rare et étalée (≤3/maison), un gros bâtiment comme la forge doit
+    puiser dans plusieurs maisons. True (et déduit) si le total suffit, sinon False."""
+    if sum(h.stone for h in houses) < amount:
+        return False
+    left = amount
+    for h in houses:
+        take = min(h.stone, left)
+        h.stone -= take; left -= take
+        if left <= 0:
+            break
+    return True
+
+
+def _try_forge_upgrade(entity: Entity, forge, events: list) -> bool:
+    """Bloc B : à la forge, upgrade un outil PIERRE → FER en consommant le fer
+    stocké. Pioche pierre → pioche fer, puis hache pierre → hache fer."""
+    if entity.pick == "stone_pick" and forge.iron >= IRON_PICK_COST:
+        forge.iron -= IRON_PICK_COST; entity.pick = "iron_pick"
+        events.append({"type": "craft_iron_pick", "clan_id": entity.clan_id})
+        return True
+    if entity.tool == "stone_axe" and forge.iron >= IRON_AXE_COST:
+        forge.iron -= IRON_AXE_COST; entity.tool = "iron_axe"
+        events.append({"type": "craft_iron_axe", "clan_id": entity.clan_id})
+        return True
+    return False
+
+
 class _TickCtx:
     """Contexte tick-global partagé par TOUTES les entités d'un même tick.
     Construit une seule fois par step() (au lieu de repasser 16 arguments à chaque
     appel). Ne contient QUE de l'état commun au tick : rien de propre à une entité."""
     __slots__ = ("world", "all_entities", "births", "events", "tick", "season",
                  "clans", "buildings", "temp_c", "species_counts", "raining",
-                 "heatwave", "clan_bldg", "predators", "predator_grid", "entity_grid")
+                 "heatwave", "clan_bldg", "predators", "predator_grid", "entity_grid",
+                 "iron_tiles", "iron_nearest")
 
     def __init__(self, world, all_entities, births, events, tick,
                  season="spring", clans=None, buildings=None, temp_c=12.0,
@@ -599,6 +651,8 @@ class _TickCtx:
         self.raining = raining; self.heatwave = heatwave; self.clan_bldg = clan_bldg
         self.predators = predators; self.predator_grid = predator_grid
         self.entity_grid = entity_grid
+        self.iron_tiles = None    # bloc B : tuiles de fer minable, mémoïsées par tick
+        self.iron_nearest = {}    # bloc B : nearest fer par bucket 8×8, mémoïsé par tick
 
 
 def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
@@ -1000,6 +1054,26 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _move_toward(entity, entity.target_x, entity.target_y,
                              _eff_speed, world)
                 return True
+    # 3.6 Dépôt du FER à la forge du clan (bloc B) + upgrade d'outil fer sur place.
+    # On ne cible QUE les forges avec de la place : voyager vers une forge pleine
+    # pour y jeter son fer était un aller-retour pour rien (gate-review B).
+    if (entity.spec.can_mine and entity.iron > 0 and entity.clan_id is not None):
+        _forges = _cb.get("forge", [])
+        _forge = next((f for f in _forges if f.iron < FORGE_MAX_IRON), None)
+        if _forge is not None:
+            if _dist(entity.x, entity.y, _forge.x, _forge.y) < 1.5:
+                _space = max(0, FORGE_MAX_IRON - _forge.iron)
+                _forge.iron += min(entity.iron, _space)
+                entity.iron = 0   # surplus abandonné si la forge s'est remplie entre-temps
+                _try_forge_upgrade(entity, _forge, events)
+                return True
+            elif entity.iron >= MAX_IRON_CARRY:
+                entity.state = State.WANDERING
+                entity.target_x = float(_forge.x); entity.target_y = float(_forge.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
+        elif _forges and entity.iron >= MAX_IRON_CARRY:
+            entity.iron = 0   # toutes les forges pleines → on lâche sur place (symétrie bois)
     # C1bis : fabrication d'outils DÉCOUPLÉE du dépôt. Un humain qui manque un outil
     # de base (pioche OU hache) va à la maison du clan qui a le stock et le fabrique,
     # même sans rien à déposer. Sinon, une fois le bois du clan capé (plus de dépôt),
@@ -1021,6 +1095,28 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 entity.state = State.BUILDING
                 entity.target_x = float(_hc.x)
                 entity.target_y = float(_hc.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
+    # Bloc B : upgrade d'outil PIERRE → FER à la forge, DÉCOUPLÉ (comme C1bis). Un
+    # humain avec une pioche/hache pierre, près de la forge du clan qui a du fer, va
+    # la mettre à niveau — même sans transporter de fer. Auto-limité (condition fausse
+    # une fois l'outil en fer). Gate de distance (gate-review B) : seuls les humains
+    # DÉJÀ proches y vont — sinon tout le clan pèlerine à chaque lot de 3 fer déposé
+    # (le fer draine à 3/upgrade, les lointains marchaient pour rien).
+    if (entity.spec.can_build and entity.clan_id is not None and entity.hunger < 70
+            and (entity.pick == "stone_pick" or entity.tool == "stone_axe")):
+        _fu = next((f for f in _cb.get("forge", [])
+                    if ((entity.pick == "stone_pick" and f.iron >= IRON_PICK_COST)
+                        or (entity.tool == "stone_axe" and f.iron >= IRON_AXE_COST))
+                    and _dist(entity.x, entity.y, f.x, f.y) < 24), None)
+        if _fu is not None:
+            if _dist(entity.x, entity.y, _fu.x, _fu.y) < 1.5:
+                if _try_forge_upgrade(entity, _fu, events):
+                    entity.state = State.BUILDING
+                    return True
+            else:
+                entity.state = State.BUILDING
+                entity.target_x = float(_fu.x); entity.target_y = float(_fu.y)
                 _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
                 return True
 
@@ -1160,6 +1256,13 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         dw.wood  -= bspec_t.wood_cost
                         ds.stone -= bspec_t.stone_cost
                         can_build_t = True
+                elif btype_t == "forge":   # bloc B : bois d'une maison + pierre du POOL clan
+                    dw = max(clan_houses_t, key=lambda b: b.wood) if clan_houses_t else None
+                    if (dw and dw.wood >= bspec_t.wood_cost
+                            and sum(h.stone for h in clan_houses_t) >= bspec_t.stone_cost):
+                        if _spend_pool_stone(clan_houses_t, bspec_t.stone_cost):
+                            dw.wood -= bspec_t.wood_cost
+                            can_build_t = True
                 elif btype_t == "wheatfield":
                     can_build_t = True  # pas de coût en ressources
             if can_build_t:
@@ -1336,6 +1439,49 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         _move_toward(entity, entity.target_x, entity.target_y,
                                      _eff_speed, world)
                         return True
+    # 4.28 Construction d'une FORGE (bloc B) : clan de l'Âge du Fer, ≥1 maison, pas
+    # encore de forge. Placement autour du feu de camp (pas d'eau requise).
+    if (entity.spec.can_build
+            and entity.clan_id is not None
+            and entity.building_type is None
+            and entity._build_target_type is None
+            and entity.hunger < 65
+            and clans):
+        _clan_f = clans.get(entity.clan_id)
+        if _clan_f is not None and _clan_f.age >= FER_AGE:
+            bspec_forge  = BUILDING_SPECS["forge"]
+            clan_forges  = _cb.get("forge", [])
+            clan_sites_f = _cb.get("site_forge", [])
+            clan_houses  = _cb.get("house", [])
+            if (clan_houses and not clan_sites_f
+                    and (bspec_forge.max_per_clan == 0
+                         or len(clan_forges) < bspec_forge.max_per_clan)):
+                donor   = max(clan_houses, key=lambda b: b.wood)
+                has_res = (donor.wood >= bspec_forge.wood_cost
+                           and sum(h.stone for h in clan_houses) >= bspec_forge.stone_cost)
+                already_planned_f = (
+                    any(ev.get("type") == "start_site" and ev.get("btype") == "forge"
+                        and ev.get("clan_id") == entity.clan_id for ev in events)
+                    or any(e._build_target_type == "forge" and e.clan_id == entity.clan_id
+                           for e in all_entities if e.alive and e is not entity))
+                if has_res and not already_planned_f:
+                    for _ in range(30):
+                        angle = random.uniform(0, 2 * math.pi)
+                        dist  = random.uniform(bspec_forge.min_from_fire, bspec_forge.max_from_fire)
+                        fx = int(_clan_f.cx + math.cos(angle) * dist)
+                        fy = int(_clan_f.cy + math.sin(angle) * dist)
+                        if not world.is_valid(fx, fy) or not world.is_walkable(fx, fy):
+                            continue
+                        if any(_dist(fx, fy, b.x, b.y) < bspec_forge.min_dist
+                               for b in (buildings or []) if b.btype == "forge"):
+                            continue
+                        entity._build_target_type = "forge"
+                        entity._build_target_x = float(fx); entity._build_target_y = float(fy)
+                        entity.state = State.BUILDING
+                        entity.target_x = float(fx); entity.target_y = float(fy)
+                        _move_toward(entity, entity.target_x, entity.target_y,
+                                     _eff_speed, world)
+                        return True
     # 4.3a Récolte : champ mûr (priorité élevée : affamé OU adjacent à un champ mûr)
     if entity.spec.can_build and entity.clan_id is not None:
         clan_fields = _cb.get("wheatfield", [])
@@ -1491,12 +1637,15 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
         if world.is_choppable(entity.ix, entity.iy):
             entity.state = State.CHOPPING
             wood = world.chop_tree(entity.ix, entity.iy)
-            if entity.tool == "stone_axe":
+            # Hache fer = même rendement/coup que la pierre (un bonus serait écrêté
+            # par MAX_CARRY, prouvé au gate-review) mais COUPE 2× PLUS VITE (cooldown).
+            if entity.tool in ("stone_axe", "iron_axe"):
                 wood += STONE_AXE_BONUS
             elif entity.tool == "axe":
                 wood += AXE_BONUS
             entity.wood = min(MAX_CARRY, entity.wood + wood)
-            entity.chop_cooldown_left = CHOP_COOLDOWN
+            entity.chop_cooldown_left = (IRON_AXE_COOLDOWN if entity.tool == "iron_axe"
+                                         else CHOP_COOLDOWN)
             return True
         # Arbre dans le champ de vision → se déplace vers le plus proche (numpy)
         r = int(entity.traits["vision"])
@@ -1538,6 +1687,47 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _move_toward(entity, entity.target_x, entity.target_y,
                              _eff_speed, world)
                 return True
+    # 4.55 Mine le FER (bloc B) : mineur d'un clan de l'Âge du Fer, avec pioche.
+    # Hystérésis : l'expédition ne se déclenche que si une forge du clan passe SOUS
+    # IRON_RESTOCK_THRESHOLD — sinon la vanne se rouvrirait à chaque upgrade (−3) et
+    # les mineurs pendouleraient fer↔forge en permanence, affamant la chaîne pierre.
+    _cobj_fer = clans.get(entity.clan_id) if (clans and entity.clan_id is not None) else None
+    if (entity.spec.can_mine and entity.pick is not None
+            and entity.iron < MAX_IRON_CARRY and entity.hunger < 65
+            and _cobj_fer is not None and _cobj_fer.age >= FER_AGE
+            and any(f.iron < IRON_RESTOCK_THRESHOLD for f in _cb.get("forge", []))):
+        # Gisement de fer adjacent → mine directement (IRON_PER_MINE=3 sature la
+        # portée en un coup ; pas de bonus pioche fer ici, il serait écrêté).
+        for adx in range(-1, 2):
+            for ady in range(-1, 2):
+                if adx == 0 and ady == 0:
+                    continue
+                tx, ty = entity.ix + adx, entity.iy + ady
+                if world.is_iron_mineable(tx, ty):
+                    entity.state = State.MINING
+                    got = world.mine_iron(tx, ty)
+                    entity.iron = min(MAX_IRON_CARRY, entity.iron + got)
+                    return True
+        # Sinon → gisement de fer minable le plus proche. Double mémoïsation ctx :
+        # la LISTE des tuiles (1 argwhere/tick partagé) + le NEAREST par bucket 8×8
+        # (les mineurs d'un clan sont groupés → un seul dists+argmin par zone/tick,
+        # pas un par mineur en transit à chaque tick — gate-review perf).
+        if ctx.iron_tiles is None:
+            ctx.iron_tiles = np.argwhere(
+                world._iron_mask & (world.iron_grid >= IRON_STUMP_THRESHOLD))
+            ctx.iron_nearest = {}
+        iron_tiles = ctx.iron_tiles
+        if len(iron_tiles):
+            _bucket = (entity.ix >> 3, entity.iy >> 3)
+            best = ctx.iron_nearest.get(_bucket)
+            if best is None:
+                dists = (iron_tiles[:, 1] - entity.x)**2 + (iron_tiles[:, 0] - entity.y)**2
+                best = iron_tiles[int(np.argmin(dists))]
+                ctx.iron_nearest[_bucket] = best
+            entity.state = State.MINING
+            entity.target_x = float(best[1]); entity.target_y = float(best[0])
+            _move_toward(entity, entity.target_x, entity.target_y, _eff_speed * 0.8, world)
+            return True
     # 4.6 Mine la pierre (entités avec can_mine + pioche, si portée non pleine et pas trop affamées)
     if (entity.spec.can_mine
             and entity.pick is not None
@@ -1552,7 +1742,9 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 if world.is_mineable(tx, ty):
                     entity.state = State.MINING
                     stone = world.mine_stone(tx, ty)
-                    if entity.pick == "stone_pick":
+                    if entity.pick == "iron_pick":
+                        stone += IRON_PICK_BONUS
+                    elif entity.pick == "stone_pick":
                         stone += STONE_PICK_BONUS
                     entity.stone = min(MAX_STONE_CARRY, entity.stone + stone)
                     return True
@@ -1872,6 +2064,7 @@ class Simulation:
                         for x, y in self.world.regen_trees()]
         rock_changes = [{"x": x, "y": y, "depleted": False}
                         for x, y in self.world.regen_stones()]
+        self.world.regen_iron()   # bloc B : régen lente des gisements de fer
         # Fertilité : DIRT → GRASS (regen lente), GRASS → DIRT collecté depuis consume_fertility
         biome_changes = self.world.regen_fertility(self.raining, season)
         biome_changes += self.world.drain_biome_changes()
@@ -2086,7 +2279,7 @@ class Simulation:
             for b in self.buildings:
                 if b.clan_id not in dead_clan_ids:
                     kept.append(b)
-                elif b.btype in ("house", "mill", "well"):
+                elif b.btype in ("house", "mill", "well", "forge"):
                     ruins_per_clan[b.clan_id] = ruins_per_clan.get(b.clan_id, 0) + 1
                     b.btype = "ruin"
                     b.clan_id = -1            # orphelin : ne matche plus aucun clan vivant
@@ -2115,7 +2308,7 @@ class Simulation:
         # Chaque clan vivant accumule de la science (bâtiments durables + pop) et
         # franchit ses âges. Événement `clan_age_up` à chaque passage → visible.
         if self.clans:
-            _DURABLE = ("house", "mill", "well", "wheatfield")
+            _DURABLE = ("house", "mill", "well", "wheatfield", "forge")
             _bld_per_clan: dict = {}
             for b in self.buildings:
                 if b.btype in _DURABLE:

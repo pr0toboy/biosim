@@ -76,6 +76,12 @@ STONE_STUMP_THRESHOLD = 50.0   # en-dessous : roche épuisée (visible)
 STONE_REGEN_RATE      = 0.021  # santé régénérée par tick (0→50 en ~2400 ticks ≈ 8 saisons)
 STONE_PER_MINE        = 1      # pierre obtenue par minage (sans outil)
 
+# ── Fer (bloc B : rare, dans un sous-ensemble des montagnes) ───────────────────
+IRON_FRACTION         = 0.16   # part des tuiles montagne portant du fer
+IRON_STUMP_THRESHOLD  = 50.0   # en-dessous : gisement de fer épuisé
+IRON_REGEN_RATE       = 0.012  # régen plus lente que la pierre (le fer est rare)
+IRON_PER_MINE         = 3      # fer obtenu par minage (veine riche → 1 voyage suffit)
+
 # ── Fertilité / pâturage ──────────────────────────────────────────────────────
 FERTILITY_MAX          = 100.0   # fertilité pleine
 FERTILITY_CONSUME      = 12.0    # fertilité retirée par action de broutage (manger)
@@ -104,6 +110,13 @@ class World:
         # Grille des roches (santé 0–100, uniquement tuiles montagne)
         self._mountain_mask = (self.biome_grid == int(Biome.MOUNTAIN))
         self.stone_grid = np.where(self._mountain_mask, 100.0, 0.0).astype(np.float32)
+        # Gisements de fer (bloc B) : sous-ensemble RARE des montagnes. Tiré d'un
+        # RandomState LOCAL (indépendant du flux np.random global) → reproduit à
+        # l'identique par from_state (qui re-appelle __init__ avec le même seed).
+        _iron_rng = np.random.RandomState((self.seed ^ 0x1A0E5) & 0xFFFFFFFF)
+        self._iron_mask = self._mountain_mask & (
+            _iron_rng.random((self.height, self.width)) < IRON_FRACTION)
+        self.iron_grid = np.where(self._iron_mask, 100.0, 0.0).astype(np.float32)
         # Grille de feu (intensité 0–100, uniquement tuiles forêt avec arbre debout)
         self.fire_grid = np.zeros((self.height, self.width), dtype=np.float32)
         # Fertilité des tuiles herbe (GRASS → DIRT quand épuisée, régénère lentement)
@@ -338,6 +351,28 @@ class World:
         self._mine_changes.append((x, y))
         return STONE_PER_MINE
 
+    def is_iron_mineable(self, x: int, y: int) -> bool:
+        """Tuile montagne portant du fer non épuisé (bloc B)."""
+        return (self.is_valid(x, y)
+                and bool(self._iron_mask[y, x])
+                and float(self.iron_grid[y, x]) >= IRON_STUMP_THRESHOLD)
+
+    def mine_iron(self, x: int, y: int) -> int:
+        """Mine le fer en (x, y). Retourne le fer obtenu (0 si non minable).
+        Ne pousse RIEN dans _mine_changes : ce canal draine en rock_changes
+        {"depleted": True} côté front → marquerait comme épuisée une ROCHE dont la
+        pierre est intacte (gate-review B). Les gisements de fer n'ont pas encore
+        de rendu dédié ; à ajouter avec leur propre canal le jour où ils en ont un."""
+        if not self.is_iron_mineable(x, y):
+            return 0
+        self.iron_grid[y, x] = max(0.0, float(self.iron_grid[y, x]) - 60.0)
+        return IRON_PER_MINE
+
+    def regen_iron(self):
+        """Régénère lentement les gisements de fer épuisés (invariant infini)."""
+        self.iron_grid[self._iron_mask] = np.minimum(
+            100.0, self.iron_grid[self._iron_mask] + IRON_REGEN_RATE)
+
     def get_depleted_rocks(self) -> list[list[int]]:
         """Retourne [[x, y], …] des tuiles-roche épuisées."""
         ys, xs = np.where((self.stone_grid < STONE_STUMP_THRESHOLD) & self._mountain_mask)
@@ -545,6 +580,7 @@ class World:
             "food_grid":      _grid_to_b64(self.food_grid),
             "tree_grid":      _grid_to_b64(self.tree_grid),
             "stone_grid":     _grid_to_b64(self.stone_grid),
+            "iron_grid":      _grid_to_b64(self.iron_grid),
             "fertility_grid": _grid_to_b64(self.fertility_grid),
             "fire_grid":      _grid_to_b64(self.fire_grid),
         }
@@ -556,6 +592,8 @@ class World:
         w.food_grid      = _grid_from_b64(d["food_grid"])
         w.tree_grid      = _grid_from_b64(d["tree_grid"])
         w.stone_grid     = _grid_from_b64(d["stone_grid"])
+        if d.get("iron_grid"):   # compat vieux saves : sinon garde le fer frais de __init__
+            w.iron_grid  = _grid_from_b64(d["iron_grid"])
         w.fertility_grid = _grid_from_b64(d["fertility_grid"])
         w.fire_grid      = _grid_from_b64(d["fire_grid"])
         # _max_grid / _regen_grid dépendent du biome (0 sur DIRT) → recomputer

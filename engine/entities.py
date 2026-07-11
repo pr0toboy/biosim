@@ -138,6 +138,13 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         min_dist=8, min_from_fire=3, max_from_fire=16,
         max_per_clan=2,
     ),
+    "forge": BuildingSpec(   # bloc B : réservé aux clans de l'Âge du Fer (age >= 2)
+        btype="forge",
+        wood_cost=14, stone_cost=12,
+        build_time=70, pop_bonus=0,
+        min_dist=6, min_from_fire=3, max_from_fire=18,
+        max_per_clan=1,
+    ),
 }
 
 
@@ -261,7 +268,7 @@ class Entity:
         "repro_cooldown_left", "gestation_left", "alive",
         "target_x", "target_y", "target_id",
         "_move_frac_x", "_move_frac_y",
-        "clan_id", "traits", "wood", "stone", "meat",
+        "clan_id", "traits", "wood", "stone", "iron", "meat",
         "building_ticks_left", "building_type",
         "tool", "pick", "sickle", "watering_can", "can_filled", "fishing_rod", "thirst",
         "_stuck_ticks", "chop_cooldown_left",
@@ -291,11 +298,12 @@ class Entity:
         self.clan_id: Optional[int] = None
         self.wood: int = 0
         self.stone: int = 0
+        self.iron: int = 0                # fer porté (bloc B) — déposé à la forge
         self.meat: int = 0
         self.building_ticks_left: int = 0
         self.building_type: Optional[str] = None  # "house", "wheatfield", …
-        self.tool: Optional[str] = None   # None, "axe", "stone_axe"
-        self.pick: Optional[str] = None   # None, "wood_pick", "stone_pick"
+        self.tool: Optional[str] = None   # None, "axe", "stone_axe", "iron_axe"
+        self.pick: Optional[str] = None   # None, "wood_pick", "stone_pick", "iron_pick"
         self.sickle: Optional[str] = None        # None, "sickle"
         self.watering_can: Optional[str] = None  # None, "watering_can"
         self.can_filled: bool = False             # arrosoir rempli d'eau
@@ -337,6 +345,7 @@ class Entity:
         if self.spec.can_chop or self.spec.can_mine or self.spec.can_build:
             d["inv"]       = self.wood
             d["stone"]     = self.stone
+            d["iron"]      = self.iron
             d["meat"]      = self.meat
             d["tool"]      = self.tool
             d["pick"]      = self.pick
@@ -368,7 +377,8 @@ class Entity:
             "target_id": self.target_id,
             "_move_frac_x": self._move_frac_x, "_move_frac_y": self._move_frac_y,
             "clan_id": self.clan_id, "traits": self.traits,
-            "wood": self.wood, "stone": self.stone, "meat": self.meat,
+            "wood": self.wood, "stone": self.stone, "iron": self.iron,
+            "meat": self.meat,
             "building_ticks_left": self.building_ticks_left,
             "building_type": self.building_type,
             "tool": self.tool, "pick": self.pick, "sickle": self.sickle,
@@ -396,7 +406,8 @@ class Entity:
         e.target_id = d["target_id"]
         e._move_frac_x = d["_move_frac_x"]; e._move_frac_y = d["_move_frac_y"]
         e.clan_id = d["clan_id"]; e.traits = d["traits"]
-        e.wood = d["wood"]; e.stone = d["stone"]; e.meat = d["meat"]
+        e.wood = d["wood"]; e.stone = d["stone"]; e.iron = d.get("iron", 0)
+        e.meat = d["meat"]
         e.building_ticks_left = d["building_ticks_left"]
         e.building_type = d["building_type"]
         e.tool = d["tool"]; e.pick = d["pick"]; e.sickle = d["sickle"]

@@ -247,6 +247,42 @@ def test_a1_clan_gains_science_and_ages_up():
           f"(science {sim.clans[0].science:.1f}, Âge → {AGE_NAMES[sim.clans[0].age]})")
 
 
+def test_b_forge_upgrades_stone_tools_to_iron():
+    """Bloc B : un humain avec des outils PIERRE, adjacent à la forge du clan qui a
+    du fer en stock, les met à niveau vers le FER (découplé du transport de fer,
+    comme C1bis). Et un mineur adjacent à la forge y dépose son fer porté."""
+    world = World(width=60, height=45, seed=7)
+    lx, ly = _find_land_tile(world)
+
+    # (1) upgrade outil pierre → fer à la forge
+    h = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    h.clan_id = 1; h.hunger = 10.0; h.thirst = 10.0
+    h.pick = "stone_pick"; h.tool = "stone_axe"; h.wood = 0; h.stone = 0; h.iron = 0
+    forge = Building(id=1, clan_id=1, x=lx, y=ly, btype="forge", iron=10)
+    cb = {1: {"forge": [forge]}}
+    events = []
+    tick_entity(h, world, [h], [], events, tick=1, clan_bldg=cb,
+                species_counts={"human": 5})
+    assert h.pick == "iron_pick" or h.tool == "iron_axe", (
+        f"aucun outil upgradé fer à la forge (pick={h.pick}, tool={h.tool})")
+    assert forge.iron < 10, "la forge n'a pas consommé de fer"
+    assert any(ev.get("type", "").startswith("craft_iron") for ev in events), \
+        "événement craft_iron_* manquant"
+
+    # (2) dépôt du fer porté à la forge
+    m = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    m.clan_id = 1; m.hunger = 10.0; m.thirst = 10.0
+    m.pick = "iron_pick"; m.tool = "iron_axe"   # déjà équipé → pas de craft
+    m.iron = 3; m.wood = 0; m.stone = 0
+    forge2 = Building(id=2, clan_id=1, x=lx, y=ly, btype="forge", iron=0)
+    tick_entity(m, world, [m], [], [], tick=1, clan_bldg={1: {"forge": [forge2]}},
+                species_counts={"human": 5})
+    assert forge2.iron == 3, f"le fer n'a pas été déposé à la forge: {forge2.iron}"
+    assert m.iron == 0, f"le mineur porte encore du fer: {m.iron}"
+    print(f"  test_b_forge_upgrades_stone_tools_to_iron OK "
+          f"(pick={h.pick}, tool={h.tool}, forge {10}→{forge.iron} ; dépôt 3 fer OK)")
+
+
 def test_e8_dead_clan_leaves_ruins_then_fade():
     """Régression E8 : à l'extinction d'un clan, ses structures durables deviennent
     des RUINES (btype=ruin, clan_id=-1) + un événement clan_extinct est émis — au
@@ -369,6 +405,7 @@ if __name__ == "__main__":
                test_e2_female_seeks_distant_mate,
                test_c2_hungry_harvester_eats_not_feeds_mill,
                test_a1_clan_gains_science_and_ages_up,
+               test_b_forge_upgrades_stone_tools_to_iron,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
