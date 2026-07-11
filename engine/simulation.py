@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
                        get_id_counter, set_id_counter)
 from .world import (Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD,
-                    IRON_STUMP_THRESHOLD, FERTILITY_TRAMPLE)
+                    IRON_STUMP_THRESHOLD, GOLD_STUMP_THRESHOLD, FERTILITY_TRAMPLE)
 
 # ── Clans ─────────────────────────────────────────────────────────────────────
 N_CLANS = 4
@@ -72,6 +72,8 @@ class Building:
     ruin_ticks: int = 0     # ruine : ticks restants avant que la nature la reprenne (0 = pas une ruine)
     iron: int = 0           # forge : fer stocké (bloc B) ; market : fer d'étal (D2)
     pilgrims_served: int = 0   # church : pèlerins bénis (renommée) — bloc C1
+    gold: int = 0           # church : trésor de pièces (bloc C2)
+    gilt: int = 0           # church : dorure cumulée = or FONDU, le puits (bloc C2)
     rate_stone: int = 0     # market : cours affiché pierre/lot (D2, 0 = ne vend pas)
     rate_iron: int = 0      # market : cours affiché fer/lot (D2)
     wants_stone: int = 0    # market : 1 si le clan cherche de la pierre (D2)
@@ -100,6 +102,9 @@ class Building:
             d["ws"] = self.wants_stone; d["wi"] = self.wants_iron # recherche
         elif self.btype == "church":
             d["pil"] = self.pilgrims_served     # renommée du sanctuaire (C1)
+            d["gold"] = self.gold               # trésor (C2)
+            if self.gilt:
+                d["gilt"] = self.gilt           # dorure (le puits visible)
         return d
 
 
@@ -184,6 +189,16 @@ CHURCH_FAME_GAP       = 3     # hystérésis (amendé 5→3 par le juge : fenêt
 ALTAR_BURN_PERIOD     = 6     # 1 offrande consumée / 6 ticks (cierges — le puits économique)
 ALTAR_MAX             = 30    # cap de pile d'autel (surplus consumé immédiatement)
 CHURCH_FAME_MILESTONE = 10    # pèlerins reçus → chronique « le sanctuaire rayonne »
+
+# ── Or des offrandes (bloc C2) — source bornée + puits + circulation (verdict D2) ──
+GOLD_AGE               = 3    # = CHURCH_AGE : l'or naît avec le sanctuaire (kill-switch : 99)
+MAX_GOLD_CARRY         = 2    # pièces portées par expédition (> GOLD_PER_MINE=1 : jamais écrêté)
+GOLD_TREASURY_MAX      = 12   # cap du trésor d'église ; au-delà : la pièce fond en DORURE (puits)
+GOLD_RESTOCK_THRESHOLD = 4    # hystérésis type IRON_RESTOCK : expédition ssi trésor < 4 ;
+                              # entre 4 et 12, seuls dépôts/offrandes remplissent — et l'or REÇU
+                              # ferme la vanne (substitution : la circulation éteint la source)
+OFFERING_GOLD          = 1    # 1 pièce = 1 offrande (même renom qu'une offrande bois : +1)
+GILT_MILESTONE         = 3    # dorure cumulée → chronique « resplendit au soleil »
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4     # 1 ressource étal→maisons tous les N ticks
@@ -915,6 +930,7 @@ def _clear_pilgrim(entity: Entity):
     entity.pilgrim_phase = None
     entity.pilgrim_dest_cid = None
     entity.pilgrim_ticks = 0
+    entity.pilgrim_pay = None
 
 
 def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
@@ -930,11 +946,36 @@ def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
         if houses and entity.cargo_wood:
             _add_pool_wood(houses, entity.cargo_wood)
         entity.cargo_wood = 0
+        if entity.cargo_gold:   # C2 : la pièce revient au trésor (même règle de débordement)
+            _chs_t = _cb.get("church", [])
+            if _chs_t:
+                _g = _chs_t[0].gold + entity.cargo_gold
+                _chs_t[0].gold = min(GOLD_TREASURY_MAX, _g)
+                _chs_t[0].gilt += _g - _chs_t[0].gold
+            entity.cargo_gold = 0
         events.append({"type": "pilgrim_aborted", "clan_id": entity.clan_id})
         _clear_pilgrim(entity)
         return False
     phase = entity.pilgrim_phase
     if phase == "load":
+        if entity.pilgrim_pay == "gold":   # C2 : la pièce se prend AU trésor
+            _chs_l = _cb.get("church", [])
+            if not _chs_l:
+                _clear_pilgrim(entity)
+                return False
+            src = _chs_l[0]
+            if _dist(entity.x, entity.y, src.x, src.y) < 1.5:
+                if src.gold >= OFFERING_GOLD:
+                    src.gold -= OFFERING_GOLD
+                    entity.cargo_gold = OFFERING_GOLD
+                    entity.pilgrim_phase = "out"
+                else:   # trésor fondu entre-temps : tout-ou-rien, rien déduit
+                    _clear_pilgrim(entity)
+                return True
+            entity.state = State.PILGRIMAGE
+            entity.target_x = float(src.x); entity.target_y = float(src.y)
+            _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+            return True
         houses = _cb.get("house", [])
         if not houses:
             _clear_pilgrim(entity)
@@ -959,15 +1000,25 @@ def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             return True
         ch = churches[0]
         if _dist(entity.x, entity.y, ch.x, ch.y) < 1.5:
-            # Offrande déposée sur l'autel (surplus au-delà du cap = consumé aussitôt,
-            # même puits que la combustion) + bénédiction du pèlerin.
-            ch.wood = min(ALTAR_MAX, ch.wood + entity.cargo_wood)
-            entity.cargo_wood = 0
-            ch.pilgrims_served += 1
+            if entity.cargo_gold:   # C2 : la pièce rejoint le TRÉSOR hôte (débordement → dorure)
+                _g = ch.gold + entity.cargo_gold
+                ch.gold = min(GOLD_TREASURY_MAX, _g)
+                _spill = _g - ch.gold
+                if _spill:
+                    ch.gilt += _spill
+                    events.append({"type": "church_gilt",
+                                   "clan_id": entity.pilgrim_dest_cid,
+                                   "gilt": ch.gilt, "x": ch.x, "y": ch.y})
+                entity.cargo_gold = 0
+            else:   # offrande de bois sur l'autel (C1 inchangé)
+                ch.wood = min(ALTAR_MAX, ch.wood + entity.cargo_wood)
+                entity.cargo_wood = 0
+            ch.pilgrims_served += 1   # même renom, or ou bois (+1 strict : jalon ==10)
             entity.blessed_ticks = BLESS_DURATION
             events.append({"type": "pilgrim_blessed", "clan_id": entity.clan_id,
                            "dest_clan_id": entity.pilgrim_dest_cid,
-                           "served": ch.pilgrims_served, "x": ch.x, "y": ch.y})
+                           "served": ch.pilgrims_served, "pay": entity.pilgrim_pay,
+                           "x": ch.x, "y": ch.y})
             entity.pilgrim_phase = "home"
             return True
         entity.state = State.PILGRIMAGE
@@ -983,6 +1034,13 @@ def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             if entity.cargo_wood > 0:   # destination ruinée en route → re-crédit
                 _add_pool_wood(_cb.get("house", []), entity.cargo_wood)
                 entity.cargo_wood = 0
+            if entity.cargo_gold > 0:   # C2 : la pièce revient au trésor propre
+                _chs_h = _cb.get("church", [])
+                if _chs_h:
+                    _g = _chs_h[0].gold + entity.cargo_gold
+                    _chs_h[0].gold = min(GOLD_TREASURY_MAX, _g)
+                    _chs_h[0].gilt += _g - _chs_h[0].gold
+                entity.cargo_gold = 0   # église propre disparue : perte bornée à 1, défensif
             events.append({"type": "pilgrim_home", "clan_id": entity.clan_id})
             _clear_pilgrim(entity)
             return True
@@ -1015,7 +1073,7 @@ class _TickCtx:
     __slots__ = ("world", "all_entities", "births", "events", "tick", "season",
                  "clans", "buildings", "temp_c", "species_counts", "raining",
                  "heatwave", "clan_bldg", "predators", "predator_grid", "entity_grid",
-                 "iron_tiles", "iron_nearest")
+                 "iron_tiles", "iron_nearest", "gold_tiles", "gold_nearest")
 
     def __init__(self, world, all_entities, births, events, tick,
                  season="spring", clans=None, buildings=None, temp_c=12.0,
@@ -1030,6 +1088,8 @@ class _TickCtx:
         self.entity_grid = entity_grid
         self.iron_tiles = None    # bloc B : tuiles de fer minable, mémoïsées par tick
         self.iron_nearest = {}    # bloc B : nearest fer par bucket 8×8, mémoïsé par tick
+        self.gold_tiles = None    # bloc C2 : filons d'or minables, mémoïsés par tick
+        self.gold_nearest = {}    # bloc C2 : nearest or par bucket 8×8
 
 
 def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
@@ -1499,6 +1559,31 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 return True
         elif _forges and entity.iron >= MAX_IRON_CARRY:
             entity.iron = 0   # toutes les forges pleines → on lâche sur place (symétrie bois)
+    # 3.65 Dépôt de l'OR au trésor de l'église (bloc C2). Débordement → DORURE
+    # (le puits). Condition de marche amendée contre-vérif : rapatrie aussi la
+    # pièce orpheline quand la vanne s'est fermée en cours d'expédition.
+    if entity.spec.can_mine and entity.gold > 0 and entity.clan_id is not None:
+        _chs_dep = _cb.get("church", [])
+        if _chs_dep:
+            _chd = _chs_dep[0]
+            if _dist(entity.x, entity.y, _chd.x, _chd.y) < 1.5:
+                _g = _chd.gold + entity.gold
+                _chd.gold = min(GOLD_TREASURY_MAX, _g)
+                _spill = _g - _chd.gold
+                if _spill:
+                    _chd.gilt += _spill
+                    events.append({"type": "church_gilt", "clan_id": entity.clan_id,
+                                   "gilt": _chd.gilt, "x": _chd.x, "y": _chd.y})
+                entity.gold = 0
+                events.append({"type": "gold_deposit", "clan_id": entity.clan_id,
+                               "total": _chd.gold, "x": _chd.x, "y": _chd.y})
+                return True
+            elif (entity.gold >= MAX_GOLD_CARRY
+                  or _chd.gold >= GOLD_RESTOCK_THRESHOLD):
+                entity.state = State.WANDERING
+                entity.target_x = float(_chd.x); entity.target_y = float(_chd.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
     # C1bis : fabrication d'outils DÉCOUPLÉE du dépôt. Un humain qui manque un outil
     # de base (pioche OU hache) va à la maison du clan qui a le stock et le fabrique,
     # même sans rien à déposer. Sinon, une fois le bois du clan capé (plus de dépôt),
@@ -2251,6 +2336,40 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             entity.target_x = float(best[1]); entity.target_y = float(best[0])
             _move_toward(entity, entity.target_x, entity.target_y, _eff_speed * 0.8, world)
             return True
+    # 4.56 Mine l'OR (bloc C2) : mineur d'un clan à ÉGLISE dont le trésor est passé
+    # sous l'hystérésis (GOLD_RESTOCK). L'or reçu en offrande ferme la vanne →
+    # substitution source↔circulation, anti-pompe par construction. Le fer (4.55)
+    # garde la priorité : l'outil avant le trésor. Pas de bonus pioche (1 < carry 2).
+    if (entity.spec.can_mine and entity.pick is not None
+            and entity.gold < MAX_GOLD_CARRY and entity.hunger < 65
+            and _cobj_fer is not None and _cobj_fer.age >= GOLD_AGE):
+        _chs_gold = _cb.get("church", [])
+        if _chs_gold and _chs_gold[0].gold < GOLD_RESTOCK_THRESHOLD:
+            for adx in range(-1, 2):
+                for ady in range(-1, 2):
+                    if adx == 0 and ady == 0:
+                        continue
+                    tx, ty = entity.ix + adx, entity.iy + ady
+                    if world.is_gold_mineable(tx, ty):
+                        entity.state = State.MINING
+                        entity.gold = min(MAX_GOLD_CARRY, entity.gold + world.mine_gold(tx, ty))
+                        return True
+            if ctx.gold_tiles is None:
+                ctx.gold_tiles = np.argwhere(
+                    world._gold_mask & (world.gold_grid >= GOLD_STUMP_THRESHOLD))
+                ctx.gold_nearest = {}
+            gold_tiles = ctx.gold_tiles
+            if len(gold_tiles):
+                _bucket = (entity.ix >> 3, entity.iy >> 3)
+                best = ctx.gold_nearest.get(_bucket)
+                if best is None:
+                    dists = (gold_tiles[:, 1] - entity.x)**2 + (gold_tiles[:, 0] - entity.y)**2
+                    best = gold_tiles[int(np.argmin(dists))]
+                    ctx.gold_nearest[_bucket] = best
+                entity.state = State.MINING
+                entity.target_x = float(best[1]); entity.target_y = float(best[0])
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed * 0.8, world)
+                return True
     # 4.6 Mine la pierre (entités avec can_mine + pioche, si portée non pleine et pas trop affamées)
     if (entity.spec.can_mine
             and entity.pick is not None
@@ -2594,6 +2713,7 @@ class Simulation:
         rock_changes = [{"x": x, "y": y, "depleted": False}
                         for x, y in self.world.regen_stones()]
         self.world.regen_iron()   # bloc B : régen lente des gisements de fer
+        self.world.regen_gold()   # bloc C2 : régen très lente des filons d'or
         # Fertilité : DIRT → GRASS (regen lente), GRASS → DIRT collecté depuis consume_fertility
         biome_changes = self.world.regen_fertility(self.raining, season)
         # NB : les bascules GRASS→DIRT du PIÉTINEMENT (buffer _biome_changes) sont
@@ -2944,7 +3064,8 @@ class Simulation:
                 busy.add(e.clan_id)          # max 1 marchand par clan
             elif (e.hunger < MERCHANT_HUNGER_MAX and e.thirst < MERCHANT_THIRST_MAX
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
-                    and e.iron == 0 and e._build_target_type is None
+                    and e.iron == 0 and e.gold == 0
+                    and e._build_target_type is None
                     and e.pilgrim_phase is None):   # garde croisée (gate-review C1 :
                     # sans elle, un pèlerin en mission était recrutable marchand →
                     # offrande écrasée, Σ violée, bénédiction gratuite, renom fantôme)
@@ -3070,12 +3191,17 @@ class Simulation:
                 busy.add(e.clan_id)          # max 1 pèlerin par clan
             elif (e.hunger < MERCHANT_HUNGER_MAX and e.thirst < MERCHANT_THIRST_MAX
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
-                    and e.iron == 0 and e._build_target_type is None
+                    and e.iron == 0 and e.gold == 0
+                    and e._build_target_type is None
                     and e.trade_phase is None):
                 candidates.setdefault(e.clan_id, []).append(e)
 
         def pool_wood(cid):
             return sum(h.wood for h in clan_bldg.get(cid, {}).get("house", []))
+
+        def treasury(cid):
+            chs = clan_bldg.get(cid, {}).get("church", [])
+            return chs[0].gold if chs else 0
 
         def renom(cid):
             chs = clan_bldg.get(cid, {}).get("church", [])
@@ -3083,8 +3209,14 @@ class Simulation:
 
         for a in sorted(self.clans, key=lambda c: c.id):
             houses_a = clan_bldg.get(a.id, {}).get("house", [])
-            if (a.id in busy or a.id not in candidates or not houses_a
-                    or pool_wood(a.id) < PILGRIM_WOOD_MIN):
+            if a.id in busy or a.id not in candidates or not houses_a:
+                continue
+            # C2 : OR-D'ABORD — un trésor garni paie l'offrande en pièce (et ignore
+            # le plancher bois : un clan à trésor pèlerine même pauvre en bois) ;
+            # sinon la route bois C1 inchangée.
+            gold_ok = treasury(a.id) >= OFFERING_GOLD
+            wood_ok = pool_wood(a.id) >= PILGRIM_WOOD_MIN
+            if not gold_ok and not wood_ok:
                 continue
             ra = renom(a.id)
             dests = [c for c in sorted(self.clans, key=lambda c: c.id)
@@ -3099,12 +3231,13 @@ class Simulation:
             pil = min(candidates[a.id],
                       key=lambda e: (_dist(e.x, e.y, h0.x, h0.y), e.id))
             pil.pray_ticks = 0   # pas de prière reportée (gate-review C1)
+            pil.pilgrim_pay = "gold" if gold_ok else "wood"
             pil.pilgrim_phase = "load"
             pil.pilgrim_dest_cid = b.id
             pil.pilgrim_ticks = 0
             pil.state = State.PILGRIMAGE
             tick_events.append({"type": "pilgrim_depart", "clan_id": a.id,
-                                "dest_clan_id": b.id})
+                                "dest_clan_id": b.id, "pay": pil.pilgrim_pay})
             return   # un seul pèlerin lancé par évaluation
 
     def _church_upkeep(self, clan_bldg: dict, tick_events: list):
@@ -3211,12 +3344,30 @@ class Simulation:
                     self._chronicle_seen.add(key)
                     add({"t": t, "kind": "faith", "msg":
                          f"Un pèlerin du clan {a + 1} vient prier au sanctuaire du clan {b + 1}"})
+                if ev.get("pay") == "gold":
+                    key = ("first_gold_offering", min(a, b), max(a, b))
+                    if key not in self._chronicle_seen:
+                        self._chronicle_seen.add(key)
+                        add({"t": t, "kind": "faith", "msg":
+                             f"Une pièce d'or voyage en offrande : le clan {a + 1} dore le sanctuaire du clan {b + 1}"})
                 if ev.get("served") == CHURCH_FAME_MILESTONE:
                     key = ("church_fame", b)
                     if key not in self._chronicle_seen:
                         self._chronicle_seen.add(key)
                         add({"t": t, "kind": "faith", "msg":
                              f"Le sanctuaire du clan {b + 1} rayonne au-delà des frontières"})
+            elif et == "gold_deposit":
+                key = ("first_gold", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "faith", "msg":
+                         f"Le clan {ev['clan_id'] + 1} tire l'or de la montagne — son sanctuaire a désormais un trésor"})
+            elif et == "church_gilt" and ev.get("gilt", 0) >= GILT_MILESTONE:
+                key = ("church_gilt", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "faith", "msg":
+                         f"Couvert d'or, le sanctuaire du clan {ev['clan_id'] + 1} resplendit au soleil"})
             elif et == "heatwave_start":
                 add({"t": t, "kind": "weather", "msg": "Une canicule s'abat sur le monde"})
         # Espèces disparues / revenues (comparaison avec le tick précédent).

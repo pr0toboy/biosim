@@ -502,8 +502,10 @@ function setStatus(text, ok) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+let goldVeins = [];   // filons d'or [x, y] (C2, statique)
 function handleInit(data) {
   worldData = data.world;
+  goldVeins = data.world.gold_veins || [];
   entities  = data.entities;
   stats     = data.stats;
   history   = data.history || [];
@@ -844,6 +846,12 @@ function drawAll() {
   }
 
   // Maisons construites
+  // Filons d'or (C2) : la montagne scintille
+  goldVeins.forEach(([vx, vy]) => {
+    const a = 0.35 + 0.35 * Math.sin(currentTick * 0.25 + (vx * 7 + vy * 13));
+    ctx.fillStyle = `rgba(253,230,138,${a})`;
+    ctx.fillRect((vx + 0.4) * T, (vy + 0.4) * T, T * 0.2, T * 0.2);
+  });
   drawBuildings(ctx, T);
   // Ondes de cloche (C1) : anneau expansif ~40 ticks depuis le clocher
   bellRings = bellRings.filter(r => r.age < 40);
@@ -913,6 +921,19 @@ function drawAll() {
                        : e.s === "pilgrimage" ? "#ecf0f1" : "#44aaff";
       ctx.lineWidth = T * 0.14;
       ctx.stroke();
+    }
+    // Pièce d'or en transit (C2) : cercle doré à la place du fagot
+    if (e.cargo && (e.cargo[3] ?? 0) > 0) {
+      const gl = 0.7 + 0.3 * Math.sin(currentTick * 0.4);
+      ctx.beginPath();
+      ctx.arc(cx, cy - T * 0.62, T * 0.12, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(252,211,77,${gl})`;
+      ctx.fill();
+    }
+    // Mineur chargé d'or (C2) : badge doré haut-centre
+    if (e.t === "human" && e.gold) {
+      ctx.fillStyle = "#fcd34d";
+      ctx.fillRect(cx - T * 0.08, cy - T * 0.78, T * 0.16, T * 0.12);
     }
     // Halo doré du béni (C1) : la grâce diffuse dans le village
     if (e.bl) {
@@ -1161,6 +1182,35 @@ function drawBuildings(c, T) {
         c.textAlign = "center";
         c.fillStyle = "#fcd34d";
         c.fillText(`✦${b.pil}`, (b.x + 0.5) * T, b.y * T - T * 0.3);
+      }
+      if ((b.gold ?? 0) > 0) {                                       // label trésor (C2)
+        c.font = `${Math.max(5, T * 0.45)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = "#fcd34d";
+        c.fillText(`🪙${b.gold}`, (b.x + 0.5) * T, b.y * T - T * 0.85);
+      }
+      // Trésor (C2) : pile de pièces VERTICALE sur le flanc droit
+      const coins = Math.min(6, b.gold ?? 0);
+      for (let i = 0; i < coins; i++) {
+        const gl = 0.6 + 0.4 * Math.sin((currentTick * 2 + i * 5) * 0.3);
+        c.fillStyle = `rgba(252,211,77,${gl})`;
+        c.fillRect(b.x * T + T * 0.78, b.y * T + T * (0.82 - i * 0.09), T * 0.10, T * 0.07);
+      }
+      // Dorure (C2) : le puits VISIBLE — croix et arête redorées, reflet pulsant
+      if ((b.gilt ?? 0) > 0) {
+        c.save();
+        c.globalAlpha = 0.5 + 0.35 * Math.sin(currentTick * 0.2);
+        c.strokeStyle = "#fcd34d";
+        c.lineWidth = Math.max(1, T * 0.07);
+        c.beginPath();
+        c.moveTo((b.x + 0.5) * T, b.y * T - T * 0.14);
+        c.lineTo((b.x + 0.5) * T, b.y * T + T * 0.06);
+        c.moveTo((b.x + 0.5) * T - T * 0.08, b.y * T - T * 0.07);
+        c.lineTo((b.x + 0.5) * T + T * 0.08, b.y * T - T * 0.07);
+        c.moveTo(b.x * T + T * 0.15, b.y * T + T * 0.38);
+        c.lineTo(b.x * T + T * 0.85, b.y * T + T * 0.38);
+        c.stroke();
+        c.restore();
       }
     } else if (b.btype === "forge") {
       // Forge (bloc B) : enclume sombre sur socle, braise orange — procédural.
@@ -1434,12 +1484,24 @@ function addEvent(ev) {
     div.style.borderColor = "#aed6f1"; div.style.color = "#d6eaf8";
   } else if (ev.type === "pilgrim_depart") {
     div.className = "ev-item";
-    div.textContent = `🚶 Un pèlerin part du clan ${ev.clan_id + 1} vers le clan ${ev.dest_clan_id + 1}`;
-    div.style.borderColor = "#ecf0f1"; div.style.color = "#f8f9f9";
+    div.textContent = ev.pay === "gold"
+      ? `🪙 Un pèlerin part du clan ${ev.clan_id + 1}, une pièce d'or en poche, vers le clan ${ev.dest_clan_id + 1}`
+      : `🚶 Un pèlerin part du clan ${ev.clan_id + 1} vers le clan ${ev.dest_clan_id + 1}`;
+    div.style.borderColor = ev.pay === "gold" ? "#fcd34d" : "#ecf0f1"; div.style.color = "#f8f9f9";
   } else if (ev.type === "pilgrim_blessed") {
     div.className = "ev-item";
-    div.textContent = `🙏 Un pèlerin du clan ${ev.clan_id + 1} est béni au clan ${ev.dest_clan_id + 1}`;
+    div.textContent = ev.pay === "gold"
+      ? `🪙 L'offrande d'or du clan ${ev.clan_id + 1} rejoint le trésor du clan ${ev.dest_clan_id + 1}`
+      : `🙏 Un pèlerin du clan ${ev.clan_id + 1} est béni au clan ${ev.dest_clan_id + 1}`;
     div.style.borderColor = "#f9e79f"; div.style.color = "#fcf3cf";
+  } else if (ev.type === "gold_deposit") {
+    div.className = "ev-item";
+    div.textContent = `⛏ Le clan ${ev.clan_id + 1} dépose de l'or au sanctuaire (trésor : ${ev.total})`;
+    div.style.borderColor = "#fcd34d"; div.style.color = "#fde68a";
+  } else if (ev.type === "church_gilt") {
+    div.className = "ev-item";
+    div.textContent = `✨ Le sanctuaire du clan ${ev.clan_id + 1} se couvre d'or`;
+    div.style.borderColor = "#fcd34d"; div.style.color = "#fef3c7";
   } else if (ev.type === "pilgrim_home" || ev.type === "pilgrim_aborted") {
     return;   // silencieux (le récit passe par depart/blessed)
   } else if (ev.type === "trade_deal") {
@@ -1592,7 +1654,9 @@ function buildingInfoHTML(b) {
   } else if (b.btype === "church") {
     return `<b style="color:${cColor}">⛪ Sanctuaire — ${cLabel}</b>
       <div class="tt-row"><span>🕯 Offrandes</span><span>${b.wood ?? 0}</span></div>
-      <div class="tt-row"><span>✦ Pèlerins reçus</span><span>${b.pil ?? 0}</span></div>`;
+      <div class="tt-row"><span>✦ Pèlerins reçus</span><span>${b.pil ?? 0}</span></div>
+      <div class="tt-row"><span>🪙 Trésor</span><span>${b.gold ?? 0}</span></div>
+      ${(b.gilt ?? 0) > 0 ? `<div class="tt-row"><span>✨ Dorure</span><span>${b.gilt}</span></div>` : ""}`;
   } else if (b.btype === "forge") {
     return `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
       <div class="tt-row"><span>⛓ Fer stocké</span><span>${b.iron ?? 0}</span></div>
@@ -1673,7 +1737,8 @@ canvas.addEventListener("mousemove", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && (closest.cargo[3] ?? 0) > 0 ? "1 or offert " : closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.gold ? `<div class="tt-row"><span>🪙 Or porté</span><span>${closest.gold}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
@@ -1720,7 +1785,9 @@ canvas.addEventListener("mousemove", (ev) => {
       } else if (closestB.btype === "church") {
         html = `<b style="color:${cColor}">⛪ Sanctuaire — ${cLabel}</b>
           <div class="tt-row"><span>🕯</span><span>${closestB.wood ?? 0}</span></div>
-          <div class="tt-row"><span>✦</span><span>${closestB.pil ?? 0}</span></div>`;
+          <div class="tt-row"><span>✦</span><span>${closestB.pil ?? 0}</span></div>
+          <div class="tt-row"><span>🪙</span><span>${closestB.gold ?? 0}</span></div>
+          ${(closestB.gilt ?? 0) > 0 ? `<div class="tt-row"><span>✨</span><span>${closestB.gilt}</span></div>` : ""}`;
       } else if (closestB.btype === "forge") {
         html = `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
           <div class="tt-row"><span>⛓ Fer</span><span>${closestB.iron ?? 0}</span></div>`;
@@ -1943,7 +2010,8 @@ canvas.addEventListener("touchend", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT2 ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT2 ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && (closest.cargo[3] ?? 0) > 0 ? "1 or offert " : closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.gold ? `<div class="tt-row"><span>🪙 Or porté</span><span>${closest.gold}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>

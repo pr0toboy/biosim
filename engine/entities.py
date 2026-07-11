@@ -294,6 +294,7 @@ class Entity:
         "cargo_wood", "cargo_stone", "cargo_iron", "trade_phase", "trade_dest_cid",
         "trade_ticks", "trade_good", "trade_pay",
         "pray_ticks", "blessed_ticks", "pilgrim_phase", "pilgrim_dest_cid", "pilgrim_ticks",
+        "gold", "cargo_gold", "pilgrim_pay",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -319,6 +320,7 @@ class Entity:
         self.wood: int = 0
         self.stone: int = 0
         self.iron: int = 0                # fer porté (bloc B) — déposé à la forge
+        self.gold: int = 0                # pièces d'or portées (bloc C2) — déposées au trésor
         self.meat: int = 0
         self.building_ticks_left: int = 0
         self.building_type: Optional[str] = None  # "house", "wheatfield", …
@@ -339,6 +341,8 @@ class Entity:
         self.pilgrim_phase: Optional[str] = None    # None | "load" | "out" | "home"
         self.pilgrim_dest_cid: Optional[int] = None
         self.pilgrim_ticks: int = 0                 # anti-zombie (timeout mission)
+        self.cargo_gold: int = 0                    # pièce d'offrande en transit (C2)
+        self.pilgrim_pay: str | None = None         # None | "wood" | "gold" (C2)
         self.trade_dest_cid: Optional[int] = None   # clan destination
         self.trade_ticks: int = 0                   # anti-zombie (timeout mission)
         self.sickle: Optional[str] = None        # None, "sickle"
@@ -383,6 +387,8 @@ class Entity:
             d["inv"]       = self.wood
             d["stone"]     = self.stone
             d["iron"]      = self.iron
+            if self.gold:
+                d["gold"] = self.gold   # conditionnel : jamais de clé à 0 (golden)
             d["meat"]      = self.meat
             d["tool"]      = self.tool
             d["pick"]      = self.pick
@@ -391,7 +397,7 @@ class Entity:
             d["can_filled"]= self.can_filled
             d["rod"]       = self.fishing_rod
         if self.trade_phase is not None:
-            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron]  # ballot (D1/D2)
+            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron, self.cargo_gold]  # ballot
             d["dest"] = self.trade_dest_cid                    # « → clan N » au tooltip
             d["good"] = self.trade_good                        # bien recherché (D2)
         if self.blessed_ticks > 0:
@@ -399,7 +405,7 @@ class Entity:
         if self.pilgrim_phase is not None:
             d["pil"] = 1                                       # pèlerin (C1)
             d["pdest"] = self.pilgrim_dest_cid
-            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron]  # fagot d'offrande
+            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron, self.cargo_gold]  # offrande
         if self.state == State.BUILDING and self.target_x is not None:
             d["tx"] = int(round(self.target_x))
             d["ty"] = int(round(self.target_y))
@@ -445,6 +451,8 @@ class Entity:
             "pilgrim_phase": self.pilgrim_phase,
             "pilgrim_dest_cid": self.pilgrim_dest_cid,
             "pilgrim_ticks": self.pilgrim_ticks,
+            "gold": self.gold, "cargo_gold": self.cargo_gold,
+            "pilgrim_pay": self.pilgrim_pay,
         }
 
     @classmethod
@@ -491,6 +499,9 @@ class Entity:
         e.pilgrim_phase = d.get("pilgrim_phase")
         e.pilgrim_dest_cid = d.get("pilgrim_dest_cid")
         e.pilgrim_ticks = d.get("pilgrim_ticks", 0)
+        e.gold = d.get("gold", 0)
+        e.cargo_gold = d.get("cargo_gold", 0)
+        e.pilgrim_pay = d.get("pilgrim_pay", "wood" if e.pilgrim_phase else None)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

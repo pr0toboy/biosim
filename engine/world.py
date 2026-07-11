@@ -82,6 +82,12 @@ IRON_STUMP_THRESHOLD  = 50.0   # en-dessous : gisement de fer épuisé
 IRON_REGEN_RATE       = 0.012  # régen plus lente que la pierre (le fer est rare)
 IRON_PER_MINE         = 3      # fer obtenu par minage (veine riche → 1 voyage suffit)
 
+# ── Or (bloc C2 : plus rare que le fer, filons distincts) ──────────────────────
+GOLD_FRACTION         = 0.05   # part des tuiles montagne (hors fer) portant de l'or
+GOLD_STUMP_THRESHOLD  = 50.0
+GOLD_REGEN_RATE       = 0.008  # la plus lente : l'or est précieux
+GOLD_PER_MINE         = 1      # 1 pièce par coup (< MAX_GOLD_CARRY=2 : jamais écrêté)
+
 # ── Fertilité / pâturage ──────────────────────────────────────────────────────
 FERTILITY_MAX          = 100.0   # fertilité pleine
 FERTILITY_CONSUME      = 12.0    # fertilité retirée par action de broutage (manger)
@@ -117,6 +123,12 @@ class World:
         self._iron_mask = self._mountain_mask & (
             _iron_rng.random((self.height, self.width)) < IRON_FRACTION)
         self.iron_grid = np.where(self._iron_mask, 100.0, 0.0).astype(np.float32)
+        # Filons d'OR (bloc C2) : encore plus rares, DISTINCTS du fer. RandomState
+        # LOCAL (même pattern que _iron_rng : flux np.random global intact).
+        _gold_rng = np.random.RandomState((self.seed ^ 0x901D) & 0xFFFFFFFF)
+        self._gold_mask = self._mountain_mask & ~self._iron_mask & (
+            _gold_rng.random((self.height, self.width)) < GOLD_FRACTION)
+        self.gold_grid = np.where(self._gold_mask, 100.0, 0.0).astype(np.float32)
         # Grille de feu (intensité 0–100, uniquement tuiles forêt avec arbre debout)
         self.fire_grid = np.zeros((self.height, self.width), dtype=np.float32)
         # Fertilité des tuiles herbe (GRASS → DIRT quand épuisée, régénère lentement)
@@ -373,6 +385,25 @@ class World:
         self.iron_grid[self._iron_mask] = np.minimum(
             100.0, self.iron_grid[self._iron_mask] + IRON_REGEN_RATE)
 
+    def is_gold_mineable(self, x: int, y: int) -> bool:
+        """Filon d'or non épuisé (bloc C2)."""
+        return (self.is_valid(x, y)
+                and bool(self._gold_mask[y, x])
+                and float(self.gold_grid[y, x]) >= GOLD_STUMP_THRESHOLD)
+
+    def mine_gold(self, x: int, y: int) -> int:
+        """Mine l'or en (x, y). NE pousse RIEN dans _mine_changes (même piège que
+        mine_iron : ce canal marquerait une ROCHE intacte comme épuisée au front)."""
+        if not self.is_gold_mineable(x, y):
+            return 0
+        self.gold_grid[y, x] = max(0.0, float(self.gold_grid[y, x]) - 60.0)
+        return GOLD_PER_MINE
+
+    def regen_gold(self):
+        """Régénère (très lentement) les filons d'or épuisés (invariant infini)."""
+        self.gold_grid[self._gold_mask] = np.minimum(
+            100.0, self.gold_grid[self._gold_mask] + GOLD_REGEN_RATE)
+
     def get_depleted_rocks(self) -> list[list[int]]:
         """Retourne [[x, y], …] des tuiles-roche épuisées."""
         ys, xs = np.where((self.stone_grid < STONE_STUMP_THRESHOLD) & self._mountain_mask)
@@ -566,6 +597,7 @@ class World:
             "stumps":         self.get_stumps(),
             "depleted_rocks": self.get_depleted_rocks(),
             "fires":          self.get_fires(),
+            "gold_veins":     [[int(x), int(y)] for y, x in zip(*np.where(self._gold_mask))],
         }
 
     # ── Sauvegarde / reprise ─────────────────────────────────────────────────
@@ -581,6 +613,7 @@ class World:
             "tree_grid":      _grid_to_b64(self.tree_grid),
             "stone_grid":     _grid_to_b64(self.stone_grid),
             "iron_grid":      _grid_to_b64(self.iron_grid),
+            "gold_grid":      _grid_to_b64(self.gold_grid),
             "fertility_grid": _grid_to_b64(self.fertility_grid),
             "fire_grid":      _grid_to_b64(self.fire_grid),
         }
@@ -594,6 +627,8 @@ class World:
         w.stone_grid     = _grid_from_b64(d["stone_grid"])
         if d.get("iron_grid"):   # compat vieux saves : sinon garde le fer frais de __init__
             w.iron_grid  = _grid_from_b64(d["iron_grid"])
+        if d.get("gold_grid"):   # compat vieux saves (C2)
+            w.gold_grid  = _grid_from_b64(d["gold_grid"])
         w.fertility_grid = _grid_from_b64(d["fertility_grid"])
         w.fire_grid      = _grid_from_b64(d["fire_grid"])
         # _max_grid / _regen_grid dépendent du biome (0 sur DIRT) → recomputer

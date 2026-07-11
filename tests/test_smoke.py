@@ -858,6 +858,184 @@ def test_c1_dest_ruined_and_replay():
           "(demi-tour + re-crédit sans bénédiction ; replay OK en mission et en prière)")
 
 
+def _c2_rig(specs):
+    """Rig C2 : N clans sur une rangée marchable (espacés de 20), chacun avec église
+    (trésor/renom configurables) + tout le constructible pré-construit. FER et
+    PIERRE neutralisés (amendement contre-vérif : 161 tuiles de fer sur cette carte
+    détourneraient les mineurs, et un porteur de fer n'est plus candidat pèlerin).
+    specs = [(age, treasury, renom), ...]"""
+    from engine.simulation import Clan, PILGRIM_CHECK_PERIOD
+    world = World(width=60, height=45, seed=7)
+    world.stone_grid[:] = 0.0
+    world.iron_grid[:] = 0.0
+    world.gold_grid[:] = 0.0   # monde clos en or par défaut (les tests peignent leurs filons)
+    sim = Simulation(world)
+    (x0, y0), _ = _find_walkable_row_segment(world, 20 * (len(specs) - 1) + 1)
+    humans, churches = [], []
+    blds = []
+    for cid, (age, treasury, renom) in enumerate(specs):
+        x = x0 + cid * 20
+        h = spawn(EntityType.HUMAN, x, y0, Sex.MALE)
+        h.clan_id = cid; h.hunger = 10.0; h.thirst = 10.0
+        h.wood = 0; h.stone = 0; h.iron = 0; h.gold = 0
+        h.pick = "iron_pick"; h.tool = "iron_axe"
+        humans.append(h)
+        for k in range(3):
+            blds.append(Building(id=cid * 100 + k, clan_id=cid, x=x, y=y0,
+                                 btype="house", wood=[34, 33, 33][k]))
+        ch = Building(id=cid * 100 + 5, clan_id=cid, x=x, y=y0, btype="church",
+                      gold=treasury, pilgrims_served=renom)
+        churches.append(ch); blds.append(ch)
+        blds.append(Building(id=cid * 100 + 4, clan_id=cid, x=x, y=y0, btype="market"))
+        blds.append(Building(id=cid * 100 + 6, clan_id=cid, x=x, y=y0, btype="well"))
+        blds.append(Building(id=cid * 100 + 7, clan_id=cid, x=x, y=y0, btype="well"))
+        blds.append(Building(id=cid * 100 + 8, clan_id=cid, x=x, y=y0, btype="forge"))
+        for k in range(8):
+            blds.append(Building(id=cid * 100 + 20 + k, clan_id=cid, x=x, y=y0,
+                                 btype="wheatfield"))
+    sim.entities = list(humans)
+    sim.clans = [Clan(id=cid, cx=float(x0 + cid * 20), cy=float(y0), color="#fff",
+                      chief_id=humans[cid].id, age=specs[cid][0])
+                 for cid in range(len(specs))]
+    sim.buildings = blds
+    sim.tick_count = PILGRIM_CHECK_PERIOD - 1
+    return sim, humans, churches
+
+
+def test_c2_gold_mine_deposit_hysteresis():
+    """C2 source bornée : trésor sous l'hystérésis → expédition, minage (jamais
+    écrêté), dépôt exact, puis la vanne fermée n'envoie PLUS personne."""
+    from engine.simulation import GOLD_RESTOCK_THRESHOLD, MAX_GOLD_CARRY
+    sim, humans, churches = _c2_rig([(3, GOLD_RESTOCK_THRESHOLD - 1, 0)])
+    world = sim.world; h = humans[0]; ch = churches[0]
+    # peindre 2 filons marchables adjacents près du camp
+    vx, vy = int(ch.x) + 3, int(ch.y)
+    for dx in (0, 1):
+        world._gold_mask[vy, vx + dx] = True
+        world.gold_grid[vy, vx + dx] = 100.0
+    deposited = False
+    for _ in range(400):
+        data = sim.step()
+        assert h.gold <= MAX_GOLD_CARRY
+        if any(ev.get("type") == "gold_deposit" for ev in data["events"]):
+            deposited = True
+            break
+    assert deposited, "aucun dépôt d'or"
+    assert ch.gold == GOLD_RESTOCK_THRESHOLD - 1 + MAX_GOLD_CARRY, \
+        f"trésor: {ch.gold} (attendu 3+2=5)"
+    assert h.gold == 0
+    # hystérésis : trésor 5 >= 4 → plus AUCUNE expédition (les filons ne baissent plus)
+    g_before = float(world.gold_grid[vy, vx]) + float(world.gold_grid[vy, vx + 1])
+    for _ in range(400):
+        sim.step()
+    g_after = float(world.gold_grid[vy, vx]) + float(world.gold_grid[vy, vx + 1])
+    assert g_after >= g_before - 0.001, f"ré-expédition malgré l'hystérésis: {g_before}->{g_after}"
+    assert ch.gold == GOLD_RESTOCK_THRESHOLD - 1 + MAX_GOLD_CARRY
+    print(f"  test_c2_gold_mine_deposit_hysteresis OK (trésor 3→{ch.gold}, vanne refermée)")
+
+
+def test_c2_gold_offering_circulates_and_conserves():
+    """C2 circulation (LA gate du bloc) : A (trésor 1) offre sa pièce à B ; B
+    RE-DÉPENSE la pièce reçue vers C (plein) → dorure (le puits). Σ or EXISTANT+gilt
+    constante à chaque tick en monde clos. Exclusivité trade préservée."""
+    import engine.simulation as S
+    from engine.simulation import GOLD_TREASURY_MAX
+    sim, humans, churches = _c2_rig([(3, 1, 0), (3, 0, 4), (3, GOLD_TREASURY_MAX, 8)])
+    cha, chb, chc = churches
+    old_min = S.PILGRIM_WOOD_MIN
+    S.PILGRIM_WOOD_MIN = 10 ** 9   # coupe les pèlerinages bois : seuls les chemins OR
+    try:
+        def gold_total():
+            return (sum(c.gold + c.gilt for c in churches)
+                    + sum(h.cargo_gold + h.gold for h in humans))
+        g0 = gold_total()
+        assert g0 == 1 + 0 + GOLD_TREASURY_MAX
+        seen = []
+        for _ in range(1400):
+            data = sim.step()
+            for ev in data["events"]:
+                if ev.get("type") in ("pilgrim_depart", "pilgrim_blessed", "church_gilt"):
+                    seen.append((ev["type"], ev.get("clan_id"), ev.get("dest_clan_id")))
+            assert gold_total() == g0, f"Σ or violée: {g0} -> {gold_total()}"
+            for h in humans:
+                assert not (h.trade_phase and h.pilgrim_phase), "exclusivité violée"
+            if ("church_gilt", 2, None) in [(s[0], s[1], None) for s in seen]:
+                break
+        assert ("pilgrim_depart", 0, 1) in seen, f"A→B manquant: {seen}"
+        assert ("pilgrim_blessed", 0, 1) in seen
+        assert ("pilgrim_depart", 1, 2) in seen, f"B ne re-dépense pas: {seen}"
+        assert chc.gilt == 1, f"dorure C: {chc.gilt} (le puits)"
+        assert chc.gold == GOLD_TREASURY_MAX
+        assert chb.pilgrims_served == 5
+    finally:
+        S.PILGRIM_WOOD_MIN = old_min
+    print("  test_c2_gold_offering_circulates_and_conserves OK "
+          "(A→B→C, re-dépense, dorure, Σ=13 constante)")
+
+
+def test_c2_dest_ruined_gold_recredit_and_replay():
+    """C2 : destination ruinée en route → la pièce revient AU TRÉSOR de A, aucune
+    bénédiction ; replays byte-à-byte en mission-or ET avec mineur chargé."""
+    import engine.simulation as S
+    sim, humans, churches = _c2_rig([(3, 1, 0), (3, 0, 4)])
+    ha, hb = humans; cha, chb = churches
+    old_min = S.PILGRIM_WOOD_MIN
+    S.PILGRIM_WOOD_MIN = 10 ** 9
+    try:
+        for _ in range(500):
+            sim.step()
+            if ha.pilgrim_phase == "out" and ha.cargo_gold > 0:
+                break
+        assert ha.pilgrim_phase == "out", f"jamais parti ({ha.pilgrim_phase})"
+        hb.alive = False   # clan B s'éteint → E8 ruine son église
+        for _ in range(600):
+            sim.step()
+            if ha.pilgrim_phase is None:
+                break
+        assert ha.pilgrim_phase is None
+        assert chb.btype == "ruin"
+        assert ha.blessed_ticks == 0, "béni sans dépôt"
+        assert cha.gold == 1, f"pièce non re-créditée au trésor: {cha.gold}"
+
+        # replay en mission-or
+        sim2, humans2, _ = _c2_rig([(3, 1, 0), (3, 0, 4)])
+        ha2 = humans2[0]
+        for _ in range(500):
+            sim2.step()
+            if ha2.pilgrim_phase == "out":
+                break
+        assert ha2.pilgrim_phase == "out"
+        snap = sim2.save_state()
+        ref = [sim2.step() for _ in range(100)]
+        sim3 = Simulation(World(width=10, height=10, seed=1))
+        sim3.load_state(snap)
+        rep = [sim3.step() for _ in range(100)]
+        assert ref == rep, "replay divergent en mission-or"
+    finally:
+        S.PILGRIM_WOOD_MIN = old_min
+
+    # replay avec mineur chargé (rig test 1)
+    from engine.simulation import GOLD_RESTOCK_THRESHOLD
+    sim4, humans4, churches4 = _c2_rig([(3, GOLD_RESTOCK_THRESHOLD - 1, 0)])
+    w4 = sim4.world; ch4 = churches4[0]
+    vx, vy = int(ch4.x) + 3, int(ch4.y)
+    w4._gold_mask[vy, vx] = True; w4.gold_grid[vy, vx] = 100.0
+    h4 = humans4[0]
+    for _ in range(300):
+        sim4.step()
+        if h4.gold > 0:
+            break
+    assert h4.gold > 0, "mineur jamais chargé"
+    snap4 = sim4.save_state()
+    ref4 = [sim4.step() for _ in range(80)]
+    sim5 = Simulation(World(width=10, height=10, seed=1))
+    sim5.load_state(snap4)
+    rep4 = [sim5.step() for _ in range(80)]
+    assert ref4 == rep4, "replay divergent avec or porté"
+    print("  test_c2_dest_ruined_gold_recredit_and_replay OK "
+          "(re-crédit trésor + replays or en mission et en mine)")
+
+
 def test_k_chronicle_records_and_persists():
     """Bloc K : les annales enregistrent les jalons (dérivées des tick_events, sans
     toucher la sortie de step() → guard intact), dédupliquent les « premières fois »
@@ -950,6 +1128,9 @@ if __name__ == "__main__":
                test_c1_office_procession_blessing_and_hunger,
                test_c1_pilgrimage_pays_offering_and_conserves,
                test_c1_dest_ruined_and_replay,
+               test_c2_gold_mine_deposit_hysteresis,
+               test_c2_gold_offering_circulates_and_conserves,
+               test_c2_dest_ruined_gold_recredit_and_replay,
                test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
