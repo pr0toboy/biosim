@@ -209,6 +209,13 @@ async def metrics():
         return sim.metrics()
 
 
+@app.get("/api/chronicle")
+async def chronicle():
+    """Annales du monde (bloc K) : jalons persistants (âges, forges, extinctions…)."""
+    async with state_lock:
+        return {"chronicle": sim.chronicle}
+
+
 @app.post("/api/pause")
 async def pause():
     global sim_running

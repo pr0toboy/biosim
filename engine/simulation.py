@@ -1908,6 +1908,12 @@ class Simulation:
         self.tick_count = 0
         self.events_log: list[dict] = []
         self.stats_history: list[dict] = []
+        # ── Chroniques du monde (bloc K) : annales persistantes des JALONS ──────
+        # Dérivées des tick_events déjà émis (aucune clé ajoutée à la sortie de
+        # step() → le hash du guard ne bouge pas). Servies par /api/chronicle.
+        self.chronicle: list[dict] = []
+        self._chronicle_seen: set = set()    # jalons "première fois" déjà actés
+        self._prev_species: set = set()      # espèces vivantes au tick précédent
         self.clans: list[Clan] = []
         self.buildings: list[Building] = []
         self._next_building_id = 0
@@ -2327,6 +2333,9 @@ class Simulation:
                                         "age": c.age, "age_name": AGE_NAMES[c.age]})
 
         # Log événements
+        # Chroniques (bloc K) : distille les jalons du tick dans les annales
+        self._update_chronicle(tick_events)
+
         self.events_log.extend(tick_events)
         if len(self.events_log) > 200:
             self.events_log = self.events_log[-200:]
@@ -2372,6 +2381,67 @@ class Simulation:
             counts[e.etype.value] += 1
         return {"populations": counts, "total": len(self.entities)}
 
+    # ── Chroniques du monde (bloc K) ─────────────────────────────────────────
+    _SPECIES_FR = {"boar": "sangliers", "chicken": "poules", "horned_sheep": "mouflons",
+                   "horse": "chevaux", "human": "humains", "pig": "cochons",
+                   "sheep": "moutons", "fish": "poissons", "shark": "requins"}
+    _FIRST_BUILD_FR = {"house": "sa première maison", "mill": "son premier moulin",
+                       "well": "son premier puit", "forge": "sa forge"}
+    CHRONICLE_MAX = 600   # cap mémoire : le monde tourne à l'infini, pas ses annales
+
+    def _update_chronicle(self, tick_events: list[dict]):
+        """Distille les tick_events du tick en JALONS d'annales (première maison/
+        forge d'un clan, âges franchis, clans éteints, espèces disparues…).
+        N'influence AUCUN comportement (pur enregistreur) et n'ajoute rien à la
+        sortie de step() → déterminisme et hash du guard intacts."""
+        t = self.tick_count
+        add = self.chronicle.append
+        for ev in tick_events:
+            et = ev.get("type")
+            if et == "clan_age_up":
+                add({"t": t, "kind": "age", "msg":
+                     f"Le clan {ev['clan_id'] + 1} entre dans l'Âge de {ev['age_name']}"})
+            elif et == "clan_extinct":
+                r = ev.get("ruins", 0)
+                add({"t": t, "kind": "extinct", "msg":
+                     f"Le clan {ev['clan_id'] + 1} s'éteint"
+                     + (f" — {r} ruine{'s' if r > 1 else ''} demeure{'nt' if r > 1 else ''}" if r else "")})
+            elif et in ("build_house", "build_mill", "build_well", "build_forge"):
+                btype = et[6:]
+                key = ("first_build", ev.get("clan_id"), btype)
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "build", "msg":
+                         f"Le clan {ev['clan_id'] + 1} érige {self._FIRST_BUILD_FR[btype]}"})
+            elif et in ("craft_iron_pick", "craft_iron_axe"):
+                key = ("first_iron", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "iron", "msg":
+                         f"Le clan {ev['clan_id'] + 1} forge son premier outil en fer"})
+            elif et == "upgrade_building" and ev.get("btype") == "campfire":
+                key = ("fire_l2", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "build", "msg":
+                         f"Le grand feu du clan {ev['clan_id'] + 1} rayonne (niveau 2)"})
+            elif et == "heatwave_start":
+                add({"t": t, "kind": "weather", "msg": "Une canicule s'abat sur le monde"})
+        # Espèces disparues / revenues (comparaison avec le tick précédent).
+        # Recompute depuis self.entities (post-purge, post-naissances) : exact,
+        # contrairement au species_counts du tick (les morts d'âge n'y sont pas).
+        alive = {e.etype.value for e in self.entities if e.alive}
+        if self._prev_species:
+            for sp in sorted(self._prev_species - alive):
+                add({"t": t, "kind": "species", "msg":
+                     f"Les {self._SPECIES_FR.get(sp, sp)} ont disparu du monde"})
+            for sp in sorted(alive - self._prev_species):
+                add({"t": t, "kind": "species", "msg":
+                     f"Les {self._SPECIES_FR.get(sp, sp)} réapparaissent"})
+        self._prev_species = alive
+        if len(self.chronicle) > self.CHRONICLE_MAX:
+            self.chronicle = self.chronicle[-self.CHRONICLE_MAX:]
+
     def full_state(self) -> dict:
         """État complet pour un nouveau client qui se connecte."""
         return {
@@ -2411,6 +2481,9 @@ class Simulation:
             "entities": [e.to_state() for e in self.entities],
             "clans": [asdict(c) for c in self.clans],
             "buildings": [asdict(b) for b in self.buildings],
+            # Annales (bloc K) : l'histoire du monde survit aux reboots.
+            "chronicle": self.chronicle,
+            "chronicle_seen": [list(k) for k in self._chronicle_seen],
         }
 
     def load_state(self, d: dict):
@@ -2431,6 +2504,10 @@ class Simulation:
         self.buildings = [Building(**b) for b in d["buildings"]]
         self.events_log = []
         self.stats_history = []
+        # Annales (bloc K) — compat vieux saves : d.get(...)
+        self.chronicle = d.get("chronicle", [])
+        self._chronicle_seen = {tuple(k) for k in d.get("chronicle_seen", [])}
+        self._prev_species = {e.etype.value for e in self.entities if e.alive}
         prs = d["py_random_state"]
         random.setstate((prs[0], tuple(prs[1]), prs[2]))
         nrs = d["np_random_state"]

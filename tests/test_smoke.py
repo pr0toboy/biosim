@@ -357,6 +357,40 @@ def test_e2_female_seeks_distant_mate():
     print(f"  test_e2_female_seeks_distant_mate OK (SEEKING_MATE, dist {d0:.2f} → {d1:.2f})")
 
 
+def test_k_chronicle_records_and_persists():
+    """Bloc K : les annales enregistrent les jalons (dérivées des tick_events, sans
+    toucher la sortie de step() → guard intact), dédupliquent les « premières fois »
+    par clan, et survivent au save/load."""
+    import tempfile
+    from engine.simulation import Clan, AGE_SCIENCE_THRESHOLDS
+    world = World(width=60, height=45, seed=7)
+    sim = Simulation(world)
+    lx, ly = _find_land_tile(world)
+    h = spawn(EntityType.HUMAN, lx, ly, Sex.MALE)
+    h.clan_id = 0
+    sim.entities = [h]
+    sim.clans = [Clan(id=0, cx=float(lx), cy=float(ly), color="#fff", chief_id=h.id)]
+    sim.buildings = [Building(id=1, clan_id=0, x=lx, y=ly, btype="house")]
+
+    sim.clans[0].science = AGE_SCIENCE_THRESHOLDS[1] - 0.01
+    sim.step()   # franchit l'Âge de Pierre → entrée d'annales
+    assert any(c["kind"] == "age" for c in sim.chronicle), \
+        f"le passage d'âge n'est pas dans les annales: {sim.chronicle}"
+
+    path = tempfile.mktemp(suffix=".json")
+    try:
+        sim.save(path)
+        sim2 = Simulation(World(width=10, height=10, seed=1))
+        sim2.load(path)
+        assert sim2.chronicle == sim.chronicle, "annales perdues au load"
+        assert sim2._chronicle_seen == sim._chronicle_seen, "jalons 'première fois' perdus au load"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+    print(f"  test_k_chronicle_records_and_persists OK "
+          f"({len(sim.chronicle)} entrée(s), round-trip identique)")
+
+
 def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
     """Persistance : (1) round-trip sans perte (état identique après load) ;
     (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
@@ -406,6 +440,7 @@ if __name__ == "__main__":
                test_c2_hungry_harvester_eats_not_feeds_mill,
                test_a1_clan_gains_science_and_ages_up,
                test_b_forge_upgrades_stone_tools_to_iron,
+               test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):

@@ -132,6 +132,24 @@
 
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
 
+  /* Chroniques (bloc K) : annales du monde, entrées datées */
+  .chron-item {
+    font-size: 11px;
+    padding: 4px 8px;
+    margin-bottom: 3px;
+    border-radius: 4px;
+    border-left: 3px solid #6d5aa8;
+    background: #1b1f33;
+    color: #b7aee0;
+    animation: fadeIn .3s ease;
+  }
+  .chron-item .chron-date { color: #6c7293; font-size: 10px; margin-right: 5px; }
+  .chron-item.age     { border-color: #a78bfa; color: #cdbcf5; }
+  .chron-item.extinct { border-color: #6b7280; color: #9ca3af; }
+  .chron-item.species { border-color: #ef4444; color: #f0a5a5; }
+  .chron-item.iron    { border-color: #94a3b8; color: #d3dce6; }
+  .chron-item.weather { border-color: #f59e0b; color: #fcd34d; }
+
   /* ── Tooltip entité ── */
   #tooltip {
     position: absolute;
@@ -283,6 +301,10 @@
         <div class="sys-bar-wrap"><div class="sys-bar" id="sys-temp-bar" style="width:0%"></div></div>
         <span class="sys-val" id="sys-temp-val">—</span>
       </div>
+    </div>
+    <div class="panel" style="max-height:28%;overflow:hidden;display:flex;flex-direction:column;">
+      <h2>📜 Chroniques</h2>
+      <div id="chronicle-log" style="overflow-y:auto;flex:1;"></div>
     </div>
     <div class="panel" style="flex:1;overflow:hidden;display:flex;flex-direction:column;border-bottom:none;">
       <h2>Événements</h2>
@@ -481,6 +503,7 @@ function handleInit(data) {
   stats     = data.stats;
   history   = data.history || [];
   clans     = data.clans  || [];
+  refreshChronicle();   // annales (bloc K) : chargement initial
   stumps         = new Set((data.world.stumps         || []).map(([x, y]) => `${x},${y}`));
   depleted_rocks = new Set((data.world.depleted_rocks || []).map(([x, y]) => `${x},${y}`));
   fires          = new Map((data.world.fires || []).map(([x, y]) => [`${x},${y}`, 80]));
@@ -530,7 +553,9 @@ function handleTick(data) {
       redrawBiomeTile(octx, x, y, biome);
     });
   }
-  document.getElementById("tick-label").textContent = `Tick ${currentTick}`;
+  const tl = document.getElementById("tick-label");
+  tl.textContent = tickToDate(currentTick);
+  tl.title = `Tick ${currentTick}`;
   document.getElementById("total-label").textContent = `${data.stats.total} entités`;
   drawAll();
   updateSidebar();
@@ -538,6 +563,34 @@ function handleTick(data) {
   updateBuildingPanel();
   (data.events || []).forEach(addEvent);
 }
+
+// ── Calendrier (bloc I) : 300 ticks = 1 saison de 30 jours, 1200 ticks = 1 an ──
+const SEASON_FR = ["Printemps", "Été", "Automne", "Hiver"];
+function tickToDate(tick) {
+  const an     = Math.floor(tick / 1200) + 1;
+  const saison = SEASON_FR[Math.floor(tick / 300) % 4];
+  const jour   = Math.floor((tick % 300) / 10) + 1;   // 30 jours de 10 ticks
+  return `An ${an} · ${saison}, j.${jour}`;
+}
+
+// ── Chroniques (bloc K) : annales du monde, fetch initial + poll léger ─────────
+async function refreshChronicle() {
+  try {
+    const r = await fetch("/api/chronicle");
+    const d = await r.json();
+    const log = document.getElementById("chronicle-log");
+    if (!log || !d.chronicle) return;
+    log.innerHTML = "";
+    // Les plus récentes en haut
+    [...d.chronicle].reverse().forEach(c => {
+      const div = document.createElement("div");
+      div.className = `chron-item ${c.kind}`;
+      div.innerHTML = `<span class="chron-date">${tickToDate(c.t)}</span>${c.msg}`;
+      log.appendChild(div);
+    });
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+setInterval(refreshChronicle, 20000);
 
 function updateSeasonBadge() {
   const s = SEASONS[currentSeason] || SEASONS.spring;
