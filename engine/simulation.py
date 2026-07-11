@@ -70,7 +70,11 @@ class Building:
     work_done: int = 0      # ticks de travail déjà effectués sur un chantier
     work_needed: int = 0    # ticks de travail total nécessaires pour terminer
     ruin_ticks: int = 0     # ruine : ticks restants avant que la nature la reprenne (0 = pas une ruine)
-    iron: int = 0           # forge : fer stocké (livré par les mineurs) — bloc B
+    iron: int = 0           # forge : fer stocké (bloc B) ; market : fer d'étal (D2)
+    rate_stone: int = 0     # market : cours affiché pierre/lot (D2, 0 = ne vend pas)
+    rate_iron: int = 0      # market : cours affiché fer/lot (D2)
+    wants_stone: int = 0    # market : 1 si le clan cherche de la pierre (D2)
+    wants_iron: int = 0     # market : 1 si le clan cherche du fer (D2)
 
     def to_dict(self):
         d = {"id": self.id, "clan_id": self.clan_id,
@@ -89,6 +93,10 @@ class Building:
             d["ruin_ticks"] = self.ruin_ticks   # front : fondu quand la ruine s'efface
         elif self.btype == "forge":
             d["iron"] = self.iron               # fer stocké à la forge (bloc B)
+        elif self.btype == "market":
+            d["iron"] = self.iron               # étal fer (D2)
+            d["rs"] = self.rate_stone; d["ri"] = self.rate_iron   # cours affichés
+            d["ws"] = self.wants_stone; d["wi"] = self.wants_iron # recherche
         return d
 
 
@@ -133,11 +141,26 @@ IRON_RESTOCK_THRESHOLD = 8
 MARKET_AGE           = 1     # Âge de Pierre requis pour bâtir un marché
 TRADE_CHECK_PERIOD   = 120   # ticks entre 2 évaluations de routes (dérivé de tick_count)
 TRADE_WOOD_LOT       = 12    # bois emporté par caravane (cargo dédié, hors MAX_CARRY)
-TRADE_STONE_PRICE    = 6     # pierre rapportée (= coût d'un puit → l'import débloque)
-TRADE_WOOD_SURPLUS   = 60    # pool bois min de l'acheteur A (peut payer)
-TRADE_STONE_DEFICIT  = 30    # pool pierre max de A (> CLAN_STONE_BOOTSTRAP=20 →
-                             # l'import COMPLÈTE le minage C1 sans le remplacer)
-TRADE_STONE_SURPLUS  = 60    # pool pierre min du vendeur B (thésauriseurs seulement)
+TRADE_WOOD_SURPLUS   = 60    # pool bois min de l'acheteur A (peut payer en bois)
+# (TRADE_STONE_PRICE / TRADE_STONE_SURPLUS / TRADE_STONE_DEFICIT : subsumés par D2 —
+#  le taux devient SPOT par paliers sur le pool du vendeur, la fenêtre d'achat par
+#  STONE_WANT_FULL, l'éligibilité vendeur par STONE_RATE_TIERS/_stone_rate.)
+
+# ── Économie v2 (bloc D2 « Loi de l'offre ») — paliers calibrés sonde d2probe_judge (200×150) ──
+GOODS_ORDER      = ("stone", "iron")   # ordre d'éval déterministe par acheteur
+STONE_RATE_TIERS = ((500, 12), (150, 9), (60, 6))  # pool vendeur → pierre/lot ; 12 = parité
+IRON_RATE_TIERS  = ((16, 3), (10, 2))              # pool forge vendeur → fer/lot
+STONE_SELL_FLOOR = 30    # réserve incessible du vendeur (vente partielle au-delà)
+IRON_SELL_FLOOR  = 8     # = IRON_RESTOCK_THRESHOLD : la vente seule ne rouvre PAS la
+                         # vanne de minage (il faut <8) ; les upgrades (−3) la rouvrent
+STONE_WANT_FULL  = 30    # fenêtre d'achat pierre (ex-TRADE_STONE_DEFICIT, inchangée)
+IRON_WANT_FULL   = 5     # forge < 5 : plus de quoi payer 2 upgrades (coût 3)
+IRON_WANT_BARGAIN = 9    # forge < 9 SI un vendeur affiche 3 (anti-flip : 8+3=11 < 16 →
+                         # jamais vendeur rate-3 ; vendeur rate-2 = relais borné, voulu)
+PAY_STONE_LOT    = 6     # lot de paiement pierre (équivalent du lot de 12 bois)
+PAY_STONE_MIN    = 150   # pierre min du payeur pour payer en pierre (glut seulement)
+WOOD_VALUE_TIERS  = (20, 45, 90)   # rareté 3/2/1/0 chez le vendeur (choix du paiement)
+STONE_VALUE_TIERS = (12, 30, 60)
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4     # 1 ressource étal→maisons tous les N ticks
@@ -662,6 +685,40 @@ def _take_pool_stone(houses, want: int) -> int:
     return got
 
 
+def _tiered(pool: int, tiers) -> int:
+    """((seuil, val), …) décroissant → val du 1er palier atteint, sinon 0. (D2)"""
+    for th, v in tiers:
+        if pool >= th:
+            return v
+    return 0
+
+
+def _stone_rate(pool: int) -> int:
+    return _tiered(pool, STONE_RATE_TIERS)
+
+
+def _iron_rate(pool: int) -> int:
+    return _tiered(pool, IRON_RATE_TIERS)
+
+
+def _scarcity(pool: int, tiers) -> int:
+    """3 disette / 2 rare / 1 aisance / 0 glut — valorisation d'un paiement par le
+    vendeur (D2 : à deux paiements possibles, il prend le bien qui lui manque)."""
+    a, b, c = tiers
+    return 3 if pool < a else 2 if pool < b else 1 if pool < c else 0
+
+
+def _take_forge_iron(forges, want: int) -> int:
+    """Prélève JUSQU'À `want` de fer des forges (partiel). Miroir _take_pool_stone."""
+    got = 0
+    for f in forges:
+        take = min(f.iron, want - got)
+        f.iron -= take; got += take
+        if got >= want:
+            break
+    return got
+
+
 def _add_pool_wood(houses, n: int):
     """Répartit `n` bois dans les maisons en respectant MAX_WOOD_PER_HOUSE
     (surplus perdu = comportement d'origine du dépôt). (D1 : drain d'étal, abort.)"""
@@ -688,6 +745,9 @@ def _clear_trade(entity: Entity):
     entity.trade_ticks = 0
     entity.cargo_wood = 0
     entity.cargo_stone = 0
+    entity.cargo_iron = 0
+    entity.trade_good = None
+    entity.trade_pay = None
 
 
 def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
@@ -705,6 +765,11 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
         if houses:   # re-crédit (perte bornée à un lot si plus de maisons)
             _add_pool_wood(houses, entity.cargo_wood)
             _add_pool_stone(houses, entity.cargo_stone)
+            if entity.cargo_iron:
+                _f = next((f for f in _cb.get("forge", [])
+                           if f.iron < FORGE_MAX_IRON), None)
+                if _f is not None:
+                    _f.iron = min(FORGE_MAX_IRON, _f.iron + entity.cargo_iron)
         events.append({"type": "trade_aborted", "clan_id": entity.clan_id})
         _clear_trade(entity)
         return False
@@ -716,12 +781,22 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             return False
         mkt = mkts[0]
         if _dist(entity.x, entity.y, mkt.x, mkt.y) < 1.5:
-            if _spend_pool_wood(_cb.get("house", []), TRADE_WOOD_LOT):
-                entity.cargo_wood = TRADE_WOOD_LOT
+            houses = _cb.get("house", [])
+            if entity.trade_pay == "stone":
+                ok = _spend_pool_stone(houses, PAY_STONE_LOT)
+                if ok:
+                    entity.cargo_stone = PAY_STONE_LOT
+            else:
+                ok = _spend_pool_wood(houses, TRADE_WOOD_LOT)
+                if ok:
+                    entity.cargo_wood = TRADE_WOOD_LOT
+            if ok:
                 entity.trade_phase = "out"
                 events.append({"type": "trade_depart", "clan_id": entity.clan_id,
                                "dest_clan_id": entity.trade_dest_cid,
-                               "wood": TRADE_WOOD_LOT})
+                               "good": entity.trade_good, "pay": entity.trade_pay,
+                               "pay_qty": entity.cargo_wood or entity.cargo_stone,
+                               "wood": entity.cargo_wood})
             else:   # pool fondu entre-temps : mission annulée, rien n'a été déduit
                 _clear_trade(entity)
             return True
@@ -737,16 +812,41 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             return True
         dmkt = dmkts[0]
         if _dist(entity.x, entity.y, dmkt.x, dmkt.y) < 1.5:
-            got = _take_pool_stone(dest_cb.get("house", []), TRADE_STONE_PRICE)
-            if got > 0:   # échange atomique : bois → étal B, pierre → cargo
+            # Taux SPOT recalculé MAINTENANT (loi de l'offre : le cours a pu bouger
+            # en route) + plancher incessible du vendeur.
+            houses_b = dest_cb.get("house", [])
+            forges_b = dest_cb.get("forge", [])
+            if entity.trade_good == "iron":
+                pool_b = sum(f.iron for f in forges_b)
+                rate = _iron_rate(pool_b)
+                take = min(rate, max(0, pool_b - IRON_SELL_FLOOR)) if rate else 0
+            else:
+                pool_b = sum(h.stone for h in houses_b)
+                rate = _stone_rate(pool_b)
+                take = min(rate, max(0, pool_b - STONE_SELL_FLOOR)) if rate else 0
+            if take > 0:   # échange atomique : paiement → étal B, bien → cargo
                 dmkt.wood = min(MARKET_MAX_STOCK, dmkt.wood + entity.cargo_wood)
+                dmkt.stone = min(MARKET_MAX_STOCK, dmkt.stone + entity.cargo_stone)
+                pay_qty = entity.cargo_wood or entity.cargo_stone
+                pay_good = "wood" if entity.cargo_wood else "stone"
                 entity.cargo_wood = 0
-                entity.cargo_stone = got
-                events.append({"type": "trade_exchange", "clan_id": entity.clan_id,
+                entity.cargo_stone = 0
+                if entity.trade_good == "iron":
+                    entity.cargo_iron = _take_forge_iron(forges_b, take)
+                else:
+                    entity.cargo_stone = _take_pool_stone(houses_b, take)
+                ev = {"type": "trade_exchange", "clan_id": entity.clan_id,
+                      "dest_clan_id": entity.trade_dest_cid,
+                      "good": entity.trade_good, "qty": take,
+                      "pay_good": pay_good, "pay_qty": pay_qty,
+                      "x": dmkt.x, "y": dmkt.y}
+                if entity.trade_good == "stone" and pay_good == "wood":  # legacy D1
+                    ev["wood"] = pay_qty; ev["stone"] = take
+                events.append(ev)
+            else:   # cours tombé en route / plancher atteint → refus narré (D2)
+                events.append({"type": "trade_refused", "clan_id": entity.clan_id,
                                "dest_clan_id": entity.trade_dest_cid,
-                               "wood": TRADE_WOOD_LOT, "stone": got,
-                               "x": dmkt.x, "y": dmkt.y})
-            # got == 0 (B vidé en route) → il garde son bois et rentre
+                               "good": entity.trade_good})
             entity.trade_phase = "home"
             return True
         entity.state = State.TRADING
@@ -760,15 +860,23 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             if houses:
                 _add_pool_wood(houses, entity.cargo_wood)
                 _add_pool_stone(houses, entity.cargo_stone)
+                if entity.cargo_iron:
+                    _f = next((f for f in _cb.get("forge", [])
+                               if f.iron < FORGE_MAX_IRON), None)
+                    if _f is not None:
+                        _f.iron = min(FORGE_MAX_IRON, _f.iron + entity.cargo_iron)
             _clear_trade(entity)
             return False
         mkt = mkts[0]
         if _dist(entity.x, entity.y, mkt.x, mkt.y) < 1.5:
             mkt.stone = min(MARKET_MAX_STOCK, mkt.stone + entity.cargo_stone)
             mkt.wood = min(MARKET_MAX_STOCK, mkt.wood + entity.cargo_wood)  # invendu visible
+            mkt.iron = min(MARKET_MAX_STOCK, mkt.iron + entity.cargo_iron)  # étal fer (D2)
             events.append({"type": "trade_complete", "clan_id": entity.clan_id,
                            "dest_clan_id": entity.trade_dest_cid,
-                           "stone": entity.cargo_stone, "wood_back": entity.cargo_wood})
+                           "good": entity.trade_good,
+                           "stone": entity.cargo_stone, "iron": entity.cargo_iron,
+                           "wood_back": entity.cargo_wood})
             _clear_trade(entity)
             return True
         entity.state = State.TRADING
@@ -2330,7 +2438,7 @@ class Simulation:
         # Dispatch des caravanes (D1) : évaluation périodique des routes de troc.
         # 100 % sans RNG (paires triées, nearest + tie-break id) → hash-neutre
         # tant qu'aucun marché n'existe.
-        if self.tick_count % TRADE_CHECK_PERIOD == 0 and len(self.clans) >= 2:
+        if self.tick_count % TRADE_CHECK_PERIOD == 0 and self.clans:
             self._dispatch_caravans(clan_bldg, tick_events)
 
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
@@ -2611,13 +2719,13 @@ class Simulation:
             counts[e.etype.value] += 1
         return {"populations": counts, "total": len(self.entities)}
 
-    # ── Économie / caravanes (bloc D1) ───────────────────────────────────────
+    # ── Économie / caravanes (blocs D1+D2) ───────────────────────────────────
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
-        """Évalue les routes de troc et recrute AU PLUS UNE caravane par appel.
-        Route : A (pool bois ≥ SURPLUS, pierre < DEFICIT, marché fini) achète à
-        B = le plus PROCHE des clans à marché fini et pierre ≥ SURPLUS.
-        Aucun RNG (ordres triés par id, nearest en tie-break id) → déterministe
-        et hash-neutre tant qu'aucun marché n'existe."""
+        """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
+        routes et recrute AU PLUS UNE caravane par appel. Mission paramétrée :
+        QUOI acheter (GOODS_ORDER), AVEC QUOI payer (bois, ou pierre en glut),
+        au taux SPOT du vendeur (recalculé à l'arrivée). Aucun RNG (ordres triés,
+        paliers entiers) → déterministe, hash-neutre sans marché."""
         busy = set()
         candidates: dict[int, list] = {}
         for e in self.entities:
@@ -2632,33 +2740,85 @@ class Simulation:
 
         def pool_wood(cid):  return sum(h.wood for h in clan_bldg.get(cid, {}).get("house", []))
         def pool_stone(cid): return sum(h.stone for h in clan_bldg.get(cid, {}).get("house", []))
+        def pool_iron(cid):  return sum(f.iron for f in clan_bldg.get(cid, {}).get("forge", []))
+        def has_forge(cid):  return bool(clan_bldg.get(cid, {}).get("forge", []))
         def market(cid):
             mks = clan_bldg.get(cid, {}).get("market", [])
             return mks[0] if mks else None
 
+        # (a) Boards : cours + recherche, event market_price au CHANGEMENT seulement
+        for cid in sorted(clan_bldg):
+            mkt = market(cid)
+            if mkt is None:
+                continue
+            rs = _stone_rate(pool_stone(cid))
+            ri = _iron_rate(pool_iron(cid))
+            if rs != mkt.rate_stone:
+                tick_events.append({"type": "market_price", "clan_id": cid,
+                                    "good": "stone", "rate": rs, "x": mkt.x, "y": mkt.y})
+            if ri != mkt.rate_iron:
+                tick_events.append({"type": "market_price", "clan_id": cid,
+                                    "good": "iron", "rate": ri, "x": mkt.x, "y": mkt.y})
+            mkt.rate_stone = rs
+            mkt.rate_iron = ri
+            mkt.wants_stone = 1 if pool_stone(cid) < STONE_WANT_FULL else 0
+            mkt.wants_iron = 1 if (has_forge(cid) and pool_iron(cid) < IRON_WANT_FULL) else 0
+
+        # (b) Boucle acheteurs (le commerce exige 2 clans ; les boards, non)
+        if len(self.clans) < 2:
+            return
+        rate_of = {"stone": lambda cid: _stone_rate(pool_stone(cid)),
+                   "iron":  lambda cid: _iron_rate(pool_iron(cid))}
         for a in sorted(self.clans, key=lambda c: c.id):
             mka = market(a.id)
-            if (mka is None or a.id in busy or a.id not in candidates
-                    or pool_wood(a.id) < TRADE_WOOD_SURPLUS
-                    or pool_stone(a.id) >= TRADE_STONE_DEFICIT):
+            if mka is None or a.id in busy or a.id not in candidates:
                 continue
-            sellers = [c for c in sorted(self.clans, key=lambda c: c.id)
-                       if c.id != a.id and market(c.id) is not None
-                       and pool_stone(c.id) >= TRADE_STONE_SURPLUS]
-            if not sellers:
-                continue
-            b = min(sellers, key=lambda c: (_dist(mka.x, mka.y,
-                                                  market(c.id).x, market(c.id).y), c.id))
-            merch = min(candidates[a.id],
-                        key=lambda e: (_dist(e.x, e.y, mka.x, mka.y), e.id))
-            merch.trade_phase = "load"
-            merch.trade_dest_cid = b.id
-            merch.trade_ticks = 0
-            merch.state = State.TRADING
-            tick_events.append({"type": "trade_deal", "clan_id": a.id,
-                                "dest_clan_id": b.id,
-                                "wood": TRADE_WOOD_LOT, "stone": TRADE_STONE_PRICE})
-            return   # une seule caravane lancée par évaluation
+            for good in GOODS_ORDER:
+                # fenêtre d'achat
+                if good == "stone":
+                    if pool_stone(a.id) >= STONE_WANT_FULL:
+                        continue
+                else:
+                    if not has_forge(a.id):
+                        continue
+                    pi = pool_iron(a.id)
+                    if pi >= IRON_WANT_BARGAIN:
+                        continue
+                sellers = [c for c in sorted(self.clans, key=lambda c: c.id)
+                           if c.id != a.id and market(c.id) is not None
+                           and rate_of[good](c.id) > 0]
+                if good == "iron":
+                    pi = pool_iron(a.id)
+                    if pi >= IRON_WANT_FULL:   # fenêtre bargain : rate 3 exigé
+                        sellers = [c for c in sellers if rate_of["iron"](c.id) >= 3]
+                if not sellers:
+                    continue
+                b = min(sellers, key=lambda c: (_dist(mka.x, mka.y,
+                                                      market(c.id).x, market(c.id).y), c.id))
+                # choix du paiement : ce que le VENDEUR valorise le plus
+                pays = []
+                if pool_wood(a.id) >= TRADE_WOOD_SURPLUS:
+                    pays.append(("wood", _scarcity(pool_wood(b.id), WOOD_VALUE_TIERS)))
+                if good == "iron" and pool_stone(a.id) >= PAY_STONE_MIN:
+                    pays.append(("stone", _scarcity(pool_stone(b.id), STONE_VALUE_TIERS)))
+                if not pays:
+                    continue
+                pay = max(pays, key=lambda p: p[1])[0] if len(pays) > 1 else pays[0][0]
+                merch = min(candidates[a.id],
+                            key=lambda e: (_dist(e.x, e.y, mka.x, mka.y), e.id))
+                merch.trade_phase = "load"
+                merch.trade_dest_cid = b.id
+                merch.trade_ticks = 0
+                merch.trade_good = good
+                merch.trade_pay = pay
+                merch.state = State.TRADING
+                ev = {"type": "trade_deal", "clan_id": a.id, "dest_clan_id": b.id,
+                      "good": good, "pay": pay}
+                if good == "stone" and pay == "wood":   # clés legacy D1
+                    ev["wood"] = TRADE_WOOD_LOT
+                    ev["stone"] = rate_of["stone"](b.id)
+                tick_events.append(ev)
+                return   # une seule caravane lancée par évaluation
 
     def _drain_markets(self, clan_bldg: dict):
         """Étal → maisons : 1 bois + 1 pierre par marché tous les MARKET_DRAIN_PERIOD
@@ -2675,6 +2835,11 @@ class Simulation:
                         mkt.wood -= 1; h.wood += 1
                 if mkt.stone > 0:
                     mkt.stone -= 1; houses[0].stone += 1
+                if mkt.iron > 0:   # D2 : le fer d'étal rejoint la forge (sinon reste visible)
+                    f = next((f for f in groups.get("forge", [])
+                              if f.iron < FORGE_MAX_IRON), None)
+                    if f is not None:
+                        mkt.iron -= 1; f.iron += 1
 
     # ── Chroniques du monde (bloc K) ─────────────────────────────────────────
     _SPECIES_FR = {"boar": "sangliers", "chicken": "poules", "horned_sheep": "mouflons",
@@ -2723,11 +2888,37 @@ class Simulation:
                          f"Le grand feu du clan {ev['clan_id'] + 1} rayonne (niveau 2)"})
             elif et == "trade_complete":
                 a, b = ev.get("clan_id"), ev.get("dest_clan_id")
-                key = ("first_trade", min(a, b), max(a, b))
+                _delivered = ev.get("stone", 0) > 0 or ev.get("iron", 0) > 0
+                if _delivered:   # un retour bredouille (refus) n'est pas une route
+                    key = ("first_trade", min(a, b), max(a, b))
+                    if key not in self._chronicle_seen:
+                        self._chronicle_seen.add(key)
+                        add({"t": t, "kind": "trade", "msg":
+                             f"Une route commerciale s'ouvre entre le clan {a + 1} et le clan {b + 1}"})
+                if ev.get("good") == "iron" and ev.get("iron", 0) > 0:
+                    key = ("first_iron_trade", min(a, b), max(a, b))
+                    if key not in self._chronicle_seen:
+                        self._chronicle_seen.add(key)
+                        add({"t": t, "kind": "trade", "msg":
+                             f"Le métal voyage : le clan {b + 1} fournit le fer au clan {a + 1}"})
+            elif et == "trade_exchange" and ev.get("pay_good") == "stone":
+                key = ("first_stone_pay", ev.get("clan_id"))
                 if key not in self._chronicle_seen:
                     self._chronicle_seen.add(key)
                     add({"t": t, "kind": "trade", "msg":
-                         f"Une route commerciale s'ouvre entre le clan {a + 1} et le clan {b + 1}"})
+                         f"Le clan {ev['clan_id'] + 1} paie en pierre — première monnaie minérale"})
+            elif et == "trade_refused":
+                key = ("first_refusal", ev.get("dest_clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "trade", "msg":
+                         f"Le clan {ev['dest_clan_id'] + 1} renvoie une caravane : son bien s'est fait rare"})
+            elif et == "market_price" and ev.get("good") == "stone" and ev.get("rate") == 12:
+                key = ("stone_parity", ev.get("clan_id"))
+                if key not in self._chronicle_seen:
+                    self._chronicle_seen.add(key)
+                    add({"t": t, "kind": "trade", "msg":
+                         f"Au marché du clan {ev['clan_id'] + 1}, la pierre s'échange à parité contre le bois"})
             elif et == "heatwave_start":
                 add({"t": t, "kind": "weather", "msg": "Une canicule s'abat sur le monde"})
         # Espèces disparues / revenues (comparaison avec le tick précédent).

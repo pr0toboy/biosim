@@ -404,7 +404,8 @@ def test_d1_caravan_roundtrip_conserves_resources():
     """D1 : cycle caravane complet (deal → chargement −12 bois pool A → échange
     −6 pierre pool B / +12 bois étal B → retour +pierre étal A → drain vers les
     maisons), avec CONSERVATION de Σbois et Σpierre vérifiée à chaque tick."""
-    from engine.simulation import TRADE_WOOD_LOT, TRADE_STONE_PRICE
+    from engine.simulation import TRADE_WOOD_LOT
+    TRADE_STONE_PRICE = 6   # D2 : taux spot — vendeur rigé à 100 → palier 6 (sémantique D1 intacte)
     sim, ha, hb, house_a, mkt_a, house_b, mkt_b = _d1_rig()
 
     def totals():
@@ -487,6 +488,149 @@ def test_d1_dest_ruined_merchant_returns_and_replay():
     assert ref == rep, "replay divergent avec une caravane en mission"
     print("  test_d1_dest_ruined_merchant_returns_and_replay OK "
           "(demi-tour propre + replay 100 ticks identiques en mission)")
+
+
+def _d2_rig(a_stone=200, a_iron=2, b_stone=40, b_iron=18):
+    """Rig D2 : comme _d1_rig + une FORGE par clan. Outils FER posés (bloque
+    l'upgrade forge qui consommerait le fer → conservation Σ testable). Âge 1
+    (pas de minage de fer, gated âge 2)."""
+    from engine.simulation import Clan, TRADE_CHECK_PERIOD
+    world = World(width=60, height=45, seed=7)
+    world.stone_grid[:] = 0.0
+    sim = Simulation(world)
+    (ax, ay), (bx, by) = _find_walkable_row_segment(world, 20)
+
+    def mk_clan(cid, x, y, stone, iron):
+        h = spawn(EntityType.HUMAN, x, y, Sex.MALE)
+        h.clan_id = cid; h.hunger = 10.0; h.thirst = 10.0
+        h.wood = 0; h.stone = 0; h.iron = 0
+        h.pick = "iron_pick"; h.tool = "iron_axe"
+        house = Building(id=cid * 10 + 1, clan_id=cid, x=x, y=y, btype="house",
+                         wood=100, stone=stone)
+        market = Building(id=cid * 10 + 2, clan_id=cid, x=x, y=y, btype="market")
+        forge = Building(id=cid * 10 + 3, clan_id=cid, x=x, y=y, btype="forge",
+                         iron=iron)
+        return h, house, market, forge
+
+    ha, house_a, mkt_a, forge_a = mk_clan(0, ax, ay, a_stone, a_iron)
+    hb, house_b, mkt_b, forge_b = mk_clan(1, bx, by, b_stone, b_iron)
+    sim.entities = [ha, hb]
+    sim.clans = [Clan(id=0, cx=float(ax), cy=float(ay), color="#f00", chief_id=ha.id, age=1),
+                 Clan(id=1, cx=float(bx), cy=float(by), color="#00f", chief_id=hb.id, age=1)]
+    sim.buildings = [house_a, mkt_a, forge_a, house_b, mkt_b, forge_b]
+    sim.tick_count = TRADE_CHECK_PERIOD - 1
+    return sim, ha, hb, (house_a, mkt_a, forge_a), (house_b, mkt_b, forge_b)
+
+
+def test_d2_iron_for_stone_roundtrip_conserves():
+    """D2 : route FER payée en PIERRE (le vendeur valorise la pierre rare > le bois
+    en glut), taux spot avec plancher, conservation Σ bois/pierre/fer par tick."""
+    sim, ha, hb, (house_a, mkt_a, forge_a), (house_b, mkt_b, forge_b) = _d2_rig()
+
+    def totals():
+        w = house_a.wood + house_b.wood + mkt_a.wood + mkt_b.wood + \
+            ha.cargo_wood + hb.cargo_wood + ha.wood + hb.wood
+        s = house_a.stone + house_b.stone + mkt_a.stone + mkt_b.stone + \
+            ha.cargo_stone + hb.cargo_stone + ha.stone + hb.stone
+        i = forge_a.iron + forge_b.iron + mkt_a.iron + mkt_b.iron + \
+            ha.cargo_iron + hb.cargo_iron + ha.iron + hb.iron
+        return w, s, i
+
+    t0 = totals()
+    deals = []
+    for _ in range(800):
+        data = sim.step()
+        for ev in data["events"]:
+            if ev.get("type", "").startswith("trade_"):
+                deals.append(ev)
+        assert totals() == t0, f"conservation violée: {t0} -> {totals()}"
+        if any(ev.get("type") == "trade_complete" for ev in deals):
+            break
+    kinds = {ev["type"] for ev in deals}
+    assert "trade_complete" in kinds, f"cycle incomplet: {kinds}"
+    deal = next(ev for ev in deals if ev["type"] == "trade_deal")
+    assert deal["good"] == "iron" and deal["pay"] == "stone", f"deal inattendu: {deal}"
+    assert forge_b.iron == 15, f"forge B: {forge_b.iron} (attendu 18-3=15, plancher 8 respecté)"
+    # le drain (1/4 ticks) a pu déjà déplacer l'étal vers les maisons → somme
+    assert mkt_b.stone + house_b.stone == 40 + 6, \
+        f"pierre B: étal {mkt_b.stone} + maison {house_b.stone} (attendu 46 au total)"
+    assert forge_a.iron + mkt_a.iron == 2 + 3, \
+        f"fer A: forge {forge_a.iron} + étal {mkt_a.iron} (attendu 5 au total)"
+    print("  test_d2_iron_for_stone_roundtrip_conserves OK "
+          "(fer contre pierre, spot 3, Σ w/s/i conservées)")
+
+
+def test_d2_no_flip_and_refusal():
+    """D2 : (a) anti-flip — l'acheteur enrichi sort de la fenêtre, le vendeur
+    appauvri sort du palier → plus AUCUN deal fer ensuite ; (b) cours tombé en
+    route → trade_refused, cargaison revenue intégralement (Σ conservées)."""
+    # (a) A fer=4, B fer=11 (rate 2) → 1 échange de 2, puis fenêtre refermée
+    sim, ha, hb, (house_a, mkt_a, forge_a), (house_b, mkt_b, forge_b) = \
+        _d2_rig(a_stone=200, a_iron=4, b_stone=40, b_iron=11)
+    got_exchange = False; deals_after = 0
+    for k in range(1200):
+        data = sim.step()
+        for ev in data["events"]:
+            if ev.get("type") == "trade_exchange":
+                got_exchange = True
+                assert ev["qty"] == 2, f"qty: {ev['qty']} (attendu spot 2)"
+            elif ev.get("type") == "trade_deal" and got_exchange:
+                deals_after += 1
+    assert got_exchange, "aucun échange fer dans le rig (a)"
+    assert deals_after == 0, f"{deals_after} deal(s) après l'échange (flip/ping-pong)"
+    assert forge_b.iron == 9, f"forge B: {forge_b.iron} (11-2, sous le palier 10)"
+
+    # (b) refus : cours effondré pendant le trajet
+    sim, ha, hb, (house_a, mkt_a, forge_a), (house_b, mkt_b, forge_b) = _d2_rig()
+    for _ in range(400):
+        sim.step()
+        if ha.trade_phase == "out":
+            break
+    assert ha.trade_phase == "out"
+    forge_b.iron = 9   # sous le palier 10 → rate 0 à l'arrivée
+    refused = False
+    for _ in range(600):
+        data = sim.step()
+        refused = refused or any(ev.get("type") == "trade_refused" for ev in data["events"])
+        if ha.trade_phase is None:
+            break
+    assert refused, "trade_refused jamais émis"
+    assert ha.trade_phase is None and ha.cargo_stone == 0
+    # le paiement (6 pierre) est revenu côté A : étal (en drain) ou maisons
+    assert house_a.stone + mkt_a.stone == 200, \
+        f"pierre A: {house_a.stone}+{mkt_a.stone} (attendu 200 au total)"
+    print("  test_d2_no_flip_and_refusal OK (1 seul échange puis silence ; refus + retour intégral)")
+
+
+def test_d2_price_board_and_replay():
+    """D2 : le board affiche le cours spot (une seule émission d'event, pas de
+    re-spam) ; save/load en phase out d'une mission fer-contre-pierre → replay
+    100 ticks byte-à-byte (3 champs Entity + 4 champs Building suffisent)."""
+    from engine.simulation import TRADE_CHECK_PERIOD
+    sim, ha, hb, (house_a, mkt_a, forge_a), (house_b, mkt_b, forge_b) = \
+        _d2_rig(b_stone=600)
+    price_events = 0
+    for _ in range(2 * TRADE_CHECK_PERIOD + 2):
+        data = sim.step()
+        price_events += sum(1 for ev in data["events"]
+                            if ev.get("type") == "market_price"
+                            and ev.get("clan_id") == 1 and ev.get("good") == "stone")
+    assert mkt_b.rate_stone == 12, f"board B: {mkt_b.rate_stone} (600 → palier 12)"
+    assert price_events == 1, f"{price_events} events market_price (attendu 1, pas de re-spam)"
+
+    sim2, ha2, *_ = _d2_rig()
+    for _ in range(400):
+        sim2.step()
+        if ha2.trade_phase == "out":
+            break
+    assert ha2.trade_phase == "out" and ha2.trade_good == "iron"
+    snap = sim2.save_state()
+    ref = [sim2.step() for _ in range(100)]
+    sim3 = Simulation(World(width=10, height=10, seed=1))
+    sim3.load_state(snap)
+    rep = [sim3.step() for _ in range(100)]
+    assert ref == rep, "replay divergent (mission D2 en vol)"
+    print("  test_d2_price_board_and_replay OK (board 12 doré, 1 event, replay identique)")
 
 
 def test_k_chronicle_records_and_persists():
@@ -575,6 +719,9 @@ if __name__ == "__main__":
                test_d1_caravan_roundtrip_conserves_resources,
                test_d1_no_trade_without_complementary_surplus,
                test_d1_dest_ruined_merchant_returns_and_replay,
+               test_d2_iron_for_stone_roundtrip_conserves,
+               test_d2_no_flip_and_refusal,
+               test_d2_price_board_and_replay,
                test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
                test_save_load_roundtrip_and_resume,

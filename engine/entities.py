@@ -282,7 +282,8 @@ class Entity:
         "_stuck_ticks", "chop_cooldown_left",
         "_etype_str", "_sex_str",
         "_build_target_x", "_build_target_y", "_build_target_type",
-        "cargo_wood", "cargo_stone", "trade_phase", "trade_dest_cid", "trade_ticks",
+        "cargo_wood", "cargo_stone", "cargo_iron", "trade_phase", "trade_dest_cid",
+        "trade_ticks", "trade_good", "trade_pay",
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -317,7 +318,10 @@ class Entity:
         # jamais happée par le dépôt 3.5 et peut dépasser MAX_CARRY.
         self.cargo_wood: int = 0
         self.cargo_stone: int = 0
+        self.cargo_iron: int = 0
         self.trade_phase: Optional[str] = None      # None | "load" | "out" | "home"
+        self.trade_good: Optional[str] = None       # D2 : bien acheté ("stone"|"iron")
+        self.trade_pay: Optional[str] = None        # D2 : bien de paiement ("wood"|"stone")
         self.trade_dest_cid: Optional[int] = None   # clan destination
         self.trade_ticks: int = 0                   # anti-zombie (timeout mission)
         self.sickle: Optional[str] = None        # None, "sickle"
@@ -370,8 +374,9 @@ class Entity:
             d["can_filled"]= self.can_filled
             d["rod"]       = self.fishing_rod
         if self.trade_phase is not None:
-            d["cargo"] = [self.cargo_wood, self.cargo_stone]   # ballot visible (D1)
+            d["cargo"] = [self.cargo_wood, self.cargo_stone, self.cargo_iron]  # ballot (D1/D2)
             d["dest"] = self.trade_dest_cid                    # « → clan N » au tooltip
+            d["good"] = self.trade_good                        # bien recherché (D2)
         if self.state == State.BUILDING and self.target_x is not None:
             d["tx"] = int(round(self.target_x))
             d["ty"] = int(round(self.target_y))
@@ -409,8 +414,10 @@ class Entity:
             "_build_target_y": self._build_target_y,
             "_build_target_type": self._build_target_type,
             "cargo_wood": self.cargo_wood, "cargo_stone": self.cargo_stone,
+            "cargo_iron": self.cargo_iron,
             "trade_phase": self.trade_phase, "trade_dest_cid": self.trade_dest_cid,
             "trade_ticks": self.trade_ticks,
+            "trade_good": self.trade_good, "trade_pay": self.trade_pay,
         }
 
     @classmethod
@@ -443,9 +450,14 @@ class Entity:
         # Mission caravane (D1) — compat vieux saves via d.get
         e.cargo_wood = d.get("cargo_wood", 0)
         e.cargo_stone = d.get("cargo_stone", 0)
+        e.cargo_iron = d.get("cargo_iron", 0)
         e.trade_phase = d.get("trade_phase")
         e.trade_dest_cid = d.get("trade_dest_cid")
         e.trade_ticks = d.get("trade_ticks", 0)
+        # Compat vieux saves D1 : une mission en vol devient stone-contre-bois
+        _tp = e.trade_phase
+        e.trade_good = d.get("trade_good", "stone" if _tp else None)
+        e.trade_pay = d.get("trade_pay", "wood" if _tp else None)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

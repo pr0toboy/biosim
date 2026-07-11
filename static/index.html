@@ -900,9 +900,13 @@ function drawAll() {
       ctx.stroke();
     }
     // Ballot de caravane (D1) : pastille cargaison au-dessus du marchand
-    if (e.cargo && (e.cargo[0] > 0 || e.cargo[1] > 0)) {
-      ctx.fillStyle = e.cargo[0] > 0 ? "#8B5A2B" : "#95a5a6";
+    if (e.cargo && (e.cargo[0] > 0 || e.cargo[1] > 0 || (e.cargo[2] ?? 0) > 0)) {
+      ctx.fillStyle = e.cargo[0] > 0 ? "#8B5A2B" : (e.cargo[2] ?? 0) > 0 ? "#475569" : "#95a5a6";
       ctx.fillRect(cx - T * 0.14, cy - T * 0.72, T * 0.28, T * 0.22);
+      if ((e.cargo[2] ?? 0) > 0) {   // braise du fer
+        ctx.fillStyle = "#f97316";
+        ctx.fillRect(cx - T * 0.04, cy - T * 0.66, T * 0.08, T * 0.08);
+      }
     }
     const isChief = e.t === "human" && clans.some(c => c.chief_id === e.id);
     const sp = ENTITY_SPRITES[isChief ? "human_chief" : e.t];
@@ -1082,6 +1086,27 @@ function drawBuildings(c, T) {
       if (spile > 0) {                                               // pile de pierre
         c.fillStyle = "#94a3b8";
         c.fillRect(b.x * T + T * 0.58, b.y * T + T * (0.90 - 0.16 * spile), T * 0.24, T * 0.16 * spile);
+      }
+      // Board de cours (D2) : ce qui est affiché est ce qui est négocié
+      const quotes = [];
+      if ((b.rs ?? 0) > 0) quotes.push({ txt: `🪨${b.rs}`, col: b.rs >= 12 ? "#f1c40f" : b.rs >= 9 ? "#fb923c" : "#9ca3af" });
+      if ((b.ri ?? 0) > 0) quotes.push({ txt: `⛓${b.ri}`, col: b.ri >= 3 ? "#f1c40f" : "#9ca3af" });
+      if (quotes.length) {
+        c.font = `${Math.max(5, T * 0.5)}px monospace`;
+        c.textAlign = "center";
+        quotes.forEach((q, i) => {
+          c.fillStyle = q.col;
+          c.fillText(q.txt, (b.x + 0.5) * T, b.y * T - 2 - i * T * 0.55);
+        });
+      }
+      const wants = [];
+      if (b.ws) wants.push("🪨?");
+      if (b.wi) wants.push("⛓?");
+      if (wants.length) {
+        c.font = `${Math.max(5, T * 0.45)}px monospace`;
+        c.textAlign = "center";
+        c.fillStyle = cnM ? cnM.color : "#e5e7eb";
+        c.fillText(wants.join(" "), (b.x + 0.5) * T, (b.y + 1) * T + T * 0.5);
       }
     } else if (b.btype === "forge") {
       // Forge (bloc B) : enclume sombre sur socle, braise orange — procédural.
@@ -1343,17 +1368,39 @@ function addEvent(ev) {
     const cn = clans.find(c => c.id === ev.clan_id);
     div.textContent = `🏪 Marché construit — Clan ${ev.clan_id + 1} en (${ev.x},${ev.y})`;
     if (cn) { div.style.borderColor = cn.color; div.style.color = "#f1c40f"; }
+  } else if (ev.type === "trade_deal") {
+    div.className = "ev-item";
+    const gD = ev.good === "iron" ? "du fer" : "de la pierre";
+    const pD = ev.pay === "stone" ? "en pierre" : "en bois";
+    div.textContent = `🤝 Clan ${ev.clan_id + 1} commande ${gD} au clan ${ev.dest_clan_id + 1} (paie ${pD})`;
+    div.style.borderColor = "#f1c40f"; div.style.color = "#fde68a";
   } else if (ev.type === "trade_depart") {
     div.className = "ev-item";
-    div.textContent = `🐫 Caravane : clan ${ev.clan_id + 1} → clan ${ev.dest_clan_id + 1} (${ev.wood} bois)`;
+    const cargoD = ev.pay === "stone" ? `${ev.pay_qty ?? 6} pierres` : `${ev.pay_qty ?? ev.wood} bois`;
+    div.textContent = `🐫 Caravane : clan ${ev.clan_id + 1} → clan ${ev.dest_clan_id + 1} (${cargoD})`;
     div.style.borderColor = "#f1c40f"; div.style.color = "#fde68a";
   } else if (ev.type === "trade_exchange") {
     div.className = "ev-item";
-    div.textContent = `🤝 Échange : ${ev.wood} bois contre ${ev.stone} pierre${ev.stone > 1 ? "s" : ""}`;
+    const gLbl = ev.good === "iron" ? "fer" : "pierre";
+    const pLbl = ev.pay_good === "stone" ? "pierres" : "bois";
+    div.textContent = `🤝 Échange : ${ev.pay_qty ?? ev.wood} ${pLbl} contre ${ev.qty ?? ev.stone} ${gLbl}`;
     div.style.borderColor = "#f1c40f"; div.style.color = "#fde68a";
+  } else if (ev.type === "market_price") {
+    if (!ev.rate) return;   // cours retombé à 0 : pas d'entrée de feed
+    div.className = "ev-item";
+    const gIco = ev.good === "iron" ? "⛓" : "🪨";
+    div.textContent = `📈 Clan ${ev.clan_id + 1} : ${gIco} lot → ${ev.rate}`;
+    div.style.borderColor = "#a3e635"; div.style.color = "#d9f99d";
+  } else if (ev.type === "trade_refused") {
+    div.className = "ev-item";
+    div.textContent = `🚫 Le clan ${ev.dest_clan_id + 1} renvoie la caravane du clan ${ev.clan_id + 1}`;
+    div.style.borderColor = "#6b7280"; div.style.color = "#9ca3af";
   } else if (ev.type === "trade_complete") {
     div.className = "ev-item";
-    div.textContent = `🏪 Caravane rentrée — Clan ${ev.clan_id + 1} : +${ev.stone} pierre`;
+    const gain = (ev.iron ?? 0) > 0 ? `+${ev.iron} fer`
+               : (ev.stone ?? 0) > 0 ? `+${ev.stone} pierre`
+               : "rentrée bredouille";
+    div.textContent = `🏪 Caravane rentrée — Clan ${ev.clan_id + 1} : ${gain}`;
     div.style.borderColor = "#f1c40f"; div.style.color = "#fde68a";
   } else if (ev.type === "craft_iron_pick" || ev.type === "craft_iron_axe") {
     div.className = "ev-item chop";
@@ -1458,10 +1505,16 @@ function buildingInfoHTML(b) {
     return `<b style="color:${cColor}">🌱 Champ — ${cLabel}</b>
       <div class="tt-row"><span>Stade</span><span>${b.stage ?? 1} / 4</span></div>`;
   } else if (b.btype === "market") {
+    const rowsQ = [];
+    if ((b.rs ?? 0) > 0) rowsQ.push(`<div class="tt-row"><span>Cours pierre</span><span>lot → ${b.rs}</span></div>`);
+    if ((b.ri ?? 0) > 0) rowsQ.push(`<div class="tt-row"><span>Cours fer</span><span>lot → ${b.ri}</span></div>`);
+    const seek = [b.ws ? "pierre" : "", b.wi ? "fer" : ""].filter(Boolean).join(", ");
+    if (seek) rowsQ.push(`<div class="tt-row"><span>Recherche</span><span>${seek}</span></div>`);
     return `<b style="color:${cColor}">🏪 Marché — ${cLabel}</b>
       <div class="tt-row"><span>🪵 Étal bois</span><span>${b.wood ?? 0}</span></div>
       <div class="tt-row"><span>🪨 Étal pierre</span><span>${b.stone ?? 0}</span></div>
-      <div class="tt-row" style="color:#94a3b8;font-size:0.85em"><span>Les caravanes y troquent bois contre pierre</span></div>`;
+      ${(b.iron ?? 0) > 0 ? `<div class="tt-row"><span>⛓ Étal fer</span><span>${b.iron}</span></div>` : ""}
+      ${rowsQ.join("")}`;
   } else if (b.btype === "forge") {
     return `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
       <div class="tt-row"><span>⛓ Fer stocké</span><span>${b.iron ?? 0}</span></div>
@@ -1542,7 +1595,7 @@ canvas.addEventListener("mousemove", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : closest.cargo[1] + " pierre"} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
@@ -1583,7 +1636,9 @@ canvas.addEventListener("mousemove", (ev) => {
       } else if (closestB.btype === "market") {
         html = `<b style="color:${cColor}">🏪 Marché — ${cLabel}</b>
           <div class="tt-row"><span>🪵</span><span>${closestB.wood ?? 0}</span></div>
-          <div class="tt-row"><span>🪨</span><span>${closestB.stone ?? 0}</span></div>`;
+          <div class="tt-row"><span>🪨</span><span>${closestB.stone ?? 0}</span></div>
+          ${(closestB.rs ?? 0) > 0 ? `<div class="tt-row"><span>Cours 🪨</span><span>${closestB.rs}</span></div>` : ""}
+          ${(closestB.ri ?? 0) > 0 ? `<div class="tt-row"><span>Cours ⛓</span><span>${closestB.ri}</span></div>` : ""}`;
       } else if (closestB.btype === "forge") {
         html = `<b style="color:${cColor}">⚒ Forge — ${cLabel}</b>
           <div class="tt-row"><span>⛓ Fer</span><span>${closestB.iron ?? 0}</span></div>`;
@@ -1806,7 +1861,7 @@ canvas.addEventListener("touchend", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT2 ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT2 ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
-      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : closest.cargo[1] + " pierre"} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
+      ${closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>
       <div class="tt-row"><span>Faim</span><span>${closest.h.toFixed(0)} / 100</span></div>
       <div class="tt-row"><span>Soif</span><span>${(closest.th ?? 0).toFixed(0)} / 100</span></div>
