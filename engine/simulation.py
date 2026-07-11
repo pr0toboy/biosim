@@ -2401,7 +2401,11 @@ class Simulation:
         self.world.regen_iron()   # bloc B : régen lente des gisements de fer
         # Fertilité : DIRT → GRASS (regen lente), GRASS → DIRT collecté depuis consume_fertility
         biome_changes = self.world.regen_fertility(self.raining, season)
-        biome_changes += self.world.drain_biome_changes()
+        # NB : les bascules GRASS→DIRT du PIÉTINEMENT (buffer _biome_changes) sont
+        # drainées en FIN de tick (après la phase entités), pas ici — sinon le
+        # buffer porte un état inter-ticks invisible de la sauvegarde : un événement
+        # en attente au moment du save était PERDU au rechargement → le replay
+        # byte-à-byte divergeait (bug trouvé par bisection à t=5081, endurance 20k).
 
         # Mélange pour éviter les biais d'ordre
         random.shuffle(self.entities)
@@ -2685,6 +2689,10 @@ class Simulation:
             self.stats_history = self.stats_history[-300:]
 
         # Arbres abattus et roches minées ce tick (collectés depuis world)
+        # Drain du piétinement DU TICK MÊME (cf. note près de regen_fertility) :
+        # aucun buffer d'événements ne survit à la frontière du tick → un save en
+        # fin de tick capture TOUT l'état observable, le replay reste byte-à-byte.
+        biome_changes += self.world.drain_biome_changes()
         for _cx, _cy in self.world._chop_changes:
             tree_changes.append({"x": _cx, "y": _cy, "stump": True})
         for _cx, _cy in self.world._mine_changes:

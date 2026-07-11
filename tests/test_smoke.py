@@ -45,6 +45,12 @@ def test_smoke_runs(ticks: int = 400, seed: int = 12345):
                 counts[e.etype] = counts.get(e.etype, 0) + 1
             for et, c in counts.items():
                 assert c <= MAX_PER_SPECIES, f"{et} dépasse le cap: {c} > {MAX_PER_SPECIES}"
+            # Invariant persistance : AUCUN buffer d'événements en attente à la
+            # frontière du tick (sinon un save perd des événements → replay divergent,
+            # bug bisecté à t=5081 sur l'endurance 20k)
+            assert sim.world._biome_changes == [], f"biome buffer non drainé: {sim.world._biome_changes}"
+            assert sim.world._chop_changes == [], "chop buffer non drainé"
+            assert sim.world._mine_changes == [], "mine buffer non drainé"
             # clés to_dict
             if sim.entities:
                 d = sim.entities[0].to_dict()
