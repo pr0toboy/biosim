@@ -363,6 +363,54 @@ def test_e2_female_seeks_distant_mate():
     print(f"  test_e2_female_seeks_distant_mate OK (SEEKING_MATE, dist {d0:.2f} → {d1:.2f})")
 
 
+def test_e_boar_hunts_and_captures_prey():
+    """Régression bloc E : un sanglier affamé (hunger 40, entre son hunt_hunger=28 et
+    l'ancien seuil 55) avec une proie EN VISION la traque (HUNTING) et la capture si
+    adjacente — au lieu de brouter avant d'avoir jamais assez faim pour chasser. C'est
+    ce qui rend la prédation terrestre RÉELLE et visible (cosmétique en baseline : ~2
+    kills/4000 ticks, ~400 à hunt_hunger=28)."""
+    from engine.entities import State
+    world = World(width=120, height=90, seed=7)
+    tx, ty = _find_land_tile(world)
+    boar  = spawn(EntityType.BOAR, tx + 0.1, ty + 0.1, Sex.MALE)
+    sheep = spawn(EntityType.SHEEP, tx + 0.4, ty + 0.4, Sex.FEMALE)   # dist ~0.42 < catch_r 0.8
+    assert boar.spec.hunt_hunger == 28.0, "le sanglier doit avoir un seuil de chasse abaissé (bloc E)"
+    boar.hunger = 40.0    # > 28 (chasse) ET > 30 (broutage) : sans le bloc E il brouterait
+    boar.thirst = 10.0
+    counts = {"sheep": 100}   # bien au-dessus du plancher de préservation (30)
+
+    tick_entity(boar, world, [boar, sheep], [], [], tick=1, season="spring",
+                species_counts=counts)
+
+    assert boar.state == State.HUNTING, f"le sanglier n'a pas chassé (état {boar.state})"
+    assert not sheep.alive, "la proie adjacente aurait dû être capturée"
+    assert counts["sheep"] == 99, "le compteur vivant doit décrémenter au kill (anti-sur-chasse)"
+    print("  test_e_boar_hunts_and_captures_prey OK (HUNTING + capture, compteur décrémenté)")
+
+
+def test_e_hunt_preserves_prey_below_floor():
+    """Régression bloc E : le plancher anti-extinction PAR LA CHASSE (garde
+    species_counts[proie] < 30) tient malgré le seuil de chasse abaissé. Une proie dont
+    l'espèce est sous 30 n'est jamais chassée → la prédation ne peut pas éteindre une
+    espèce déjà rare (le rebond démographique reste au filet E2)."""
+    from engine.entities import State
+    world = World(width=120, height=90, seed=7)
+    tx, ty = _find_land_tile(world)
+    boar  = spawn(EntityType.BOAR, tx + 0.1, ty + 0.1, Sex.MALE)
+    sheep = spawn(EntityType.SHEEP, tx + 0.4, ty + 0.4, Sex.FEMALE)
+    boar.hunger = 40.0
+    boar.thirst = 10.0
+    counts = {"sheep": 29}   # sous le plancher → chasse interdite
+
+    tick_entity(boar, world, [boar, sheep], [], [], tick=1, season="spring",
+                species_counts=counts)
+
+    assert sheep.alive, "une proie sous le plancher (29 < 30) ne doit pas être chassée"
+    assert boar.state != State.HUNTING, f"le sanglier ne devait pas chasser (état {boar.state})"
+    assert counts["sheep"] == 29, "le compteur ne doit pas bouger (aucun kill)"
+    print("  test_e_hunt_preserves_prey_below_floor OK (plancher <30 tenu)")
+
+
 def _find_walkable_row_segment(world, length):
     """Un segment horizontal de `length+1` tuiles terrestres consécutives →
     route de caravane garantie marchable en ligne droite."""
@@ -1116,6 +1164,8 @@ if __name__ == "__main__":
                test_preservation_live_counter, test_water_stranded_entity_rescued,
                test_c1bis_toolless_human_crafts_without_depositing,
                test_e2_female_seeks_distant_mate,
+               test_e_boar_hunts_and_captures_prey,
+               test_e_hunt_preserves_prey_below_floor,
                test_c2_hungry_harvester_eats_not_feeds_mill,
                test_a1_clan_gains_science_and_ages_up,
                test_b_forge_upgrades_stone_tools_to_iron,

@@ -451,6 +451,7 @@ let buildings       = [];        // [{id, clan_id, x, y, btype}, ...]
 let paused          = false;
 let currentTick  = 0;
 let bellRings    = [];   // anneaux d'onde des cloches (C1) : {x, y, age}
+let huntFlashes  = [];   // éclats de capture (bloc E) : {x, y, age} — un prédateur tue une proie
 let currentSeason = "spring";
 let currentTemp  = null;
 let currentRain     = false;
@@ -862,6 +863,23 @@ function drawAll() {
     ctx.strokeStyle = `rgba(174,214,241,${Math.max(0, 1 - r.age / 40)})`;
     ctx.lineWidth = Math.max(1, T * 0.08);
     ctx.stroke();
+  });
+  // Éclats de capture (bloc E) : bref flash rouge + éclaboussure au point du kill (~10 ticks)
+  huntFlashes = huntFlashes.filter(f => f.age < 10);
+  huntFlashes.forEach(f => {
+    f.age++;
+    const a = Math.max(0, 1 - f.age / 10);
+    const px = (f.x + 0.5) * T, py = (f.y + 0.5) * T;
+    ctx.strokeStyle = `rgba(220,38,38,${a})`;
+    ctx.lineWidth = Math.max(1, T * 0.12);
+    for (let i = 0; i < 6; i++) {
+      const ang = i * Math.PI / 3;
+      const r0 = T * 0.2, r1 = T * (0.35 + f.age * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(px + Math.cos(ang) * r0, py + Math.sin(ang) * r0);
+      ctx.lineTo(px + Math.cos(ang) * r1, py + Math.sin(ang) * r1);
+      ctx.stroke();
+    }
   });
 
   // Feux de camp (buildings de type campfire)
@@ -1332,6 +1350,10 @@ const SILENT_EVENTS = new Set([
 ]);
 
 function addEvent(ev) {
+  // Éclat de capture sur la carte (bloc E) : les kills restent SILENCIEUX dans le feed
+  // (trop fréquents depuis le réveil des prédateurs) mais deviennent un spectacle spatial
+  // éphémère. Traité AVANT le filtre SILENT_EVENTS (qui écarte "kill" du log texte).
+  if (ev.type === "kill") huntFlashes.push({ x: ev.x, y: ev.y, age: 0 });
   if (SILENT_EVENTS.has(ev.type)) return;
   const log = document.getElementById("event-log");
   const div = document.createElement("div");

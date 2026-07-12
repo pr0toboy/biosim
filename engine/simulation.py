@@ -1292,8 +1292,10 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
     if not spec.aquatic and entity.thirst > 70:
         if _drink_or_seek_water(entity, world, events, buildings, cb=_cb):
             return True
-    # 2. Chasse (prédateurs)
-    if spec.is_predator and entity.hunger > 55:
+    # 2. Chasse (prédateurs) — seuil par espèce (bloc E). Défaut 55 (comportement
+    # historique) ; le sanglier chasse dès ~28 (< broutage 30) → prédation réelle
+    # et VISIBLE, au lieu de brouter avant d'avoir jamais assez faim pour chasser.
+    if spec.is_predator and entity.hunger > spec.hunt_hunger:
         for prey_type in spec.prey_types:
             # Préserve les proies si leur population est trop basse
             if (species_counts or {}).get(prey_type.value, 0) < 30:

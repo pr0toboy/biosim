@@ -73,6 +73,12 @@ class EntitySpec:
     aquatic: bool = False   # vit dans l'eau (se déplace sur tuiles WATER)
     hitbox_width:  int = 1  # largeur hitbox en tuiles  (numpy distances si > 1)
     hitbox_height: int = 1  # hauteur hitbox en tuiles  (numpy distances si > 1)
+    # ── Prédation (bloc E) ──────────────────────────────────────────────────
+    # Seuil de faim à partir duquel un prédateur CHASSE au lieu de brouter. Défaut 55
+    # = comportement historique. Le rendre < eat_amount-threshold (~30) rend l'espèce
+    # carnivore effective : elle traque une proie en vision avant de pouvoir se rabattre
+    # sur les plantes (l'ordre de la cascade _beh_survival teste déjà la chasse d'abord).
+    hunt_hunger: float = 55.0
     # ── Capacités spéciales ─────────────────────────────────────────────────
     can_chop: bool  = False  # peut abattre des arbres
     can_mine: bool  = False  # peut miner la pierre
@@ -176,7 +182,8 @@ SPECS: dict[EntityType, EntitySpec] = {
         eat_amount=8, eat_meat=50, speed=1.2, vision=8,
         repro_hunger_min=35, repro_cooldown=140, gestation=50, litter_size=(1, 3),
         flee_distance=0,
-    ),
+        hunt_hunger=28.0,   # bloc E : chasseur effectif (< seuil de broutage 30) — traque
+    ),                       # moutons/cochons dès qu'il a faim, au lieu de brouter. Calibré.
     EntityType.CHICKEN: EntitySpec(
         name="chicken", color="#f39c12",
         is_predator=False, is_prey=True,
