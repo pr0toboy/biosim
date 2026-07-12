@@ -115,7 +115,9 @@ async def simulation_loop():
     consecutive_errors = 0
     loop = asyncio.get_running_loop()
     while True:
-        if sim_running and clients:
+        # La sim avance qu'il y ait des spectateurs ou non : le monde vit et s'écrit
+        # tout seul (chronique, autosave). Seul le broadcast dépend des clients.
+        if sim_running:
             try:
                 # step() est offloadé dans un thread : un tick long (forte population)
                 # ne gèle plus l'event-loop → WS, API et nouvelles connexions restent
@@ -135,8 +137,10 @@ async def simulation_loop():
             consecutive_errors = 0
             # dumps + broadcast HORS du verrou : `data` est un snapshot de primitifs,
             # inutile de bloquer les ticks/full_state pendant la sérialisation + I/O réseau.
-            msg = json.dumps({"type": "tick", "data": data})
-            await _broadcast(msg)
+            # Sans client, on saute aussi la sérialisation (pur gaspillage CPU).
+            if clients:
+                msg = json.dumps({"type": "tick", "data": data})
+                await _broadcast(msg)
             # Autosave optionnel : snapshot sous verrou (pas de step concurrent),
             # écriture disque hors verrou (I/O) → ne fige pas la boucle.
             if AUTOSAVE_TICKS and data["tick"] % AUTOSAVE_TICKS == 0:
@@ -169,7 +173,10 @@ async def startup():
     if LOAD_ON_START and os.path.exists(SAVE_PATH):
         try:
             sim.load(SAVE_PATH)
-            print(f"[biosim] état rechargé depuis {SAVE_PATH} (tick {sim.tick_count})")
+            # flush : sous systemd stdout est bufferisé par blocs → sans flush ce
+            # print peut apparaître dans le journal minutes après le chargement réel.
+            print(f"[biosim] état rechargé depuis {SAVE_PATH} (tick {sim.tick_count})",
+                  flush=True)
         except Exception:
             traceback.print_exc()
     # Garder la ref (sinon le GC peut ramasser la task en plein vol) + callback de
@@ -177,6 +184,26 @@ async def startup():
     task = asyncio.create_task(simulation_loop())
     task.add_done_callback(_sim_task_done)
     app.state.sim_task = task
+
+
+@app.on_event("shutdown")
+async def shutdown_save():
+    """Arrêt propre (SIGTERM systemd : restart, reboot) : sauvegarde l'état pour ne
+    pas perdre jusqu'à AUTOSAVE_TICKS ticks de monde. On prend le verrou AVANT
+    d'annuler la task : un step en cours se termine d'abord, et la task annulée ne
+    peut plus muter l'état pendant le snapshot (elle bloquerait sur ce même verrou).
+    `_sim_task_done` ignore une task annulée → pas d'os._exit(1) sur ce chemin."""
+    task = getattr(app.state, "sim_task", None)
+    snap = None
+    async with state_lock:
+        if task is not None:
+            task.cancel()
+        if AUTOSAVE_TICKS:  # persistance active seulement (défaut inchangé : rien)
+            snap = sim.save_state()
+    if snap is not None:
+        await asyncio.get_running_loop().run_in_executor(None, _write_save, snap)
+        print(f"[biosim] état sauvegardé à l'arrêt (tick {snap['tick_count']})",
+              flush=True)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
