@@ -1262,6 +1262,84 @@ def test_harden_entity_traits_copy():
     print("  test_harden_entity_traits_copy OK (traits copiés to_state + from_state)")
 
 
+def test_infinite_run(ticks: int = 1500, seed: int = 424242):
+    """J3 durcissement (audit #6) : le SEUL test automatisé de l'invariant #1
+    (« tourne à l'infini »). Run headless moyen avec assertions à échantillons :
+      - 0 exception (le monde ne crashe pas) ;
+      - AUCUNE espèce TERRESTRE éteinte (les 7 hors eau restent >= 1 ; requins/poissons
+        aquatiques exclus = fluctuation préexistante hors scope, cf. bloc E) ;
+      - pas d'explosion (total <= 9 espèces x MAX_PER_SPECIES) ;
+      - le monde reste vivable (arbres debout > 0) ;
+      - le monde est DYNAMIQUE (pop finale > pop initiale → ni gelé ni effondré).
+    L'endurance réelle (20k+) reste détachée (wake-on-exit) pour les gros changements ;
+    ici on veut un filet rapide qui casse le build si l'invariant #1 saute franchement.
+
+    NON-FLAKY malgré l'exécution IN-PROCESS (pas de sous-processus, contrairement aux
+    goldens) : les ids d'entités sont pollués par les tests d'avant (compteur _next_id
+    global), MAIS (a) les assertions ne portent QUE sur des comptes (pop, espèces, arbres),
+    jamais sur des valeurs d'id ; (b) la trajectoire de pop est invariante à ce décalage —
+    les usages comportementaux de l'id sont des tie-breaks d'ORDRE (min(…, (dist, e.id)))
+    préservés par un décalage uniforme, et World(seed) re-seede les RNG. ⚠ Si un futur
+    moteur rendait le comportement dépendant de la VALEUR d'un id (pas juste de l'ordre),
+    cette invariance tomberait → il faudrait alors isoler ce test en sous-processus."""
+    from engine.world import TREE_STUMP_THRESHOLD
+    from engine.entities import EntityType
+    aquatic = {EntityType.FISH.value, EntityType.SHARK.value}
+    terrestrial = [t.value for t in EntityType if t.value not in aquatic]
+    ceiling = len(list(EntityType)) * MAX_PER_SPECIES
+
+    world = World(width=140, height=100, seed=seed)
+    sim = Simulation(world)
+    sim.populate()
+    pop0 = len(sim.entities)
+
+    last = None
+    for i in range(ticks):
+        sim.step()                                   # une exception ici = échec du test
+        if i % 50 == 0:
+            st = sim._compute_stats()["populations"]
+            for sp in terrestrial:
+                assert st[sp] >= 1, f"espèce terrestre {sp} ÉTEINTE au tick {i} (invariant #1)"
+            total = sum(st.values())
+            assert total <= ceiling, f"explosion pop {total} > {ceiling} au tick {i}"
+            standing = int(((world.tree_grid >= TREE_STUMP_THRESHOLD)
+                            & world._forest_mask).sum())
+            assert standing > 0, f"plus aucun arbre debout au tick {i} (monde stérile)"
+            last = total
+    assert last is not None and last > pop0, \
+        f"monde gelé/effondré : pop finale {last} <= initiale {pop0}"
+    print(f"  test_infinite_run OK ({ticks} ticks, pop {pop0}→{last}, "
+          f"7 espèces terrestres vivantes, 0 crash)")
+
+
+def test_determinism_golden():
+    """J1 durcissement (audit #4) : l'invariant #2 (déterminisme seedé) devient une
+    FAILLE DE TEST, plus un print à l'œil non automatisé. Exécute le guard en
+    SOUS-PROCESSUS (process frais → _next_id=0, exactement le contexte sous lequel le
+    golden a été produit) et exige exit 0 (hash == golden versionné dans le guard)."""
+    import subprocess
+    guard = os.path.join(os.path.dirname(os.path.abspath(__file__)), "determinism_guard.py")
+    r = subprocess.run([sys.executable, guard], capture_output=True, text=True)
+    assert r.returncode == 0, (
+        "golden déterministe cassé (invariant #2) :\n"
+        f"  stdout: {r.stdout.strip()}\n  stderr: {r.stderr.strip()}")
+    print(f"  test_determinism_golden OK ({r.stdout.strip()})")
+
+
+def test_determinism_civ_golden():
+    """J2 durcissement (audit #5/#18/#25/#31) : golden CIV (Âge Acier) sous le gate
+    déterministe → forge / marché / église / or / commerce / pèlerinage (les ~2000
+    lignes de moteur qu'un run Âge-Bois n'atteint jamais) deviennent REPRODUCTIBLES.
+    Exécute le guard `--civ` en SOUS-PROCESSUS (process frais) et exige exit 0."""
+    import subprocess
+    guard = os.path.join(os.path.dirname(os.path.abspath(__file__)), "determinism_guard.py")
+    r = subprocess.run([sys.executable, guard, "--civ"], capture_output=True, text=True)
+    assert r.returncode == 0, (
+        "golden CIV cassé (invariant #2, systèmes avancés) :\n"
+        f"  stdout: {r.stdout.strip()}\n  stderr: {r.stderr.strip()}")
+    print(f"  test_determinism_civ_golden OK ({r.stdout.strip()})")
+
+
 def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
     """Persistance : (1) round-trip sans perte (état identique après load) ;
     (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
@@ -1303,37 +1381,48 @@ def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, see
 
 
 if __name__ == "__main__":
+    # Tests unitaires rapides (comportement) + le golden BASE : toujours joués.
+    FAST = (test_deposit_no_crash_when_houses_full,
+            test_preservation_live_counter, test_water_stranded_entity_rescued,
+            test_c1bis_toolless_human_crafts_without_depositing,
+            test_e2_female_seeks_distant_mate,
+            test_e_boar_hunts_and_captures_prey,
+            test_e_hunt_preserves_prey_below_floor,
+            test_c2_hungry_harvester_eats_not_feeds_mill,
+            test_a1_clan_gains_science_and_ages_up,
+            test_b_forge_upgrades_stone_tools_to_iron,
+            test_d1_caravan_roundtrip_conserves_resources,
+            test_d1_no_trade_without_complementary_surplus,
+            test_d1_dest_ruined_merchant_returns_and_replay,
+            test_d2_iron_for_stone_roundtrip_conserves,
+            test_d2_no_flip_and_refusal,
+            test_d2_price_board_and_replay,
+            test_c1_office_procession_blessing_and_hunger,
+            test_c1_pilgrimage_pays_offering_and_conserves,
+            test_c1_dest_ruined_and_replay,
+            test_c2_gold_mine_deposit_hysteresis,
+            test_c2_gold_offering_circulates_and_conserves,
+            test_c2_dest_ruined_gold_recredit_and_replay,
+            test_k_chronicle_records_and_persists,
+            test_e8_dead_clan_leaves_ruins_then_fade,
+            test_harden_load_state_transactional,
+            test_harden_from_state_bounds,
+            test_harden_load_rejects_nan,
+            test_harden_save_state_chronicle_copy,
+            test_harden_entity_traits_copy,
+            test_determinism_golden,
+            test_save_load_roundtrip_and_resume,
+            test_smoke_runs)
+    # Tests lourds (~90 s cumulés) : endurance invariant #1 + golden CIV Âge-Acier.
+    # Sautés en `--fast` (itération rapide) ; joués par défaut (filet complet).
+    HEAVY = (test_infinite_run, test_determinism_civ_golden)
+
+    fast = "--fast" in sys.argv
+    tests = FAST if fast else FAST + HEAVY
+    if fast:
+        print(f"[--fast] {len(HEAVY)} test(s) lourd(s) sautés (endurance + golden CIV)")
     failures = 0
-    for fn in (test_deposit_no_crash_when_houses_full,
-               test_preservation_live_counter, test_water_stranded_entity_rescued,
-               test_c1bis_toolless_human_crafts_without_depositing,
-               test_e2_female_seeks_distant_mate,
-               test_e_boar_hunts_and_captures_prey,
-               test_e_hunt_preserves_prey_below_floor,
-               test_c2_hungry_harvester_eats_not_feeds_mill,
-               test_a1_clan_gains_science_and_ages_up,
-               test_b_forge_upgrades_stone_tools_to_iron,
-               test_d1_caravan_roundtrip_conserves_resources,
-               test_d1_no_trade_without_complementary_surplus,
-               test_d1_dest_ruined_merchant_returns_and_replay,
-               test_d2_iron_for_stone_roundtrip_conserves,
-               test_d2_no_flip_and_refusal,
-               test_d2_price_board_and_replay,
-               test_c1_office_procession_blessing_and_hunger,
-               test_c1_pilgrimage_pays_offering_and_conserves,
-               test_c1_dest_ruined_and_replay,
-               test_c2_gold_mine_deposit_hysteresis,
-               test_c2_gold_offering_circulates_and_conserves,
-               test_c2_dest_ruined_gold_recredit_and_replay,
-               test_k_chronicle_records_and_persists,
-               test_e8_dead_clan_leaves_ruins_then_fade,
-               test_harden_load_state_transactional,
-               test_harden_from_state_bounds,
-               test_harden_load_rejects_nan,
-               test_harden_save_state_chronicle_copy,
-               test_harden_entity_traits_copy,
-               test_save_load_roundtrip_and_resume,
-               test_smoke_runs):
+    for fn in tests:
         try:
             fn()
         except Exception as e:
