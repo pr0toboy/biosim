@@ -9,6 +9,7 @@ import asyncio
 import json
 import sys
 import os
+import threading
 import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -77,15 +78,33 @@ AUTOSAVE_TICKS  = int(os.environ.get("BIOSIM_AUTOSAVE_TICKS", "0"))  # 0 = autos
 LOAD_ON_START   = bool(os.environ.get("BIOSIM_LOAD_ON_START"))       # charge SAVE_PATH au boot
 
 
+_save_lock = threading.Lock()
+
+
 def _write_save(snap: dict):
-    """Écrit le snapshot JSON de façon atomique + rotation 1 niveau (.prev) :
-    si l'écriture du nouveau save était corrompue en amont, le précédent survit."""
-    tmp = SAVE_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(snap, f, separators=(",", ":"))
-    if os.path.exists(SAVE_PATH):
-        os.replace(SAVE_PATH, SAVE_PATH + ".prev")
-    os.replace(tmp, SAVE_PATH)
+    """Écrit le snapshot JSON de façon atomique, crash-safe et sérialisée (durcissement I3,
+    audit #13/#21/#50).
+    - Verrou : autosave, POST /api/save et le save d'arrêt visent tous le disque via
+      l'executor → sans lock, deux écrivains entrelacent leurs écritures et se disputent la
+      rotation .prev, corrompant save.json.
+    - tmp UNIQUE par process (le .tmp fixe partagé était le vecteur de corruption).
+    - fsync du fichier PUIS du répertoire → survit à une coupure d'alim (sinon os.replace peut
+      précéder le flush des données sur disque = save.json vide au prochain boot).
+    - rotation .prev : le save précédent reste récupérable."""
+    with _save_lock:
+        tmp = f"{SAVE_PATH}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(snap, f, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(SAVE_PATH):
+            os.replace(SAVE_PATH, SAVE_PATH + ".prev")
+        os.replace(tmp, SAVE_PATH)
+        dfd = os.open(os.path.dirname(SAVE_PATH) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dfd)          # durabilité du rename lui-même
+        finally:
+            os.close(dfd)
 
 
 # ── Loop de simulation (tourne en arrière-plan) ─────────────────────────────
@@ -167,18 +186,46 @@ def _sim_task_done(task: "asyncio.Task"):
     os._exit(1)
 
 
+def _save_is_valid(path: str, probe_ticks: int = 3) -> bool:
+    """Charge `path` dans une sim JETABLE et fait quelques steps de sonde. False si le
+    chargement OU un step lève (durcissement I4, audit #33/#35). Sans ça, un save
+    empoisonné/corrompu était rejoué tel quel à chaque restart → même crash → StartLimit
+    fige le service en mort DÉFINITIVE. La sonde attrape le crash au rechargement AVANT
+    d'engager la vraie boucle, ce qui autorise un repli sur .prev (ou un monde neuf)."""
+    try:
+        from engine.world import World as _W
+        probe = Simulation(_W(width=2, height=2))
+        probe.load(path)
+        for _ in range(probe_ticks):
+            probe.step()
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
 @app.on_event("startup")
 async def startup():
-    # Reprise optionnelle depuis un save au démarrage (défaut : monde neuf).
-    if LOAD_ON_START and os.path.exists(SAVE_PATH):
-        try:
-            sim.load(SAVE_PATH)
-            # flush : sous systemd stdout est bufferisé par blocs → sans flush ce
-            # print peut apparaître dans le journal minutes après le chargement réel.
-            print(f"[biosim] état rechargé depuis {SAVE_PATH} (tick {sim.tick_count})",
+    # Reprise optionnelle depuis un save au démarrage, AVEC repli anti-crash-loop (I4).
+    # On valide chaque candidat sur une sonde jetable ; sim.load ne s'applique qu'à un
+    # save prouvé sain → un save empoisonné ne peut plus tuer le service en boucle.
+    if LOAD_ON_START:
+        loaded_from = None
+        for candidate in (SAVE_PATH, SAVE_PATH + ".prev"):
+            if not os.path.exists(candidate):
+                continue
+            if _save_is_valid(candidate):
+                sim.load(candidate)   # déjà validé sur une sonde → chargement sûr
+                loaded_from = candidate
+                break
+            print(f"[biosim] save '{candidate}' INVALIDE (échec chargement/sonde) → repli",
                   flush=True)
-        except Exception:
-            traceback.print_exc()
+        if loaded_from:
+            # flush : sous systemd stdout est bufferisé → sinon le print traîne dans le journal.
+            print(f"[biosim] état rechargé depuis {loaded_from} (tick {sim.tick_count})",
+                  flush=True)
+        else:
+            print("[biosim] aucun save valide → démarrage d'un monde neuf", flush=True)
     # Garder la ref (sinon le GC peut ramasser la task en plein vol) + callback de
     # fin qui fait redémarrer le process si la boucle meurt (B1).
     task = asyncio.create_task(simulation_loop())

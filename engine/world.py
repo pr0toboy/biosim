@@ -8,6 +8,12 @@ from collections import deque
 import numpy as np
 from enum import IntEnum
 
+# Bornes défensives de chargement (durcissement I2, audit #16) : un save corrompu ou
+# forgé (dimensions aberrantes / grille géante) ne doit pas provoquer d'OOM au boot —
+# c'est un risque pour l'invariant « tourne à l'infini » (LOAD_ON_START rejouerait).
+_MAX_DIM        = 4096                 # dimension max d'un monde chargé
+_MAX_GRID_CELLS = _MAX_DIM * _MAX_DIM  # cellules max d'une grille chargée
+
 
 def _grid_to_b64(arr: np.ndarray) -> dict:
     """Encode une grille numpy en base64 (compact + sans perte) pour la sauvegarde."""
@@ -16,8 +22,24 @@ def _grid_to_b64(arr: np.ndarray) -> dict:
 
 
 def _grid_from_b64(d: dict) -> np.ndarray:
-    a = np.frombuffer(base64.b64decode(d["b64"]), dtype=np.dtype(d["dtype"]))
-    return a.reshape(d["shape"]).copy()
+    """Décode une grille base64. Durci (I2) : valide la forme et borne la taille AVANT
+    de décoder (b64decode alloue la mémoire brute) → un save forgé lève proprement au
+    lieu de faire exploser la RAM."""
+    shape = tuple(int(s) for s in d["shape"])
+    cells = 1
+    for s in shape:
+        if s < 0:
+            raise ValueError(f"forme de grille invalide: {shape}")
+        cells *= s
+    if cells > _MAX_GRID_CELLS:
+        raise ValueError(f"grille trop grande: {cells} cellules > {_MAX_GRID_CELLS}")
+    b64 = d["b64"]
+    if len(b64) > cells * 16 + 64:   # borne la chaîne AVANT le décodage (anti-OOM)
+        raise ValueError("chaîne base64 incohérente avec la forme (trop longue)")
+    a = np.frombuffer(base64.b64decode(b64), dtype=np.dtype(d["dtype"]))
+    if a.size != cells:
+        raise ValueError(f"buffer de {a.size} éléments incohérent avec la forme {shape}")
+    return a.reshape(shape).copy()
 
 class Biome(IntEnum):
     WATER   = 0
@@ -620,7 +642,13 @@ class World:
 
     @classmethod
     def from_state(cls, d: dict) -> "World":
-        w = cls(width=d["width"], height=d["height"], seed=d["seed"])
+        # Durcissement I2 (audit #16) : borner les dimensions AVANT d'allouer quoi que
+        # ce soit → un save aux dims aberrantes lève au lieu de saturer la RAM.
+        width, height = d["width"], d["height"]
+        if not (isinstance(width, int) and isinstance(height, int)
+                and 1 <= width <= _MAX_DIM and 1 <= height <= _MAX_DIM):
+            raise ValueError(f"dimensions de save hors bornes: {width}x{height}")
+        w = cls(width=width, height=height, seed=d["seed"])
         w.biome_grid     = _grid_from_b64(d["biome_grid"])
         w.food_grid      = _grid_from_b64(d["food_grid"])
         w.tree_grid      = _grid_from_b64(d["tree_grid"])

@@ -1118,6 +1118,150 @@ def test_k_chronicle_records_and_persists():
           f"({len(sim.chronicle)} entrée(s), round-trip identique)")
 
 
+def test_harden_load_state_transactional():
+    """I1 durcissement persistance : un load_state qui ÉCHOUE (save corrompu) laisse
+    la sim vivante ET les RNG globaux INTACTS. Avant, load_state mutait self champ par
+    champ → une erreur en cours laissait un world neuf collé à de vieux clans + RNG
+    perturbé (état hybride corrompu, replay cassé)."""
+    import random as _r
+    import numpy as _np
+    import copy as _copy
+    sim = Simulation(World(width=60, height=45, seed=3))
+    sim.populate()
+    for _ in range(30):
+        sim.step()
+    good = sim.save_state()
+    w0, t0, n0, eid0 = sim.world, sim.tick_count, len(sim.entities), id(sim.entities)
+    py_before = _r.getstate()
+    np_before = _np.random.get_state()
+
+    bad = dict(good); del bad["np_random_state"]   # save corrompu → erreur en phase 1
+    raised = False
+    try:
+        sim.load_state(bad)
+    except KeyError:
+        raised = True
+    assert raised, "load_state aurait dû lever sur un save corrompu"
+
+    # état vivant intact (identité d'objet → aucune mutation partielle)
+    assert sim.world is w0, "world muté malgré l'échec du load"
+    assert sim.tick_count == t0, "tick muté malgré l'échec"
+    assert len(sim.entities) == n0 and id(sim.entities) == eid0, "entities mutées malgré l'échec"
+    # RNG globaux restaurés → reprise exacte préservée
+    py_after = _r.getstate()
+    np_after = _np.random.get_state()
+    assert py_after == py_before, "RNG python perturbé par un load raté"
+    assert (np_after[1].tolist() == np_before[1].tolist() and np_after[2] == np_before[2]), \
+        "RNG numpy perturbé par un load raté"
+
+    # F2 (gate) : état RNG de mauvaise longueur → rejet en PHASE 1 (dry-run setstate sur un
+    # générateur jetable) → pas de commit partiel. Avant, setstate levait en phase 2 (après
+    # le remplacement de self) = RNG hybride.
+    bad_rng = _copy.deepcopy(good)
+    bad_rng["py_random_state"] = [3, [1, 2, 3], None]
+    raised = False
+    try:
+        sim.load_state(bad_rng)
+    except (ValueError, TypeError):
+        raised = True
+    assert raised, "état RNG invalide non rejeté (F2)"
+    assert sim.world is w0 and sim.tick_count == t0, "sim mutée par un RNG invalide (F2)"
+
+    # F3 (gate) : compteur d'id non entier → rejet en phase 1 (sinon TypeError différé au 1er spawn)
+    bad_ctr = _copy.deepcopy(good)
+    bad_ctr["entity_id_counter"] = "1000"
+    raised = False
+    try:
+        sim.load_state(bad_ctr)
+    except ValueError:
+        raised = True
+    assert raised, "compteur d'id non entier non rejeté (F3)"
+    assert sim.world is w0 and sim.tick_count == t0, "sim mutée par un compteur invalide (F3)"
+
+    # un load VALIDE marche toujours (non-régression)
+    sim.load_state(good)
+    assert sim.tick_count == t0
+    print("  test_harden_load_state_transactional OK (sim + RNG intacts ; F2/F3 rejetés)")
+
+
+def test_harden_from_state_bounds():
+    """I2 durcissement (audit #16) : un save aux dimensions aberrantes lève PROPREMENT
+    au chargement au lieu de saturer la RAM (OOM au boot = crash-loop LOAD_ON_START)."""
+    import copy as _copy
+    sim = Simulation(World(width=50, height=40, seed=1))
+    sim.populate()
+    good = sim.save_state()
+    bad = _copy.deepcopy(good)
+    bad["world"]["width"] = 10 ** 9          # dimension géante
+    raised = False
+    try:
+        Simulation(World(width=10, height=10, seed=1)).load_state(bad)
+    except ValueError:
+        raised = True
+    assert raised, "dimensions géantes non rejetées (risque OOM)"
+    print("  test_harden_from_state_bounds OK (dims aberrantes rejetées)")
+
+
+def test_harden_load_rejects_nan():
+    """I2 durcissement (audit #64) : json.load accepte NaN/Infinity par défaut → un save
+    empoisonné passerait puis crasherait step() plus tard. On rejette au parsing."""
+    import tempfile, os as _os
+    path = tempfile.mktemp(suffix=".json")
+    try:
+        with open(path, "w") as f:
+            f.write('{"tick_count": NaN, "world": {}}')
+        raised = False
+        try:
+            Simulation(World(width=10, height=10, seed=1)).load(path)
+        except ValueError:
+            raised = True
+        assert raised, "NaN non rejeté au chargement"
+    finally:
+        if _os.path.exists(path):
+            _os.remove(path)
+    print("  test_harden_load_rejects_nan OK (NaN rejeté au parsing)")
+
+
+def test_harden_save_state_chronicle_copy():
+    """I5 durcissement (audit #89/#101) : save_state COPIE le chronicle → une mutation
+    après le snapshot ne le change pas (plus d'aliasing de la liste vivante, qui déchirait
+    le snapshot quand la sérialisation JSON avait lieu hors state_lock)."""
+    sim = Simulation(World(width=40, height=30, seed=5))
+    sim.populate()
+    sim.chronicle.append({"kind": "test", "tick": 1, "msg": "avant"})
+    snap = sim.save_state()
+    n_before = len(snap["chronicle"])
+    sim.chronicle.append({"kind": "test", "tick": 2, "msg": "apres"})   # mutation post-snapshot
+    sim.chronicle[0]["msg"] = "modifie"                                  # mutation d'un event
+    assert len(snap["chronicle"]) == n_before, "liste du snapshot aliasée (allongée)"
+    assert snap["chronicle"][0]["msg"] == "avant", "event du snapshot aliasé (muté)"
+    print("  test_harden_save_state_chronicle_copy OK (snapshot isolé des mutations)")
+
+
+def test_harden_entity_traits_copy():
+    """F1 durcissement (gate Arceus) : le dict traits est COPIÉ aux deux bouts de la
+    persistance. to_state() ne doit pas aliaser self.traits (muté en place par le clamp
+    anti-dérive à chaque tick → snapshot déchiré pendant le json.dump hors state_lock,
+    même classe que le chronicle I5). from_state() ne doit pas aliaser le dict de la save
+    (deux entités rechargées partageraient sinon le même dict traits)."""
+    from engine.entities import Entity, EntityType, Sex
+    e = spawn(EntityType.HUMAN, 5.0, 5.0, Sex.MALE)
+    e.clan_id = 0
+    snap = e.to_state()
+    speed_before = snap["traits"]["speed"]
+    e.traits["speed"] += 1.0                         # mutation en place (comme le clamp)
+    assert snap["traits"]["speed"] == speed_before, "to_state a aliasé self.traits (F1)"
+
+    # from_state : deux entités bâties depuis le MÊME dict ne partagent pas leurs traits
+    d = e.to_state()
+    a = Entity.from_state(d)
+    b = Entity.from_state(d)
+    a.traits["speed"] += 5.0
+    assert b.traits["speed"] != a.traits["speed"], "from_state partage le dict traits (F1)"
+    assert d["traits"]["speed"] != a.traits["speed"], "from_state aliase le dict de la save (F1)"
+    print("  test_harden_entity_traits_copy OK (traits copiés to_state + from_state)")
+
+
 def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, seed: int = 555):
     """Persistance : (1) round-trip sans perte (état identique après load) ;
     (2) reprise EXACTE — un sim rechargé rejoue byte-à-byte la suite de l'original
@@ -1183,6 +1327,11 @@ if __name__ == "__main__":
                test_c2_dest_ruined_gold_recredit_and_replay,
                test_k_chronicle_records_and_persists,
                test_e8_dead_clan_leaves_ruins_then_fade,
+               test_harden_load_state_transactional,
+               test_harden_from_state_bounds,
+               test_harden_load_rejects_nan,
+               test_harden_save_state_chronicle_copy,
+               test_harden_entity_traits_copy,
                test_save_load_roundtrip_and_resume,
                test_smoke_runs):
         try:

@@ -3426,38 +3426,87 @@ class Simulation:
             "entities": [e.to_state() for e in self.entities],
             "clans": [asdict(c) for c in self.clans],
             "buildings": [asdict(b) for b in self.buildings],
-            # Annales (bloc K) : l'histoire du monde survit aux reboots.
-            "chronicle": self.chronicle,
+            # Annales (bloc K) : l'histoire du monde survit aux reboots. COPIE (I5,
+            # audit #89/#101) : sans ça save_state aliase la liste vivante self.chronicle
+            # → sérialisée hors state_lock, un step() concurrent l'allongerait pendant le
+            # dump JSON (snapshot déchiré, viole le replay byte-à-byte).
+            "chronicle": [dict(c) for c in self.chronicle],
             "chronicle_seen": [list(k) for k in self._chronicle_seen],
         }
 
     def load_state(self, d: dict):
-        """Restaure un snapshot save_state(). Remplace intégralement l'état."""
+        """Restaure un snapshot save_state(). Remplace intégralement l'état.
+
+        TRANSACTIONNEL (I1 durcissement) : tout le nouvel état est construit dans des
+        variables LOCALES d'abord. Une clé manquante, un from_state qui lève ou un RNG
+        malformé fait partir l'exception AVANT toute mutation de `self` → la simulation
+        vivante reste intacte (avant, un load à moitié appliqué laissait un world neuf
+        collé à de vieux clans + RNG non restauré = état hybride corrompu, replay cassé)."""
         from .world import World
-        # World.from_state re-seed random/np dans __init__ → on restaure les RNG
-        # APRÈS, sinon la reprise repartirait sur le flux de la génération initiale.
-        self.world = World.from_state(d["world"])
-        self.tick_count = d["tick_count"]
-        self.raining = d["raining"]; self.storming = d["storming"]
-        self.rain_ticks_left = d["rain_ticks_left"]
-        self.heatwave = d["heatwave"]
-        self.heatwave_ticks_left = d["heatwave_ticks_left"]
-        self._next_building_id = d["_next_building_id"]
-        set_id_counter(d["entity_id_counter"])
-        self.entities = [Entity.from_state(e) for e in d["entities"]]
-        self.clans = [Clan(**c) for c in d["clans"]]
-        self.buildings = [Building(**b) for b in d["buildings"]]
+        # World.from_state re-seed random/np GLOBALEMENT dans __init__. Si la
+        # construction échoue APRÈS, la sim vivante (intacte) repartirait sur un autre
+        # flux aléatoire → reprise non exacte. On capture les RNG globaux et on les
+        # restaure en cas d'échec → transactionnalité complète (objet ET flux RNG).
+        _py_save = random.getstate()
+        _np_save = np.random.get_state()
+        try:
+            # ── Phase 1 : construire (peut lever) — self n'est PAS touché ──────
+            world     = World.from_state(d["world"])
+            entities  = [Entity.from_state(e) for e in d["entities"]]
+            clans     = [Clan(**c) for c in d["clans"]]
+            buildings = [Building(**b) for b in d["buildings"]]
+            tick_count          = d["tick_count"]
+            raining             = d["raining"]; storming = d["storming"]
+            rain_ticks_left     = d["rain_ticks_left"]
+            heatwave            = d["heatwave"]
+            heatwave_ticks_left = d["heatwave_ticks_left"]
+            next_building_id    = d["_next_building_id"]
+            entity_id_counter   = d["entity_id_counter"]
+            # Types des compteurs validés en phase 1 (gate F3) : un compteur non-int (save
+            # trafiqué) passerait le commit puis lèverait TypeError au 1er spawn/bâtiment —
+            # crash DIFFÉRÉ qu'aucune sonde bornée ne voit → vecteur crash-loop résiduel.
+            if not isinstance(entity_id_counter, int) or not isinstance(next_building_id, int):
+                raise ValueError("compteurs d'id de save invalides (non entiers)")
+            chronicle       = [dict(c) for c in d.get("chronicle", [])]   # copie (symétrie I5)
+            chronicle_seen  = {tuple(k) for k in d.get("chronicle_seen", [])}
+            prev_species    = {e.etype.value for e in entities if e.alive}
+            # États RNG : construire PUIS les valider par un DRY-RUN sur des générateurs
+            # JETABLES (gate F2). setstate/set_state rejettent une longueur/version invalide que
+            # la simple construction du tuple ne détecte pas ; sans ce dry-run, l'échec surviendrait
+            # en phase 2 (commit), APRÈS le remplacement de self → RNG hybride (le bug même que I1
+            # doit éliminer, ex. POST /api/load sur la sim vivante). Les jetables ne touchent aucun
+            # flux global → la phase 2 réappliquera les MÊMES états sans risque de lever.
+            prs = d["py_random_state"]
+            py_rng_state = (prs[0], tuple(prs[1]), prs[2])
+            nrs = d["np_random_state"]
+            np_rng_state = (nrs[0], np.array(nrs[1], dtype=np.uint32), nrs[2], nrs[3], nrs[4])
+            random.Random().setstate(py_rng_state)              # lève ici (phase 1) si invalide
+            np.random.RandomState().set_state(np_rng_state)     # idem, sans muter le global
+        except Exception:
+            random.setstate(_py_save)
+            np.random.set_state(_np_save)
+            raise
+        # ── Phase 2 : commit (aucune opération faillible ici) ─────────────────
+        self.world = world
+        self.tick_count = tick_count
+        self.raining = raining; self.storming = storming
+        self.rain_ticks_left = rain_ticks_left
+        self.heatwave = heatwave
+        self.heatwave_ticks_left = heatwave_ticks_left
+        self._next_building_id = next_building_id
+        set_id_counter(entity_id_counter)
+        self.entities = entities
+        self.clans = clans
+        self.buildings = buildings
         self.events_log = []
         self.stats_history = []
-        # Annales (bloc K) — compat vieux saves : d.get(...)
-        self.chronicle = d.get("chronicle", [])
-        self._chronicle_seen = {tuple(k) for k in d.get("chronicle_seen", [])}
-        self._prev_species = {e.etype.value for e in self.entities if e.alive}
-        prs = d["py_random_state"]
-        random.setstate((prs[0], tuple(prs[1]), prs[2]))
-        nrs = d["np_random_state"]
-        np.random.set_state((nrs[0], np.array(nrs[1], dtype=np.uint32),
-                             nrs[2], nrs[3], nrs[4]))
+        self.chronicle = chronicle
+        self._chronicle_seen = chronicle_seen
+        self._prev_species = prev_species
+        # World.from_state a re-seedé random/np dans __init__ → on restaure les RNG
+        # en DERNIER, sinon la reprise repartirait sur le flux de la génération initiale.
+        random.setstate(py_rng_state)
+        np.random.set_state(np_rng_state)
 
     def save(self, path: str):
         """Écrit un snapshot JSON de façon atomique (tmp + os.replace)."""
@@ -3467,8 +3516,14 @@ class Simulation:
         os.replace(tmp, path)
 
     def load(self, path: str):
+        # Durcissement I2 (audit #64) : json.load accepte NaN/Infinity par défaut, qui
+        # passeraient dans l'état puis feraient diverger/crasher step() plus tard (crash
+        # différé → crash-loop avec LOAD_ON_START). Un save légitime n'a que des valeurs
+        # finies → on rejette les non-finies au parsing.
+        def _reject_nonfinite(tok):
+            raise ValueError(f"valeur non-finie interdite dans le save: {tok!r}")
         with open(path) as f:
-            self.load_state(json.load(f))
+            self.load_state(json.load(f, parse_constant=_reject_nonfinite))
 
     # ── Observabilité (I0) ───────────────────────────────────────────────────
     def metrics(self) -> dict:

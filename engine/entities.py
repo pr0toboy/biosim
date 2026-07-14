@@ -436,7 +436,10 @@ class Entity:
             "target_x": self.target_x, "target_y": self.target_y,
             "target_id": self.target_id,
             "_move_frac_x": self._move_frac_x, "_move_frac_y": self._move_frac_y,
-            "clan_id": self.clan_id, "traits": self.traits,
+            # traits COPIÉ (gate F1) : self.traits est muté en place par le clamp anti-dérive
+            # (simulation.py) ; sans copie, save_state aliase le dict vivant → snapshot déchiré
+            # pendant le json.dump hors state_lock (même classe que le chronicle #89/#101 / I5).
+            "clan_id": self.clan_id, "traits": dict(self.traits),
             "wood": self.wood, "stone": self.stone, "iron": self.iron,
             "meat": self.meat,
             "building_ticks_left": self.building_ticks_left,
@@ -476,7 +479,7 @@ class Entity:
         e.target_x = d["target_x"]; e.target_y = d["target_y"]
         e.target_id = d["target_id"]
         e._move_frac_x = d["_move_frac_x"]; e._move_frac_y = d["_move_frac_y"]
-        e.clan_id = d["clan_id"]; e.traits = d["traits"]
+        e.clan_id = d["clan_id"]; e.traits = dict(d["traits"])   # copie (gate F1, symétrie)
         e.wood = d["wood"]; e.stone = d["stone"]; e.iron = d.get("iron", 0)
         e.meat = d["meat"]
         e.building_ticks_left = d["building_ticks_left"]
