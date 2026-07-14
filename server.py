@@ -11,6 +11,7 @@ import sys
 import os
 import threading
 import traceback
+from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -49,7 +50,18 @@ world = World(width=220, height=160)
 sim   = Simulation(world)
 sim.populate()
 
-app = FastAPI(title="BioSim")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Cycle de vie ASGI (remplace les @app.on_event dépréciés, retirés en Starlette 1.0).
+    Le corps de démarrage/arrêt reste dans _on_startup/_on_shutdown, définis plus bas près
+    de leurs helpers (_save_is_valid/_write_save) ; ils ne sont résolus qu'à l'appel (au
+    démarrage/arrêt du serveur), donc la référence anticipée est sûre."""
+    await _on_startup()
+    yield
+    await _on_shutdown()
+
+
+app = FastAPI(title="BioSim", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 # ── Clients WebSocket connectés ──────────────────────────────────────────────
@@ -204,8 +216,7 @@ def _save_is_valid(path: str, probe_ticks: int = 3) -> bool:
         return False
 
 
-@app.on_event("startup")
-async def startup():
+async def _on_startup():
     # Reprise optionnelle depuis un save au démarrage, AVEC repli anti-crash-loop (I4).
     # On valide chaque candidat sur une sonde jetable ; sim.load ne s'applique qu'à un
     # save prouvé sain → un save empoisonné ne peut plus tuer le service en boucle.
@@ -233,8 +244,7 @@ async def startup():
     app.state.sim_task = task
 
 
-@app.on_event("shutdown")
-async def shutdown_save():
+async def _on_shutdown():
     """Arrêt propre (SIGTERM systemd : restart, reboot) : sauvegarde l'état pour ne
     pas perdre jusqu'à AUTOSAVE_TICKS ticks de monde. On prend le verrou AVANT
     d'annuler la task : un step en cours se termine d'abord, et la task annulée ne

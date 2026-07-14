@@ -1,5 +1,17 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-numpy>=1.26.0
-websockets>=12.0
-psutil>=5.9.0        # optionnel : monitoring CPU/RAM exposé par /api/sysinfo
+# Dépendances ÉPINGLÉES aux versions validées (smoke 34/34 + goldens BASE/CIV/PROD).
+# Durcissement post-ultraaudit (finding « dépendances non épinglées » : les bornes `>=`
+# ouvraient sur une version majeure susceptible de casser au redéploiement).
+#
+# Reproductibilité > auto-patch pour ce service always-on : un bump de version est une
+# étape MANUELLE et TESTÉE — rejouer `python3 tests/test_smoke.py` + les 3 goldens
+# (`determinism_guard.py` [--civ|--prod]). Un golden qui bouge après un bump = signal
+# (changement de comportement FP/RNG à investiguer, pas à ignorer).
+
+fastapi==0.135.2
+starlette==1.0.0          # dépendance de fastapi, épinglée explicitement : elle porte l'API
+                          # lifespan/on_event (cf. server.py) — on fige ce comportement
+uvicorn[standard]==0.42.0
+numpy==2.2.4              # PIN LOAD-BEARING : le golden déterministe (invariant #2) a été
+                          # produit sous cette version ; un changement peut déplacer le hash (FP/RNG)
+websockets==16.0
+psutil==7.0.0             # optionnel : monitoring CPU/RAM exposé par /api/sysinfo
