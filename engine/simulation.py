@@ -1073,7 +1073,8 @@ class _TickCtx:
     __slots__ = ("world", "all_entities", "births", "events", "tick", "season",
                  "clans", "buildings", "temp_c", "species_counts", "raining",
                  "heatwave", "clan_bldg", "predators", "predator_grid", "entity_grid",
-                 "iron_tiles", "iron_nearest", "gold_tiles", "gold_nearest")
+                 "iron_tiles", "iron_nearest", "gold_tiles", "gold_nearest",
+                 "clan_human_pop")
 
     def __init__(self, world, all_entities, births, events, tick,
                  season="spring", clans=None, buildings=None, temp_c=12.0,
@@ -1090,6 +1091,17 @@ class _TickCtx:
         self.iron_nearest = {}    # bloc B : nearest fer par bucket 8×8, mémoïsé par tick
         self.gold_tiles = None    # bloc C2 : filons d'or minables, mémoïsés par tick
         self.gold_nearest = {}    # bloc C2 : nearest or par bucket 8×8
+        # Perf P1 : population humaine par clan, SNAPSHOT du début de tick (le _TickCtx
+        # est construit une seule fois par step(), avant la boucle entités). Remplace les
+        # sum(1 for e in all_entities ...) O(N) recalculés PAR humain (repro + build maison)
+        # → O(N) une fois par tick. Sémantique = snapshot début-de-tick (vs l'ancien compte
+        # « live » qui variait avec les morts intra-tick) : divergence possible → à valider
+        # au golden (imputable si un humain meurt mid-tick dans le run seedé).
+        chp: dict = {}
+        for _e in (all_entities or ()):
+            if _e.alive and _e.etype is EntityType.HUMAN and _e.clan_id is not None:
+                chp[_e.clan_id] = chp.get(_e.clan_id, 0) + 1
+        self.clan_human_pop = chp
 
 
 def tick_entity(entity: Entity, world: "World", all_entities: list[Entity],
@@ -1665,9 +1677,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             _clan_age = clans.get(entity.clan_id) if clans else None
             if _clan_age is not None:
                 cap += AGE_POP_BONUS * _clan_age.age   # bonus d'âge (A1)
-            clan_pop = sum(1 for e in all_entities
-                           if e.alive and e.etype == EntityType.HUMAN
-                           and e.clan_id == entity.clan_id)
+            clan_pop = ctx.clan_human_pop.get(entity.clan_id, 0)   # perf P1 (mémo par-tick)
             if clan_pop >= cap:
                 repro_allowed = False
         if repro_allowed:
@@ -1826,9 +1836,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _clan_age_h = clans.get(entity.clan_id) if clans else None
                 if _clan_age_h is not None:
                     _pop_cap_h += AGE_POP_BONUS * _clan_age_h.age   # bonus d'âge (A1)
-                _clan_pop_h = sum(1 for e in all_entities
-                                  if e.alive and e.etype == EntityType.HUMAN
-                                  and e.clan_id == entity.clan_id)
+                _clan_pop_h = ctx.clan_human_pop.get(entity.clan_id, 0)   # perf P1 (mémo par-tick)
                 _need_house = (not clan_houses) or (_clan_pop_h >= _pop_cap_h * 0.70)
                 # Vérifier si un autre humain a déjà planifié une maison ce tick
                 already_planned = (
