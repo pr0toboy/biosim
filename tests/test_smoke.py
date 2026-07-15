@@ -21,7 +21,7 @@ from engine.simulation import (
     Simulation, Building, tick_entity, MAX_PER_SPECIES, MAX_WOOD_PER_HOUSE,
     MAX_STONE_CARRY, _dist,
 )
-from engine.entities import EntityType, spawn, Sex
+from engine.entities import EntityType, spawn, Sex, SPECS
 
 REQUIRED_KEYS = {"id", "t", "x", "y", "s", "h", "age", "sex", "th", "tr"}
 
@@ -39,12 +39,13 @@ def test_smoke_runs(ticks: int = 400, seed: int = 12345):
             for e in sim.entities:
                 assert 0 <= e.x < world.width, f"x hors grille: {e.x}"
                 assert 0 <= e.y < world.height, f"y hors grille: {e.y}"
-            # cap par espèce
+            # cap par espèce (I1 : cap différencié spec.max_pop, prédateurs plus bas)
             counts = {}
             for e in sim.entities:
                 counts[e.etype] = counts.get(e.etype, 0) + 1
             for et, c in counts.items():
-                assert c <= MAX_PER_SPECIES, f"{et} dépasse le cap: {c} > {MAX_PER_SPECIES}"
+                cap = SPECS[et].max_pop
+                assert c <= cap, f"{et} dépasse son cap: {c} > {cap}"
             # Invariant persistance : AUCUN buffer d'événements en attente à la
             # frontière du tick (sinon un save perd des événements → replay divergent,
             # bug bisecté à t=5081 sur l'endurance 20k)
@@ -364,18 +365,18 @@ def test_e2_female_seeks_distant_mate():
 
 
 def test_e_boar_hunts_and_captures_prey():
-    """Régression bloc E : un sanglier affamé (hunger 40, entre son hunt_hunger=28 et
-    l'ancien seuil 55) avec une proie EN VISION la traque (HUNTING) et la capture si
+    """Régression bloc E / PRÉDATION : un sanglier affamé (hunger 40, au-dessus de son
+    hunt_hunger abaissé) avec une proie EN VISION la traque (HUNTING) et la capture si
     adjacente — au lieu de brouter avant d'avoir jamais assez faim pour chasser. C'est
-    ce qui rend la prédation terrestre RÉELLE et visible (cosmétique en baseline : ~2
-    kills/4000 ticks, ~400 à hunt_hunger=28)."""
+    ce qui rend la prédation terrestre RÉELLE et visible (cosmétique en baseline : ~13
+    kills/8000 ticks → ~200 kills/1000t avec le bloc PRÉDATION)."""
     from engine.entities import State
     world = World(width=120, height=90, seed=7)
     tx, ty = _find_land_tile(world)
     boar  = spawn(EntityType.BOAR, tx + 0.1, ty + 0.1, Sex.MALE)
     sheep = spawn(EntityType.SHEEP, tx + 0.4, ty + 0.4, Sex.FEMALE)   # dist ~0.42 < catch_r 0.8
-    assert boar.spec.hunt_hunger == 28.0, "le sanglier doit avoir un seuil de chasse abaissé (bloc E)"
-    boar.hunger = 40.0    # > 28 (chasse) ET > 30 (broutage) : sans le bloc E il brouterait
+    assert boar.spec.hunt_hunger < 30, "le sanglier doit chasser AVANT de brouter (seuil sous ~30)"
+    boar.hunger = 40.0    # > hunt_hunger (chasse) ET > 30 (broutage) : sans le bloc E il brouterait
     boar.thirst = 10.0
     counts = {"sheep": 100}   # bien au-dessus du plancher de préservation (30)
 

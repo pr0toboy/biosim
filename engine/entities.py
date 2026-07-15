@@ -73,6 +73,13 @@ class EntitySpec:
     aquatic: bool = False   # vit dans l'eau (se déplace sur tuiles WATER)
     hitbox_width:  int = 1  # largeur hitbox en tuiles  (numpy distances si > 1)
     hitbox_height: int = 1  # hauteur hitbox en tuiles  (numpy distances si > 1)
+    # ── Régulation démographique (bloc PRÉDATION I1) ─────────────────────────
+    # Plafond dur d'individus vivants de cette espèce (garde-fou anti-explosion).
+    # Défaut 200 = comportement historique (ex-constante globale MAX_PER_SPECIES).
+    # Différencié par rôle trophique : prédateurs bas (apex peu nombreux), proies
+    # au plafond haut de sécurité — la prédation (I2) les régule DYNAMIQUEMENT
+    # SOUS ce plafond. Le cap ne borne plus que le HAUT, l'écologie fait le reste.
+    max_pop: int = 200
     # ── Prédation (bloc E) ──────────────────────────────────────────────────
     # Seuil de faim à partir duquel un prédateur CHASSE au lieu de brouter. Défaut 55
     # = comportement historique. Le rendre < eat_amount-threshold (~30) rend l'espèce
@@ -177,13 +184,18 @@ SPECS: dict[EntityType, EntitySpec] = {
     EntityType.BOAR: EntitySpec(
         name="boar", color="#8B4513",
         is_predator=True, is_prey=False,
-        prey_types=[EntityType.SHEEP, EntityType.PIG],
+        # I2 : boar omnivore régule les 4 herbivores de ferme (chicken/horned_sheep
+        # étaient sans prédateur → scotchés au plafond). Ciblage = plus proche, réparti.
+        prey_types=[EntityType.SHEEP, EntityType.PIG,
+                    EntityType.CHICKEN, EntityType.HORNED_SHEEP],
         max_age=2000, hunger_rate=0.11, max_hunger=100,
-        eat_amount=8, eat_meat=50, speed=1.2, vision=8,
+        eat_amount=8, eat_meat=30, speed=1.2, vision=8,   # I2 : eat_meat 50→30 → le boar
         repro_hunger_min=35, repro_cooldown=140, gestation=50, litter_size=(1, 3),
         flee_distance=0,
-        hunt_hunger=28.0,   # bloc E : chasseur effectif (< seuil de broutage 30) — traque
-    ),                       # moutons/cochons dès qu'il a faim, au lieu de brouter. Calibré.
+        max_pop=140,         # I1/I2 : prédateur terrestre régulateur. Densité calibrée pour
+                             # une prédation locale effective (vs 80 trop clairsemé sur 220×160).
+        hunt_hunger=14.0,   # I2 : abaissé sous la satiété-broutage (~23) → le boar chasse dès
+    ),                       # qu'une proie est en vision au lieu de brouter (ex-28 bloc E → 18 → 14).
     EntityType.CHICKEN: EntitySpec(
         name="chicken", color="#f39c12",
         is_predator=False, is_prey=True,
@@ -262,6 +274,7 @@ SPECS: dict[EntityType, EntitySpec] = {
         flee_distance=0,
         aquatic=True,
         hitbox_width=1, hitbox_height=2,
+        max_pop=40,          # I1 : prédateur apex aquatique → plafond bas (peu nombreux).
     ),
 }
 

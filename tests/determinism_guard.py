@@ -36,13 +36,15 @@ TICKS = 500
 WIDTH = 140
 HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
-GOLDEN = "d39fb432bb30fed0acf93c090c11824e08d1a405de71593148e0a8f3c268cf65"
+# Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
+# (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
+GOLDEN = "e6f0d72337014e29a9e5fccc4c077218e9c34c0a27d9ef816007684a9acc67e9"
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "2626773cf6caa950e26dbbf1c8f53551e630d688550940353288cb716d46c6c5"
+GOLDEN_CIV = "6967be2ce8201850c07152aba2065e6a0f8641835e4350be2fe65a8280dbe271"  # regold PRÉDATION 2026-07-15 (ex-2626773c, pop 925→1028)
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -52,7 +54,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "cc574753b3dfa3529863c692da892f2aa3bee6b41f2b19e5b851be5530f773ce"
+GOLDEN_PROD = "d66eafffc373444bb4820bae93e2b1dad8ebeeab333ecf65f29a960c77c96f0d"  # regold PRÉDATION 2026-07-15 (ex-cc574753, pop 480→532)
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):

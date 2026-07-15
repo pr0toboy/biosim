@@ -474,7 +474,12 @@ def _random_walk(entity: Entity, world: "World"):
 MAX_CARRY = 5          # bois max transportable par un humain
 MAX_WOOD_PER_HOUSE = 50  # bois max stocké par maison individuelle
 CLAN_WOOD_CAP = 100      # total bois clan → arrête de couper (laisse de la place aux autres tâches)
-MAX_PER_SPECIES = 200  # cap d'entités par espèce
+MAX_PER_SPECIES = 200  # plafond max par espèce (défaut EntitySpec.max_pop ; caps réels
+                       # PAR espèce dans entities.py — prédateurs plus bas, cf. bloc PRÉDATION I1).
+                       # Reste le majorant global (tous les caps <= 200) : sert de plafond de test.
+REBOUND_FLOOR = 50     # I3 : sous ce seuil, une espèce ANIMALE recolonise 2× plus vite
+                       # (cooldown repro halvé) → anti-cascade. Complète le plancher <30 de
+                       # préservation de proie (qui coupe la prédation). Humains exclus.
 
 HERD_RADIUS = 8    # tuiles de détection des congénères
 CHOP_COOLDOWN = 12  # ticks minimum entre deux coupes d'arbre
@@ -1230,15 +1235,17 @@ def _vitals(entity, ctx):
     if entity.gestation_left > 0:
         entity.gestation_left -= 1
         if entity.gestation_left == 0:
-            # Cap par espèce : inclut les naissances déjà prévues ce tick
+            # Cap PAR espèce (I1 : spec.max_pop, différencié par rôle trophique) :
+            # inclut les naissances déjà prévues ce tick.
+            cap = spec.max_pop
             current = (species_counts or {}).get(entity.etype.value, 0)
             births_same = sum(1 for b in births if b.etype == entity.etype)
-            if current + births_same >= MAX_PER_SPECIES:
+            if current + births_same >= cap:
                 entity.state = State.RESTING
                 return True
             n = random.randint(*spec.litter_size)
             for _ in range(n):
-                if current + births_same >= MAX_PER_SPECIES:
+                if current + births_same >= cap:
                     break
                 jx = entity.x + random.uniform(-1, 1)
                 jy = entity.y + random.uniform(-1, 1)
@@ -1308,31 +1315,49 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
     # historique) ; le sanglier chasse dès ~28 (< broutage 30) → prédation réelle
     # et VISIBLE, au lieu de brouter avant d'avoir jamais assez faim pour chasser.
     if spec.is_predator and entity.hunger > spec.hunt_hunger:
-        for prey_type in spec.prey_types:
-            # Préserve les proies si leur population est trop basse
-            if (species_counts or {}).get(prey_type.value, 0) < 30:
+        # I2 : chasse la proie VIVANTE la plus PROCHE parmi TOUS les prey_types, en
+        # UNE passe (fin de la préférence ordonnée qui concentrait la prédation sur
+        # la 1re espèce et laissait les autres au plafond). Répartit la pression →
+        # toutes les proies régulées ensemble. Plancher par espèce (<30) préservé :
+        # une proie rare est ignorée tant qu'elle n'a pas recolonisé. Déterministe
+        # (1er au d² minimal dans l'ordre stable de all_entities). Aussi + rapide
+        # (1 scan O(N) au lieu de n_types scans).
+        vis_sq = entity.traits["vision"] ** 2
+        ex, ey = entity.x, entity.y
+        prey = None
+        best_d_sq = vis_sq
+        for e in all_entities:
+            if e is entity or not e.alive:
                 continue
-            prey = _find_nearest(entity, all_entities, prey_type, entity.traits["vision"])
-            if prey:
-                entity.state  = State.HUNTING
-                entity.target_id = prey.id
-                _move_toward(entity, prey.x, prey.y, _eff_speed, world)
-                # Capture si assez proche (hitbox étendu pour entités larges)
-                catch_r = 0.8 + (entity.spec.hitbox_width - 1) * 0.5
-                if _dist_hitbox(entity, prey) < catch_r:
-                    prey.alive = False
-                    prey.state = State.DEAD
-                    # Compteur vivant : décrémente pour que la préservation d'espèce
-                    # (<30) et le cap de naissances voient les morts DE CE TICK →
-                    # empêche N prédateurs de tuer N proies sous le seuil en un tick.
-                    if species_counts is not None:
-                        species_counts[prey.etype.value] = species_counts.get(prey.etype.value, 0) - 1
-                    entity.hunger = max(0, entity.hunger - spec.eat_meat)
-                    events.append({"type": "kill",
-                                   "predator": entity.etype.value,
-                                   "prey": prey.etype.value,
-                                   "x": entity.ix, "y": entity.iy})
-                return True
+            if e.etype not in spec.prey_types:
+                continue
+            if (species_counts or {}).get(e.etype.value, 0) < 30:
+                continue
+            dx = ex - e.x; dy = ey - e.y
+            d_sq = dx*dx + dy*dy
+            if d_sq < best_d_sq:
+                best_d_sq = d_sq
+                prey = e
+        if prey is not None:
+            entity.state  = State.HUNTING
+            entity.target_id = prey.id
+            _move_toward(entity, prey.x, prey.y, _eff_speed, world)
+            # Capture si assez proche (hitbox étendu pour entités larges)
+            catch_r = 0.8 + (entity.spec.hitbox_width - 1) * 0.5
+            if _dist_hitbox(entity, prey) < catch_r:
+                prey.alive = False
+                prey.state = State.DEAD
+                # Compteur vivant : décrémente pour que la préservation d'espèce
+                # (<30) et le cap de naissances voient les morts DE CE TICK →
+                # empêche N prédateurs de tuer N proies sous le seuil en un tick.
+                if species_counts is not None:
+                    species_counts[prey.etype.value] = species_counts.get(prey.etype.value, 0) - 1
+                entity.hunger = max(0, entity.hunger - spec.eat_meat)
+                events.append({"type": "kill",
+                               "predator": entity.etype.value,
+                               "prey": prey.etype.value,
+                               "x": entity.ix, "y": entity.iy})
+            return True
     # 2b. Conflit inter-clan (humains très affamés attaquent clan ennemi).
     # Trêve marchande (D1) : un marchand n'attaque pas, une caravane n'est pas
     # attaquée — sinon toute route passant en vision d'ennemis affamés mourrait.
@@ -1695,8 +1720,15 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             if partner:
                 entity.state = State.SEEKING_MATE
                 entity.gestation_left = spec.gestation
-                entity.repro_cooldown_left = spec.repro_cooldown
-                partner.repro_cooldown_left = spec.repro_cooldown
+                # I3 : rebond démographique — une espèce animale sous le plancher
+                # recolonise 2× plus vite (anti-cascade). Humains exclus (démographie
+                # régie par le logement/clan, pas par ce filet écologique).
+                _cd = spec.repro_cooldown
+                if (entity.etype is not EntityType.HUMAN
+                        and (species_counts or {}).get(entity.etype.value, 0) < REBOUND_FLOOR):
+                    _cd //= 2
+                entity.repro_cooldown_left = _cd
+                partner.repro_cooldown_left = _cd
                 return True
             # E2 : aucun partenaire adjacent (<3) → viser le mâle éligible le plus
             # proche EN VISION et s'en approcher. Sans ça, la repro n'arrive que si
@@ -2748,7 +2780,7 @@ class Simulation:
                         e.clan_id = other.clan_id
                         break
 
-        # Comptage par espèce (pour cap MAX_PER_SPECIES)
+        # Comptage par espèce (pour cap par-espèce spec.max_pop, cf. repro)
         species_counts: dict[str, int] = {}
         for e in self.entities:
             if e.alive:
