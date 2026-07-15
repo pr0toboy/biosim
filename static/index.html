@@ -458,6 +458,11 @@ let currentRain     = false;
 let currentStorm    = false;
 let currentHeatwave = false;
 let entityMap    = {};     // id → entity
+// ── Interpolation de rendu (fluidité) : rendu 60 fps découplé du tick moteur ──
+let prevPos      = {};     // id → {x,y} au tick précédent (source de l'interpolation)
+let lastTickTime = 0;      // performance.now() de l'arrivée du dernier tick
+let tickInterval = 250;    // ms entre ticks (EMA adaptative, bornée)
+let renderAlpha  = 1;      // facteur d'interpolation [0,1] du frame courant
 
 // Zoom / pan
 let scale = 1, offX = 0, offY = 0;
@@ -539,6 +544,15 @@ function handleTick(data) {
   if (data.storming != null) currentStorm    = data.storming;
   if (data.heatwave != null) currentHeatwave = data.heatwave;
   if (data.clans) clans = data.clans;
+  // Snapshot des positions du tick PRÉCÉDENT (source de l'interpolation) + horloge
+  // du tick (EMA de l'intervalle réel, bornée ; les gros gaps de pause sont ignorés).
+  prevPos = {};
+  for (const e of entities) prevPos[e.id] = { x: e.x, y: e.y };
+  const _now = performance.now();
+  const _dt  = _now - lastTickTime;
+  if (lastTickTime && _dt < 1000)
+    tickInterval = Math.max(60, Math.min(1000, tickInterval * 0.8 + _dt * 0.2));
+  lastTickTime = _now;
   entities    = data.entities;
   stats       = data.stats;
   buildEntityMap();
@@ -565,7 +579,10 @@ function handleTick(data) {
   tl.textContent = tickToDate(currentTick);
   tl.title = `Tick ${currentTick}`;
   document.getElementById("total-label").textContent = `${data.stats.total} entités`;
-  drawAll();
+  // Effets éphémères vieillis au TICK (pas au frame) → durée de vie stable malgré le 60 fps.
+  bellRings.forEach(r => r.age++);   bellRings   = bellRings.filter(r => r.age < 40);
+  huntFlashes.forEach(f => f.age++); huntFlashes = huntFlashes.filter(f => f.age < 10);
+  // (le rendu canvas est piloté par la boucle requestAnimationFrame, pas ici)
   updateSidebar();
   updateSeasonBadge();
   updateBuildingPanel();
@@ -701,6 +718,20 @@ function fitWorld() {
 }
 
 // ── Rendu ────────────────────────────────────────────────────────────────────
+// Position interpolée d'une entité entre son tick précédent et le courant.
+// Snap au-delà de 4 tuiles (téléport de secours d'eau) → pas de glissade à travers la carte.
+function ipx(e){ const p = prevPos[e.id]; if(!p) return e.x; const d = e.x - p.x; return Math.abs(d) > 4 ? e.x : p.x + d * renderAlpha; }
+function ipy(e){ const p = prevPos[e.id]; if(!p) return e.y; const d = e.y - p.y; return Math.abs(d) > 4 ? e.y : p.y + d * renderAlpha; }
+
+// Boucle de rendu 60 fps découplée du tick moteur (~6 ticks/s) : interpole les
+// positions → mouvement fluide même quand le moteur calcule lentement.
+function renderLoop(){
+  renderAlpha = lastTickTime ? Math.min(1, (performance.now() - lastTickTime) / tickInterval) : 1;
+  drawAll();
+  requestAnimationFrame(renderLoop);
+}
+requestAnimationFrame(renderLoop);
+
 function drawAll() {
   if (!worldData || !biomeCache) return;
   const W = worldData.width, H = worldData.height;
@@ -711,8 +742,8 @@ function drawAll() {
     if (e) {
       const cw = canvasWrap.clientWidth  || canvas.width;
       const ch = canvasWrap.clientHeight || canvas.height;
-      offX = cw / 2 - (e.x + 0.5) * TILE_SIZE * scale;
-      offY = ch / 2 - (e.y + 0.5) * TILE_SIZE * scale;
+      offX = cw / 2 - (ipx(e) + 0.5) * TILE_SIZE * scale;
+      offY = ch / 2 - (ipy(e) + 0.5) * TILE_SIZE * scale;
     } else {
       trackedId = null;   // entité morte/disparue → arrête le suivi
     }
@@ -854,20 +885,16 @@ function drawAll() {
     ctx.fillRect((vx + 0.4) * T, (vy + 0.4) * T, T * 0.2, T * 0.2);
   });
   drawBuildings(ctx, T);
-  // Ondes de cloche (C1) : anneau expansif ~40 ticks depuis le clocher
-  bellRings = bellRings.filter(r => r.age < 40);
+  // Ondes de cloche (C1) : anneau expansif ~40 ticks (vieilli au tick, cf. handleTick)
   bellRings.forEach(r => {
-    r.age++;
     ctx.beginPath();
     ctx.arc((r.x + 0.5) * T, (r.y + 0.5) * T, T * (0.5 + r.age * 0.35), 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(174,214,241,${Math.max(0, 1 - r.age / 40)})`;
     ctx.lineWidth = Math.max(1, T * 0.08);
     ctx.stroke();
   });
-  // Éclats de capture (bloc E) : bref flash rouge + éclaboussure au point du kill (~10 ticks)
-  huntFlashes = huntFlashes.filter(f => f.age < 10);
+  // Éclats de capture (bloc E) : bref flash rouge au point du kill (~10 ticks, vieilli au tick)
   huntFlashes.forEach(f => {
-    f.age++;
     const a = Math.max(0, 1 - f.age / 10);
     const px = (f.x + 0.5) * T, py = (f.y + 0.5) * T;
     ctx.strokeStyle = `rgba(220,38,38,${a})`;
@@ -926,8 +953,8 @@ function drawAll() {
   ctx.imageSmoothingEnabled = false;
   entities.forEach(e => {
     if (!SPECIES[e.t]) return;
-    const cx = (e.x + 0.5) * T;
-    const cy = (e.y + 0.5) * T;
+    const cx = (ipx(e) + 0.5) * T;
+    const cy = (ipy(e) + 0.5) * T;
     // Cercle d'état (hunting / fleeing / trading) dessiné avant le sprite
     if (e.s === "hunting" || e.s === "fleeing" || e.s === "trading"
         || e.s === "praying" || e.s === "pilgrimage") {
@@ -1029,8 +1056,8 @@ function drawAll() {
     if (e && BOX_SELECTOR_SPRITE.img.complete && BOX_SELECTOR_SPRITE.img.naturalWidth > 0) {
       const S = BOX_SELECTOR_SPRITE.size;
       const T = TILE_SIZE;
-      const px = (e.x + 0.5) * T - S / 2;
-      const py = (e.y + 0.5) * T - S / 2;
+      const px = (ipx(e) + 0.5) * T - S / 2;
+      const py = (ipy(e) + 0.5) * T - S / 2;
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(BOX_SELECTOR_SPRITE.img, 0, 0, S, S, px, py, S, S);
     }
