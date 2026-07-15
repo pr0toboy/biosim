@@ -457,6 +457,7 @@ let currentTemp  = null;
 let currentRain     = false;
 let currentStorm    = false;
 let currentHeatwave = false;
+let lightningAt     = -1e9;   // performance.now() du dernier éclair (flash décroissant)
 let entityMap    = {};     // id → entity
 // ── Interpolation de rendu (fluidité) : rendu 60 fps découplé du tick moteur ──
 let prevPos      = {};     // id → {x,y} au tick précédent (source de l'interpolation)
@@ -586,6 +587,7 @@ function handleTick(data) {
   updateSidebar();
   updateSeasonBadge();
   updateBuildingPanel();
+  if ((data.events || []).some(ev => ev.type === "lightning")) lightningAt = performance.now();
   (data.events || []).forEach(addEvent);
 }
 
@@ -732,6 +734,92 @@ function renderLoop(){
 }
 requestAnimationFrame(renderLoop);
 
+// Météo animée, pilotée par le TEMPS RÉEL (performance.now) → fluide à 60 fps,
+// indépendante du rythme des ticks. En DEUX couches : les ombres de nuages au SOL
+// (sous les entités), les précipitations + flash d'éclair AU-DESSUS de tout.
+
+// Couche SOL : ombres douces de nuages qui dérivent (ambiance permanente, + sous la pluie).
+function drawWeatherGround(ctx) {
+  const Wp = worldData.width * TILE_SIZE, Hp = worldData.height * TILE_SIZE;
+  const now = performance.now();
+  const nClouds = currentRain ? 7 : 4;
+  const cloudA  = currentStorm ? 0.24 : currentRain ? 0.16 : 0.08;
+  for (let i = 0; i < nClouds; i++) {
+    const seed  = i * 127.3;
+    const cw    = Wp * (0.20 + (i % 3) * 0.09);
+    const speed = 0.006 + (i % 4) * 0.004;                 // px/ms, lent
+    const x = ((seed * 17 + now * speed) % (Wp + cw)) - cw / 2;
+    const y = (Math.sin(seed) * 0.5 + 0.5) * Hp * 0.7 + Hp * 0.05;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, cw / 2);
+    g.addColorStop(0, `rgba(38,44,60,${cloudA})`);
+    g.addColorStop(1, "rgba(38,44,60,0)");
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(1, 0.5);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, cw / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Couche CIEL : précipitations (pluie/neige), voile de canicule, flash d'éclair — AU-DESSUS.
+// Dessinée en ESPACE-ÉCRAN (après ctx.restore) → remplit le viewport uniformément,
+// densité constante quel que soit le zoom (en espace-monde les particules se diluaient
+// sur toute la carte 220×160 → « trop faible »). Densité montée nettement.
+function drawWeatherSky(ctx) {
+  const Sw = canvas.width, Sh = canvas.height;
+  const now = performance.now();
+  const winter = currentSeason === "winter";
+
+  // Pluie (hors hiver) : voile + stries denses
+  if (currentRain && !winter) {
+    ctx.fillStyle = currentStorm ? "rgba(28,33,62,0.32)" : "rgba(78,108,172,0.15)";
+    ctx.fillRect(0, 0, Sw, Sh);
+    const density = (Sw * Sh) / 2600;                       // ~à l'échelle du viewport
+    const N = Math.round(density * (currentStorm ? 1.5 : 1.0));
+    const speed = currentStorm ? 1.6 : 0.85;
+    const len = currentStorm ? 28 : 17, wind = currentStorm ? 0.45 : 0.22;
+    ctx.strokeStyle = currentStorm ? "rgba(195,210,255,0.65)" : "rgba(185,208,255,0.55)";
+    ctx.lineWidth = currentStorm ? 1.5 : 1.1;
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const col = (i * 137.5) % Sw;
+      const y = ((i * 53.3 + now * speed) % (Sh + 40)) - 20;
+      ctx.moveTo(col, y); ctx.lineTo(col - len * wind, y + len);
+    }
+    ctx.stroke();
+  }
+
+  // Neige (hiver) : flocons denses qui se balancent, blizzard si précipitations
+  if (winter) {
+    if (currentRain) { ctx.fillStyle = "rgba(215,225,245,0.18)"; ctx.fillRect(0, 0, Sw, Sh); }
+    const density = (Sw * Sh) / 2200;
+    const N = Math.round(density * (currentRain ? 1.9 : 1.0));
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    for (let i = 0; i < N; i++) {
+      const speed = 0.035 + (i % 6) * 0.013;
+      const y = ((i * 71.7 + now * speed) % (Sh + 12)) - 6;
+      const x = ((i * 149.3) % Sw) + Math.sin(now * 0.0011 + i) * 16;
+      const r = 1.1 + (i % 3) * 0.8;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Canicule : voile orangé qui ondule (plus marqué)
+  if (currentHeatwave) {
+    const pulse = 0.11 + 0.06 * Math.sin(now * 0.002);
+    ctx.fillStyle = `rgba(255,120,0,${pulse.toFixed(3)})`;
+    ctx.fillRect(0, 0, Sw, Sh);
+  }
+
+  // Éclair : flash bleuté plein écran qui décroît (~280 ms) sur un event `lightning`
+  const dt = now - lightningAt;
+  if (dt >= 0 && dt < 280) {
+    const lf = (1 - dt / 280) ** 2;
+    ctx.fillStyle = `rgba(222,236,255,${(lf * 0.65).toFixed(3)})`;
+    ctx.fillRect(0, 0, Sw, Sh);
+  }
+}
+
 function drawAll() {
   if (!worldData || !biomeCache) return;
   const W = worldData.width, H = worldData.height;
@@ -766,33 +854,8 @@ function drawAll() {
   ctx.fillStyle = seasonOverlay;
   ctx.fillRect(0, 0, worldData.width * TILE_SIZE, worldData.height * TILE_SIZE);
 
-  // Overlay pluie / orage
-  if (currentRain) {
-    const W = worldData.width  * TILE_SIZE;
-    const H = worldData.height * TILE_SIZE;
-    ctx.fillStyle = currentStorm ? "rgba(60,60,120,0.22)" : "rgba(100,149,237,0.13)";
-    ctx.fillRect(0, 0, W, H);
-    // Lignes diagonales simulant des gouttes (positions pseudo-aléatoires stables via tick)
-    ctx.strokeStyle = "rgba(150,200,255,0.35)";
-    ctx.lineWidth   = 0.8;
-    const spacing = 18;
-    const offset  = (currentTick * 3) % spacing;
-    ctx.beginPath();
-    for (let x = -H + offset; x < W; x += spacing) {
-      ctx.moveTo(x,     0);
-      ctx.lineTo(x + H * 0.3, H);
-    }
-    ctx.stroke();
-  }
-
-  // Overlay canicule
-  if (currentHeatwave) {
-    const W = worldData.width  * TILE_SIZE;
-    const H = worldData.height * TILE_SIZE;
-    const pulse = 0.08 + 0.04 * Math.sin(currentTick * 0.08);
-    ctx.fillStyle = `rgba(255,120,0,${pulse.toFixed(3)})`;
-    ctx.fillRect(0, 0, W, H);
-  }
+  // Météo — couche SOL (ombres de nuages, sous les entités). Ciel dessiné après les entités.
+  drawWeatherGround(ctx);
 
   // Territoires des clans — centré sur chaque feu de camp
   const T = TILE_SIZE;
@@ -1081,6 +1144,10 @@ function drawAll() {
   }
 
   ctx.restore();
+
+  // Météo — couche CIEL en ESPACE-ÉCRAN (précipitations, veils, éclair) : APRÈS restore
+  // → remplit le viewport uniformément, densité constante quel que soit le zoom/pan.
+  drawWeatherSky(ctx);
 }
 
 // ── Bâtiments ────────────────────────────────────────────────────────────────
