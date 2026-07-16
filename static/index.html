@@ -833,6 +833,63 @@ function drawShadows(ctx) {
   ctx.restore();
 }
 
+// ── nº10 Jour/nuit ───────────────────────────────────────────────────────────
+// Cycle piloté par l'horloge de SIMULATION (CAL_TICKS_PER_DAY = 60 ticks/jour en prod)
+// → cohérent avec les saisons et le rythme du monde ; lissé par renderAlpha (fluide
+// 60 fps). Composé sur la scène finale (sol+ombres+bâtiments+entités), sous la transform
+// monde, juste avant restore. Plafond d'obscurité < noir total : la lisibilité prime
+// (jeu contemplatif — un monde qu'on ne voit plus n'existe plus pour le spectateur).
+const NIGHT_TINT = [70, 92, 150];    // teinte multipliée au cœur de la nuit (bleu nuit)
+const NIGHT_MAX  = 0.60;             // obscurité plafond (0=jour, 0.60=minuit) — pas de noir
+const DAWN_WARM  = [255, 150, 70];   // dorure d'aube / crépuscule
+function _dayFraction() {
+  const tpd = CAL_TICKS_PER_SEASON / CAL_DAYS_PER_SEASON;   // ticks par jour (=60 en prod)
+  return (((currentTick + renderAlpha) / tpd) + 0.33) % 1;  // +0.33 : tick 0 = matinée
+}
+function applyLight(ctx, worldW, worldH) {
+  const f = _dayFraction();
+  const elev = -Math.cos(2 * Math.PI * f);                  // -1 minuit, +1 midi
+  const dark = Math.max(0, Math.min(1, (0.25 - elev) / 1.25)) * NIGHT_MAX;
+  const warm = Math.max(0, 1 - Math.abs(elev) / 0.35);      // pic à l'aube/crépuscule
+  const now  = performance.now();
+  const T = TILE_SIZE;
+  ctx.save();
+  if (dark > 0.01) {                                         // nuit : multiply vers bleu
+    ctx.globalCompositeOperation = "multiply";
+    const r = Math.round(255 + (NIGHT_TINT[0] - 255) * dark);
+    const g = Math.round(255 + (NIGHT_TINT[1] - 255) * dark);
+    const b = Math.round(255 + (NIGHT_TINT[2] - 255) * dark);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(0, 0, worldW, worldH);
+  }
+  if (warm > 0.01) {                                         // aube/crépuscule : overlay chaud
+    ctx.globalCompositeOperation = "overlay";
+    ctx.fillStyle = `rgba(${DAWN_WARM[0]},${DAWN_WARM[1]},${DAWN_WARM[2]},${(warm * 0.30).toFixed(3)})`;
+    ctx.fillRect(0, 0, worldW, worldH);
+  }
+  if (dark > 0.15) {                                         // halos de feu + lucioles la nuit
+    ctx.globalCompositeOperation = "screen";
+    buildings.forEach(b => {
+      if (b.btype !== "campfire") return;
+      const flick = 0.8 + 0.13 * Math.sin(now / 90) + 0.07 * Math.sin(now / 37);
+      const cx = (b.x + 0.5) * T, cy = (b.y + 0.5) * T, rad = T * 3.0 * flick;
+      const gr = ctx.createRadialGradient(cx, cy, T * 0.25, cx, cy, rad);
+      gr.addColorStop(0, `rgba(255,190,90,${(0.55 * dark).toFixed(3)})`);
+      gr.addColorStop(1, "rgba(255,190,90,0)");
+      ctx.fillStyle = gr;
+      ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+      for (let i = 0; i < 5; i++) {                          // lucioles autour du village
+        const a  = (Math.sin(now / 900 + i * 2.7 + b.x) * 0.5 + 0.5) * 0.5 * dark;
+        const fx = (b.x + 0.5 + 4 * Math.sin(now / 2600 + i * 1.9 + b.y)) * T;
+        const fy = (b.y + 0.5 + 3 * Math.cos(now / 3100 + i * 2.3 + b.x)) * T;
+        ctx.fillStyle = `rgba(190,255,120,${a.toFixed(3)})`;
+        ctx.fillRect(Math.round(fx), Math.round(fy), 2, 2);
+      }
+    });
+  }
+  ctx.restore();
+}
+
 function redrawBiomeTile(octx, x, y, biome) {
   const T = TILE_SIZE;
   const sp = BIOME_SPRITES[biome] || BIOME_SPRITES[1];
@@ -1083,7 +1140,8 @@ function drawAll() {
     const py = (b.y + 0.5) * T;
     if (CAMPFIRE_SPRITE.img.complete && CAMPFIRE_SPRITE.img.naturalWidth > 0) {
       const S = CAMPFIRE_SPRITE.size;
-      ctx.drawImage(CAMPFIRE_SPRITE.img, 0, 0, S, S, px - S / 2, py - S / 2, S, S);
+      const frame = Math.floor(performance.now() / 140) % 4;   // campfire.png = 64×16 (4 frames)
+      ctx.drawImage(CAMPFIRE_SPRITE.img, frame * S, 0, S, S, px - S / 2, py - S / 2, S, S);
     } else {
       ctx.beginPath();
       ctx.arc(px, py, T * 0.38, 0, Math.PI * 2);
@@ -1252,10 +1310,14 @@ function drawAll() {
     }
   }
 
+  // Jour/nuit (nº10) : composé sur la scène monde finale, encore sous la transform.
+  applyLight(ctx, worldData.width * TILE_SIZE, worldData.height * TILE_SIZE);
+
   ctx.restore();
 
   // Météo — couche CIEL en ESPACE-ÉCRAN (précipitations, veils, éclair) : APRÈS restore
   // → remplit le viewport uniformément, densité constante quel que soit le zoom/pan.
+  // Dessinée par-dessus la nuit → un éclair illumine bien le monde assombri.
   drawWeatherSky(ctx);
 }
 
