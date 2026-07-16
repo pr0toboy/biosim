@@ -1308,31 +1308,28 @@ function drawWaves(ctx) {
 }
 
 const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperceptible, perf)
+// Un arbre 32 px dessiné en 3 tranches horizontales à frontières ENTIÈRES (une coupe
+// fractionnaire duplique/saute une rangée de pixels → trait sombre). La cime bouge au vent,
+// le tronc reste fixe. Unité partagée par le tri de profondeur (nº9) et la nappe canopée.
+function drawTreeSliced(ctx, tr, t) {
+  if (!tr.img.complete || tr.img.naturalWidth === 0) return;
+  const T = TILE_SIZE;
+  const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
+  const sb = tr.sh === T ? [0, 7, 12, 16] : [0, 14, 24, 32];
+  const sc = tr.dh / tr.sh;
+  const shifts = [s, Math.trunc(s / 2), 0];   // cime bouge le plus, tronc fixe
+  for (let i = 0; i < 3; i++) {
+    ctx.drawImage(tr.img,
+      tr.sx, sb[i], tr.sw, sb[i + 1] - sb[i],
+      tr.px + shifts[i], tr.py + sb[i] * sc, tr.dw, (sb[i + 1] - sb[i]) * sc);
+  }
+}
+// Canopée dézoomée (nº7) : 1 seul blit de la nappe statique (vent ±2 px + occlusion fine
+// imperceptibles à cette échelle). Le zoom rapproché passe par le tri unifié nº9 (drawAll).
 function drawCanopy(ctx) {
   if (!TREES.length) return;
   ctx.imageSmoothingEnabled = false;
-  // Dézoomé : 1 blit de la nappe statique (le vent ±2 px est invisible à cette échelle).
-  if (scale < CANOPY_WIND_MIN_SCALE) {
-    if (forestCanopyCanvas) ctx.drawImage(forestCanopyCanvas, 0, 0);
-    return;
-  }
-  // Zoom rapproché : vent live, culling au viewport (peu d'arbres visibles).
-  const t = performance.now(), T = TILE_SIZE;
-  const x0 = -offX / scale - 40, y0 = -offY / scale - 48;
-  const x1 = (canvas.width - offX) / scale + 40, y1 = (canvas.height - offY) / scale + 48;
-  for (const tr of TREES) {
-    if (tr.px + tr.dw < x0 || tr.px > x1 || tr.py + tr.dh < y0 || tr.py > y1) continue;
-    if (!tr.img.complete || tr.img.naturalWidth === 0) continue;
-    const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
-    const sb = tr.sh === T ? [0, 7, 12, 16] : [0, 14, 24, 32];
-    const sc = tr.dh / tr.sh;
-    const shifts = [s, Math.trunc(s / 2), 0];   // cime bouge le plus, tronc fixe
-    for (let i = 0; i < 3; i++) {
-      ctx.drawImage(tr.img,
-        tr.sx, sb[i], tr.sw, sb[i + 1] - sb[i],
-        tr.px + shifts[i], tr.py + sb[i] * sc, tr.dw, (sb[i + 1] - sb[i]) * sc);
-    }
-  }
+  if (forestCanopyCanvas) ctx.drawImage(forestCanopyCanvas, 0, 0);
 }
 
 function redrawBiomeTile(octx, x, y, biome) {
@@ -1654,13 +1651,10 @@ function drawAll() {
 
   // (chantiers en cours dessinés dans drawBuildings via site_* btype)
 
-  // Entités (coordonnées en pixels-sprite)
+  // Entités (coordonnées en pixels-sprite) — corps de dessin d'UNE créature, appelé par le
+  // tri de profondeur ci-dessous (nº9). Fonction imbriquée : garde l'accès à ctx/T/clans/…
   ctx.imageSmoothingEnabled = false;
-  // Profondeur (refonte nº9, partie applicable) : les créatures sont dessinées triées
-  // par ligne de pied (y croissant) → une créature plus au sud passe devant une plus au
-  // nord. Le cœur de nº9 (occlusion créature ↔ arbre/mur) attend la tranche B, qui fera
-  // des arbres de vrais objets à insérer dans ce même tri (aujourd'hui = tuiles de biome).
-  [...entities].sort((a, b) => ipy(a) - ipy(b)).forEach(e => {
+  function drawEntity(e) {
     if (!SPECIES[e.t]) return;
     const cx = (ipx(e) + 0.5) * T;
     const cy = (ipy(e) + 0.5) * T;
@@ -1758,7 +1752,32 @@ function drawAll() {
         ctx.fill();
       }
     }
-  });
+  }
+
+  // Profondeur unifiée (nº9-cœur) : au zoom, arbres (32px) et créatures sont interclassés
+  // par ligne de pied → une bête au sud d'un arbre passe DEVANT le tronc, au nord elle se
+  // cache sous le feuillage. Dézoomé (vent/occlusion imperceptibles) : créatures triées puis
+  // nappe canopée statique blittée d'un coup (perf), cf. drawCanopy — même seuil que nº4/nº7.
+  const sortedEnts = [...entities].filter(e => SPECIES[e.t]).sort((a, b) => ipy(a) - ipy(b));
+  if (scale >= CANOPY_WIND_MIN_SCALE && TREES.length) {
+    const now = performance.now();
+    const x0 = -offX / scale - 40, y0 = -offY / scale - 48;
+    const x1 = (canvas.width - offX) / scale + 40, y1 = (canvas.height - offY) / scale + 48;
+    const items = [];
+    for (const tr of TREES) {
+      if (tr.px + tr.dw < x0 || tr.px > x1 || tr.py + tr.dh < y0 || tr.py > y1) continue;
+      items.push({ base: tr.py + tr.dh, tr });   // ligne de pied = bas du sprite (bas de tuile)
+    }
+    for (const e of sortedEnts) items.push({ base: ipy(e) * T + T / 2, e });
+    items.sort((a, b) => a.base - b.base);
+    for (const it of items) {
+      if (it.tr) drawTreeSliced(ctx, it.tr, now);
+      else drawEntity(it.e);
+    }
+  } else {
+    sortedEnts.forEach(drawEntity);
+    drawCanopy(ctx);   // dézoomé → nappe canopée statique
+  }
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
@@ -1790,8 +1809,7 @@ function drawAll() {
     }
   }
 
-  // Canopée (nº7) : couche d'arbres 32 px APRÈS les entités → couvert WorldBox.
-  drawCanopy(ctx);
+  // (Canopée dessinée dans le tri de profondeur ci-dessus — nº9-cœur.)
 
   // Jour/nuit (nº10) : composé sur la scène monde finale (canopée incluse), sous la transform.
   applyLight(ctx, worldData.width * TILE_SIZE, worldData.height * TILE_SIZE);
