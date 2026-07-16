@@ -384,6 +384,8 @@ const TREE_SPRITES = {
 const CLIFF_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Ground/Cliff.png" };
 // Palmiers d'oasis (refonte nº3, cols 2-5) — canopée sur l'anneau de sable autour de l'eau.
 const PALM_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Nature/CoconutTrees.png" };
+// Paliers d'eau profonde (refonte nº4) — Shore col4 assombri ×0.84 (col0) et ×0.68 (col1).
+const DEEPS_SPRITE = { img: new Image(), src: "/static/refonte/deep_water.png" };
 
 // Sprite feu de camp (centre de clan)
 const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
@@ -445,7 +447,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CLIFF_SPRITE, PALM_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, PALM_SPRITE, DEEPS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
     { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
@@ -790,6 +792,33 @@ function _touchesWater(bm, x, y, W, H) {
     }
   return false;
 }
+// Distance à la côte (refonte nº4) : BFS multi-source 8-dir depuis toute tuile NON-eau
+// (biome ≠ 0) vers l'océan → chaque tuile d'eau connaît sa distance à la terre (bornée 12,
+// -1 = plein large). Sert au dégradé de profondeur. Recalculée au chargement (immuable).
+let waterDist = null;
+function buildWaterDist() {
+  waterDist = null;
+  if (!worldData || !worldData.biomes) return;
+  const W = worldData.width, H = worldData.height, bm = worldData.biomes;
+  const dist = [];
+  for (let y = 0; y < H; y++) dist.push(new Int16Array(W).fill(-1));
+  const qx = [], qy = [];
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++)
+      if (bm[y][x] !== 0) { dist[y][x] = 0; qx.push(x); qy.push(y); }
+  const D8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  for (let h = 0; h < qx.length; h++) {
+    const x = qx[h], y = qy[h], nd = dist[y][x] + 1;
+    if (nd > 12) continue;
+    for (const [dx, dy] of D8) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H && dist[ny][nx] === -1) {
+        dist[ny][nx] = nd; qx.push(nx); qy.push(ny);
+      }
+    }
+  }
+  waterDist = dist;
+}
 const _mInSet = (x, y, W, H) => x >= 0 && x < W && y >= 0 && y < H && !!mountainMask[y][x];
 function _maskDepth(x, y, W, H) {
   if (!_mInSet(x, y, W, H)) return 0;
@@ -873,6 +902,7 @@ function buildBiomeCache() {
   const biomes = worldData.biomes;
   buildMountainMask();   // masque de rendu lissé (nº2) avant de tuiler
   classifyMesa();        // montagnes désertiques → grès (nº3)
+  buildWaterDist();      // distance à la côte pour le dégradé de profondeur (nº4)
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
@@ -908,21 +938,37 @@ function buildBiomeCache() {
         octx.drawImage(BIOME_SPRITES[0].img, T, 0, T, T, x * T, y * T, T, T);
         continue;
       }
+      if (b === 0) {
+        // Océan (nº4) : dégradé de profondeur par distance à la côte + plantes/récifs/vagues.
+        const wd = waterDist[y][x], d = wd < 0 ? 99 : wd;
+        let baseImg = BIOME_SPRITES[0].img, bc;   // Shore.png
+        if (d === 1) bc = 2;               // contact terre → peu profonde
+        else if (d === 2) bc = 3;          // rive normale
+        else {
+          const [jh] = hash2(x, y, 5);
+          const dj = d + (jh - 0.5) * 2.4;   // frontières de palier dithérées
+          if (dj <= 6) bc = 4;             // profonde (Shore col4)
+          else { baseImg = DEEPS_SPRITE.img; bc = dj <= 10 ? 0 : 1; }   // 2 paliers assombris
+        }
+        octx.drawImage(baseImg, bc * T, 0, T, T, x * T, y * T, T, T);
+        const woods = BIOME_SPRITES[0].overlay.img;   // free_pixel_16_woods
+        const [h1, h2] = hash2(x, y, 0);
+        let decorated = false;
+        if (d === 1 && h2 < 0.45) {        // roseaux/nénuphars/joncs (woods 14-16, row 8)
+          octx.drawImage(woods, (14 + Math.floor(h1 * 3)) * T, 8 * T, T, T, x * T, y * T, T, T);
+          decorated = true;
+        } else if (d >= 3 && h1 < 0.04) {  // récif émergé (woods 14, row 6)
+          octx.drawImage(woods, 14 * T, 6 * T, T, T, x * T, y * T, T, T);
+          decorated = true;
+        }
+        if (!decorated && h1 < 0.4) {      // vagues (woods 14-16, row 7)
+          octx.drawImage(woods, (14 + Math.floor(h2 * 3)) * T, 7 * T, T, T, x * T, y * T, T, T);
+        }
+        continue;
+      }
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
       let tc, tr;
-      if (b === 0) {
-        // Eau : contour 2 tuiles → normale (col 3), milieu → profonde (col 4)
-        let border = false;
-        outer: for (let dy = -2; dy <= 2 && !border; dy++) {
-          for (let dx = -2; dx <= 2 && !border; dx++) {
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || nx >= W || ny < 0 || ny >= H || biomes[ny][nx] !== 0)
-              border = true;
-          }
-        }
-        tc = border ? 3 : 4;
-        tr = 0;
-      } else if (b === 1) {
+      if (b === 1) {
         // Plaine (nº5) : prairies nuancées — rangée claire/foncée dithérée par patch.
         tc = (x * 7 + y * 13) % 3;
         tr = plaineRow(x, y);

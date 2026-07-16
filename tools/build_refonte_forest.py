@@ -83,6 +83,15 @@ REMAP_SAND = {
 
 things_g = remap(things, REMAP_G)
 
+# nº4 : 2 paliers d'eau profonde = Shore col4 (66,172,175) assombri ×0.84 et ×0.68.
+shore_img = load("Ground/Shore.png")
+deep_water = Image.new("RGBA", (2 * S, S), (0, 0, 0, 0))
+for _i, _k in enumerate((0.84, 0.68)):
+    for _yy in range(S):
+        for _xx in range(S):
+            _r, _g, _b, _a = shore_img.getpixel((4 * S + _xx, _yy))
+            deep_water.putpixel((_i * S + _xx, _yy), (int(_r * _k), int(_g * _k), int(_b * _k), _a))
+
 outputs = {
     "floor_dark": darken(grass.crop((0, S, 3 * S, 2 * S)), 0.84),
     "forest_floor": compose([tile(things, 5, 0), tile(things, 7, 0),
@@ -97,6 +106,8 @@ outputs = {
                             tile(things_g, 0, 3), tile(things_g, 1, 3)]),
     # nº3 désert : sable texturé (3 variantes), remplace le sable plat Shore col0.
     "sand_tex": remap(grass.crop((0, S, 3 * S, 2 * S)), REMAP_SAND),
+    # nº4 océan : 2 paliers d'eau profonde = Shore col4 assombri ×0.84 et ×0.68.
+    "deep_water": deep_water,
 }
 
 for name, im in outputs.items():
