@@ -337,15 +337,13 @@ def _dist(ax, ay, bx, by) -> float:
     return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
 
 
-def _tile_near_water(world, x: int, y: int, r: int = 6) -> bool:
-    """True s'il existe une tuile d'eau dans un rayon de `r` tuiles autour de (x,y).
-    Condition de cuisson d'un moulin (production) — réutilisée au placement (C3)
-    pour ne pas bâtir de moulin qui ne cuira jamais."""
-    return any(
-        int(world.biome_grid[y + dy, x + dx]) in WATER_BIOMES
-        for dy in range(-r, r + 1) for dx in range(-r, r + 1)
-        if world.is_valid(x + dx, y + dy)
-    )
+def _tile_near_water(world, x: int, y: int) -> bool:
+    """True s'il existe une tuile d'eau dans un rayon de MILL_WATER_RADIUS autour de
+    (x,y). Condition de cuisson d'un moulin (production) — réutilisée au placement (C3)
+    pour ne pas bâtir de moulin qui ne cuira jamais. Lecture O(1) d'un masque pré-calculé
+    (World._near_water_mill) : l'eau étant immuable, il vaut pour toute la partie. Byte-
+    exact avec l'ancien scan carré ; c'était le poste CPU n°1 (169 tuiles Python/appel)."""
+    return bool(world._near_water_mill[y, x])
 
 
 def _dist_hitbox(entity: Entity, target: Entity) -> float:

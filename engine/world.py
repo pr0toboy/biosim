@@ -28,6 +28,12 @@ _MAX_GRID_CELLS = _MAX_DIM * _MAX_DIM  # cellules max d'une grille chargée
 # Importé par entities.py et simulation.py (world.py = module le plus bas, aucun cycle).
 TIME_SCALE = 6
 
+# Rayon (tuiles, Chebyshev) du test « proche de l'eau » pour la cuisson/placement des
+# moulins. Pré-calculé une fois en masque booléen (World._near_water_mill) car l'eau est
+# immuable ; défini ici pour rester la source unique du rayon partagée par le masque et
+# tout appelant. Le changer impose de regénérer le masque (fait au __init__ / au load).
+MILL_WATER_RADIUS = 6
+
 
 def _grid_to_b64(arr: np.ndarray) -> dict:
     """Encode une grille numpy en base64 (compact + sans perte) pour la sauvegarde."""
@@ -192,6 +198,23 @@ class World:
         _nw[:, :-1] |= _water[:, 1:]
         _nw[:, 1:]  |= _water[:, :-1]
         self._near_water = _nw & ~_water
+        # Masque « eau dans un rayon de MILL_WATER_RADIUS » (cuisson des moulins,
+        # placement C3). Remplace le scan Python O(r²) de _tile_near_water (169 tuiles/
+        # appel), qui était le poste CPU n°1 du moteur — d'autant plus après le rescale
+        # du temps (÷ faim → 4× plus d'entités atteignent _beh_work et l'appellent).
+        # L'eau étant IMMUABLE (seuls GRASS↔DIRT bougent), ce masque reste valide pour
+        # toujours. Dilatation carrée séparable, edge-correcte (pas de wrap), byte-exacte
+        # avec la boucle « any(... in WATER for dy,dx in [-r,r] if is_valid) » d'origine.
+        _r = MILL_WATER_RADIUS
+        _horz = _water.copy()
+        for _k in range(1, _r + 1):
+            _horz[:, _k:]  |= _water[:, :-_k]
+            _horz[:, :-_k] |= _water[:, _k:]
+        _sq = _horz.copy()
+        for _k in range(1, _r + 1):
+            _sq[_k:, :]  |= _horz[:-_k, :]
+            _sq[:-_k, :] |= _horz[_k:, :]
+        self._near_water_mill = _sq
         # Carte BFS : pour chaque tuile terrestre, coordonnées de la tuile bord-eau la plus proche
         # Permet à _find_water_spot de répondre en O(1) au lieu d'O(r²)
         self._nearest_water_tile = self._build_nearest_water()
