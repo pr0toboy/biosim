@@ -504,6 +504,8 @@ let paused          = false;
 let currentTick  = 0;
 let bellRings    = [];   // anneaux d'onde des cloches (C1) : {x, y, age}
 let huntFlashes  = [];   // éclats de capture (bloc E) : {x, y, age} — un prédateur tue une proie
+let deathMarks   = [];   // os au sol à la mort (nº25) : {x, y, age}
+let birthSparks  = [];   // étincelles de naissance (nº25) : {x, y, age}
 let currentSeason = "spring";
 let currentTemp  = null;
 let currentRain     = false;
@@ -718,6 +720,9 @@ function handleTick(data) {
   // Effets éphémères vieillis au TICK (pas au frame) → durée de vie stable malgré le 60 fps.
   bellRings.forEach(r => r.age++);   bellRings   = bellRings.filter(r => r.age < 40);
   huntFlashes.forEach(f => f.age++); huntFlashes = huntFlashes.filter(f => f.age < 10);
+  // Moments de vie (nº25) : os persistants à la mort (~160 ticks), étincelles de naissance (~14).
+  deathMarks.forEach(m => m.age++);  deathMarks  = deathMarks.filter(m => m.age < 160);
+  birthSparks.forEach(s => s.age++); birthSparks = birthSparks.filter(s => s.age < 14);
   // (le rendu canvas est piloté par la boucle requestAnimationFrame, pas ici)
   updateSidebar();
   updateSeasonBadge();
@@ -2159,6 +2164,29 @@ function drawAll() {
       ctx.stroke();
     }
   });
+  // Os au sol à la mort (nº25) : petite croix blanche qui persiste puis s'efface (~160 ticks).
+  deathMarks.forEach(m => {
+    const a = Math.max(0, 1 - m.age / 160) * 0.8;
+    const px = (m.x + 0.5) * T, py = (m.y + 0.5) * T, r = T * 0.16;
+    ctx.strokeStyle = `rgba(235,235,225,${a.toFixed(3)})`;
+    ctx.lineWidth = Math.max(1, T * 0.07);
+    ctx.beginPath(); ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
+    ctx.moveTo(px + r, py - r); ctx.lineTo(px - r, py + r); ctx.stroke();
+  });
+  // Étincelles de naissance (nº25) : petite bouffée dorée expansive (~14 ticks).
+  birthSparks.forEach(s => {
+    const a = Math.max(0, 1 - s.age / 14);
+    const px = (s.x + 0.5) * T, py = (s.y + 0.5) * T, rr = T * (0.2 + s.age * 0.08);
+    ctx.strokeStyle = `rgba(255,235,150,${a.toFixed(3)})`;
+    ctx.lineWidth = Math.max(1, T * 0.08);
+    for (let i = 0; i < 5; i++) {
+      const ang = i * (Math.PI * 2 / 5) + s.age * 0.2;
+      ctx.beginPath();
+      ctx.moveTo(px + Math.cos(ang) * T * 0.12, py + Math.sin(ang) * T * 0.12);
+      ctx.lineTo(px + Math.cos(ang) * rr, py + Math.sin(ang) * rr);
+      ctx.stroke();
+    }
+  });
 
   // Feux de camp (buildings de type campfire)
   buildings.filter(b => b.btype === "campfire").forEach(b => {
@@ -2743,6 +2771,9 @@ function addEvent(ev) {
   // (trop fréquents depuis le réveil des prédateurs) mais deviennent un spectacle spatial
   // éphémère. Traité AVANT le filtre SILENT_EVENTS (qui écarte "kill" du log texte).
   if (ev.type === "kill") huntFlashes.push({ x: ev.x, y: ev.y, age: 0 });
+  // Moments de vie (nº25) : marques spatiales éphémères indépendantes du log texte.
+  if (ev.type === "death" && ev.x != null) deathMarks.push({ x: ev.x, y: ev.y, age: 0 });
+  if (ev.type === "birth" && ev.x != null) birthSparks.push({ x: ev.x, y: ev.y, age: 0 });
   if (SILENT_EVENTS.has(ev.type)) return;
   const log = document.getElementById("event-log");
   const div = document.createElement("div");
