@@ -491,6 +491,7 @@ let clans           = [];     // [{id, cx, cy, color, chief_id}, ...]
 let stumps          = new Set(); // "x,y" des tuiles-souche
 let depleted_rocks  = new Set(); // "x,y" des roches épuisées
 let fires           = new Map(); // "x,y" → intensité (0-100)
+let charred         = new Map(); // "x,y" → performance.now() de fin de feu (sol carbonisé, nº13)
 let buildings       = [];        // [{id, clan_id, x, y, btype}, ...]
 let paused          = false;
 let currentTick  = 0;
@@ -659,7 +660,8 @@ function handleTick(data) {
   if (data.buildings !== undefined) buildings = data.buildings;
   (data.fire_changes || []).forEach(fc => {
     const key = `${fc.x},${fc.y}`;
-    if (fc.fire) fires.set(key, fc.i || 80); else fires.delete(key);
+    if (fc.fire) { fires.set(key, fc.i || 80); charred.delete(key); }
+    else if (fires.delete(key)) charred.set(key, performance.now());   // feu éteint → sol carbonisé (nº13)
   });
   if (data.biome_changes && data.biome_changes.length > 0 && biomeCache) {
     const octx = biomeCache.getContext("2d");
@@ -1573,6 +1575,27 @@ function drawRainImpacts(ctx) {
   ctx.restore();
 }
 
+// Fumée des incendies (nº13) : volutes grises montantes, dessinées APRÈS le tri (au-dessus
+// des arbres et des bêtes) → la fumée s'élève dans la scène. Dérive au vent, s'efface en montant.
+function drawFireSmoke(ctx) {
+  if (!fires.size) return;
+  const T = TILE_SIZE, now = performance.now();
+  fires.forEach((intensity, key) => {
+    const [fx, fy] = key.split(",").map(Number);
+    const inten = Math.min(1, intensity / 100);
+    for (let s = 0; s < 2; s++) {
+      const cyc = 2600, ph = ((now + s * 1300 + (fx * 53 + fy * 29)) % cyc) / cyc;
+      const [hx] = hash2(fx + s, fy, 34);
+      const drift = Math.sin(now / 900 + fx) * 6;
+      const px = (fx + 0.5) * T + drift * ph + (hx - 0.5) * 6;
+      const py = (fy + 0.3) * T - ph * T * 2.2;
+      const rr = T * (0.2 + ph * 0.5);
+      ctx.fillStyle = `rgba(90,86,82,${((1 - ph) * 0.28 * inten).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(px, py, rr, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+}
+
 // Couche CIEL : précipitations (pluie/neige), voile de canicule, flash d'éclair — AU-DESSUS.
 // Dessinée en ESPACE-ÉCRAN (après ctx.restore) → remplit le viewport uniformément,
 // densité constante quel que soit le zoom (en espace-monde les particules se diluaient
@@ -1702,22 +1725,41 @@ function drawAll() {
     ctx.fillText(`${clan.id + 1}`, fire.x * T, fire.y * T);
   });
 
-  // Feux de forêt
+  // Sol carbonisé (nº13) : mémoire front des tuiles brûlées, s'estompe en ~22 s (le moteur
+  // fait repousser les arbres ; la trace de suie est un souvenir purement visuel).
+  const nowF = performance.now();
+  charred.forEach((tEnd, key) => {
+    const age = (nowF - tEnd) / 22000;
+    if (age >= 1) { charred.delete(key); return; }
+    const [cx, cy] = key.split(",").map(Number);
+    ctx.fillStyle = `rgba(40,29,20,${(0.55 * (1 - age)).toFixed(3)})`;
+    ctx.fillRect(cx * T, cy * T, T, T);
+  });
+  // Feux de forêt (nº13) : flammes vacillantes (gradient radial + scintillement) + socle
+  // carbonisé + braises montantes. La propagation est moteur (world.step_fire) ; ici = rendu.
   if (fires.size > 0) {
     fires.forEach((intensity, key) => {
-      const [fx, fy] = key.split(',').map(Number);
-      const alpha = Math.min(0.85, 0.3 + (intensity / 100) * 0.55);
-      // Base rouge-orangé
-      ctx.fillStyle = `rgba(220,60,10,${alpha})`;
-      ctx.fillRect(fx * T, fy * T, T, T);
-      // Halo jaune au centre (braise vive)
+      const [fx, fy] = key.split(",").map(Number);
+      const inten = Math.min(1, intensity / 100);
       const cx2 = (fx + 0.5) * T, cy2 = (fy + 0.5) * T;
-      const r = T * 0.35 * (intensity / 100);
-      const grad = ctx.createRadialGradient(cx2, cy2, 0, cx2, cy2, r);
-      grad.addColorStop(0, `rgba(255,220,40,${alpha})`);
-      grad.addColorStop(1, `rgba(220,60,10,0)`);
-      ctx.fillStyle = grad;
+      ctx.fillStyle = "rgba(40,29,20,0.5)";                         // socle carbonisé sous le feu
       ctx.fillRect(fx * T, fy * T, T, T);
+      const flick = 0.7 + 0.3 * Math.sin(nowF / 90 + (fx * 7 + fy * 13));
+      const r = T * (0.32 + 0.18 * inten) * flick;
+      const grad = ctx.createRadialGradient(cx2, cy2 + T * 0.15, 0, cx2, cy2 + T * 0.15, r * 1.6);
+      grad.addColorStop(0, `rgba(255,238,120,${(0.9 * inten).toFixed(3)})`);
+      grad.addColorStop(0.5, `rgba(240,120,20,${(0.8 * inten).toFixed(3)})`);
+      grad.addColorStop(1, "rgba(180,40,10,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(cx2, cy2 + T * 0.15, r * 1.6, 0, Math.PI * 2); ctx.fill();
+      for (let e = 0; e < 3; e++) {                                 // braises montantes 2 px
+        const cyc = 900, ph = ((nowF + e * 300 + (fx * 31 + fy * 17)) % cyc) / cyc;
+        const [ex] = hash2(fx + e, fy, 33);
+        const px = fx * T + (2 + ex * (T - 4));
+        const py = (fy + 1) * T - ph * T * 1.4;
+        ctx.fillStyle = `rgba(255,${Math.round(180 - ph * 120)},40,${((1 - ph) * inten).toFixed(3)})`;
+        ctx.fillRect(Math.round(px), Math.round(py), 2, 2);
+      }
     });
   }
 
@@ -1935,6 +1977,7 @@ function drawAll() {
   // Conséquences de la pluie (nº11) : impacts de gouttes + voile humide, par-dessus la scène
   // (sol/arbres/bêtes), sous la lumière. Les sélecteurs restent nets (dessinés après).
   drawRainImpacts(ctx);
+  drawFireSmoke(ctx);   // fumée des incendies (nº13), au-dessus de la scène
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
