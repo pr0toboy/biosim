@@ -377,6 +377,9 @@ const TREE_SPRITES = {
   forestTreesSoft: { img: new Image(), src: "/static/refonte/forest_trees_soft.png" },
   thingsG:         { img: new Image(), src: "/static/refonte/things_g.png" },
 };
+// Autotile de falaise (refonte nº2) — Cliff.png (7×9). Bloc 3×3 (0,0)-(2,2) = étage 1,
+// (0,3)-(2,5) = étage 2 ; tuile choisie par voisinage (comme l'eau), herbe dessous.
+const CLIFF_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Ground/Cliff.png" };
 
 // Sprite feu de camp (centre de clan)
 const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
@@ -438,7 +441,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
     { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
@@ -715,6 +718,28 @@ function plaineRow(x, y) {
   return (pc + (pj - 0.5) * 0.36 < 0.38) ? 0 : 1;
 }
 
+// ── Montagne en relief (refonte nº2) — autotile Cliff.png par VOISINAGE ──────────
+// Le moteur donne des montagnes ORGANIQUES (blobs, biome 4 immuable) → tuile falaise
+// choisie par les voisins 4-dir (comme l'eau), pas par des bornes rectangle (raccourci
+// du template). Étage 2 = intérieur profond (Chebyshev ≥ 2), son propre autotile.
+const _isMountain = (bm, x, y, W, H) =>
+  x >= 0 && x < W && y >= 0 && y < H && bm[y][x] === 4;
+function _mountainDepth(bm, x, y, W, H) {
+  if (!_isMountain(bm, x, y, W, H)) return 0;
+  for (let d = 1; d <= 2; d++)
+    for (let dy = -d; dy <= d; dy++)
+      for (let dx = -d; dx <= d; dx++)
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === d && !_isMountain(bm, x + dx, y + dy, W, H))
+          return d;
+  return 3;
+}
+// Bloc 3×3 : bord = voisin hors ensemble. col0/row0 = coin haut-gauche du bloc dans Cliff.png.
+function cliffTileNbr(inSet, x, y, col0, row0) {
+  const c = !inSet(x - 1, y) ? 0 : !inSet(x + 1, y) ? 2 : 1;
+  const r = !inSet(x, y - 1) ? 0 : !inSet(x, y + 1) ? 2 : 1;
+  return [col0 + c, row0 + r];
+}
+
 function _hexToRgb(hex) {
   const h = hex.replace("#", "");
   return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
@@ -782,6 +807,20 @@ function buildBiomeCache() {
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
+      if (b === 4) {
+        // Montagne (nº2) : massif en relief. Herbe SOUS (coins de falaise transparents),
+        // puis étage 1 (autotile voisinage), puis étage 2 sur l'intérieur profond.
+        octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
+        const inMt = (xx, yy) => _isMountain(biomes, xx, yy, W, H);
+        const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
+        octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
+        if (_mountainDepth(biomes, x, y, W, H) >= 2) {
+          const inHi = (xx, yy) => _mountainDepth(biomes, xx, yy, W, H) >= 2;
+          const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
+          octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+        }
+        continue;
+      }
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
       let tc, tr;
       if (b === 0) {
