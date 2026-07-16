@@ -699,6 +699,12 @@ const SHADOW_SOLID_BTYPE = { house: 1, mill: 1, well: 1, church: 1, forge: 1, ma
 // sa planche source, sa position pixel jitterée et une graine de phase de vent.
 let TREES = [];
 let forestCanopyCanvas = null;   // nappe canopée statique (vent phase 0) — blit dézoomé
+// Murs de falaise (refonte nº9-cœur v2) : fronts sud des massifs (tuiles à S ouvert) sortis
+// de la nappe de sol pour devenir des objets TRIABLES → une créature au pied grimpe DEVANT
+// la paroi, sur le plateau elle disparaît derrière la CRÊTE (base = y·T−1, jamais le pied).
+// Immuable (montagne fixe) → construit une fois. Nappe statique blittée dézoomé (comme TREES).
+let WALLS = [];
+let wallsCanvas = null;
 // hash déterministe [0,1)² — même formule que les overlays de biome (positions stables).
 function hash2(x, y, i) {
   const h1 = Math.abs(Math.sin(x * (127.1 + i * 53) + y * (311.7 + i * 79)) * 43758.5453) % 1;
@@ -973,6 +979,7 @@ function buildBiomeCache() {
   buildMountainMask();   // masque de rendu lissé (nº2) avant de tuiler
   classifyMesa();        // montagnes désertiques → grès (nº3)
   buildWaterDist();      // distance à la côte pour le dégradé de profondeur (nº4)
+  WALLS = [];            // fronts de falaise triables (nº9-cœur v2), reconstruits ici
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
@@ -986,19 +993,29 @@ function buildBiomeCache() {
         if (ortho <= 1) {
           // Piton rocheux au pied du massif (Rocks.png gris, cols 0-2 row 0)
           octx.drawImage(BIOME_SPRITES[4].overlay.img, ((x * 7 + y * 13) % 3) * T, 0, T, T, x * T, y * T, T, T);
-        } else if (mesa) {
-          // Mesa (nº3) : bloc GRÈS de Cliff.png (rows 6-8), un seul étage.
-          const inMt = (xx, yy) => _mInSet(xx, yy, W, H);
-          const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 6);
-          octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
         } else {
+          // Face sud ouverte (voisin S non-montagne ou bord bas) = FRONT de falaise : sorti
+          // de la nappe → objet triable (occlusion à la crête, nº9-cœur v2). Sinon baké.
+          const sOpen = (y >= H - 1) || !mountainMask[y + 1][x];
           const inMt = (xx, yy) => _mInSet(xx, yy, W, H);
-          const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
-          octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
-          if (_maskDepth(x, y, W, H) >= 2) {
-            const inHi = (xx, yy) => _maskDepth(xx, yy, W, H) >= 2;
-            const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
-            octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+          if (mesa) {
+            // Mesa (nº3) : bloc GRÈS de Cliff.png (rows 6-8), un seul étage.
+            const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 6);
+            if (sOpen) WALLS.push({ x, y, c: c1, r: r1, base: y * T - 1 });
+            else octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
+          } else {
+            const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
+            if (sOpen) {
+              // Front baké sans 2e étage (un front est en bordure → profondeur 1).
+              WALLS.push({ x, y, c: c1, r: r1, base: y * T - 1 });
+            } else {
+              octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
+              if (_maskDepth(x, y, W, H) >= 2) {
+                const inHi = (xx, yy) => _maskDepth(xx, yy, W, H) >= 2;
+                const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
+                octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+              }
+            }
           }
         }
         continue;
@@ -1081,6 +1098,22 @@ function buildBiomeCache() {
   buildTreeList();      // canopée nº7 : liste d'arbres dérivée des biomes
   buildForestShadow();  // ombres statiques au pied de chaque arbre (lit TREES)
   buildWaves();         // couche de vagues animées (nº4)
+  buildWallsCanvas();   // nappe statique des fronts de falaise (nº9-cœur v2, blit dézoomé)
+}
+
+// Nappe statique des fronts de falaise (nº9-cœur v2) — blittée telle quelle dézoomé (où
+// l'occlusion fine à la crête est imperceptible), sur le fond biome sous les entités, comme
+// le relief l'était avant l'extraction. Zoomé, WALLS passe par le tri unifié (drawAll).
+function buildWallsCanvas() {
+  wallsCanvas = null;
+  if (!worldData || !WALLS.length || !CLIFF_SPRITE.img.complete || CLIFF_SPRITE.img.naturalWidth === 0) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE;
+  const cv = document.createElement("canvas");
+  cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d");
+  c.imageSmoothingEnabled = false;
+  for (const w of WALLS) c.drawImage(CLIFF_SPRITE.img, w.c * T, w.r * T, T, T, w.x * T, w.y * T, T, T);
+  wallsCanvas = cv;
 }
 
 // Construit la liste plate des arbres de la canopée (nº7) à partir des biomes.
@@ -1520,6 +1553,10 @@ function drawAll() {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(biomeCache, 0, 0);
 
+  // Fronts de falaise (nº9-cœur v2) — dézoomé : nappe statique blittée ICI (relief sous les
+  // entités, comme avant l'extraction). Zoomé : WALLS passe par le tri de profondeur plus bas.
+  if (scale < CANOPY_WIND_MIN_SCALE && wallsCanvas) ctx.drawImage(wallsCanvas, 0, 0);
+
   // Vagues animées (nº4) : détail de surface de l'eau, au-dessus du fond, sous tout le reste.
   drawWaves(ctx);
 
@@ -1754,13 +1791,14 @@ function drawAll() {
     }
   }
 
-  // Profondeur unifiée (nº9-cœur) : au zoom, arbres (32px) et créatures sont interclassés
-  // par ligne de pied → une bête au sud d'un arbre passe DEVANT le tronc, au nord elle se
-  // cache sous le feuillage. Dézoomé (vent/occlusion imperceptibles) : créatures triées puis
-  // nappe canopée statique blittée d'un coup (perf), cf. drawCanopy — même seuil que nº4/nº7.
+  // Profondeur unifiée (nº9-cœur) : au zoom, arbres (32px), fronts de falaise (v2) et
+  // créatures sont interclassés par ligne de pied → une bête au sud d'un arbre passe DEVANT
+  // le tronc (au nord sous le feuillage), au pied d'une falaise elle grimpe DEVANT la paroi
+  // (sur le plateau, derrière la CRÊTE). Dézoomé (vent/occlusion imperceptibles) : relief +
+  // canopée en nappes statiques blittées d'un coup (perf) — même seuil que nº4/nº7.
   const sortedEnts = [...entities].filter(e => SPECIES[e.t]).sort((a, b) => ipy(a) - ipy(b));
-  if (scale >= CANOPY_WIND_MIN_SCALE && TREES.length) {
-    const now = performance.now();
+  if (scale >= CANOPY_WIND_MIN_SCALE && (TREES.length || WALLS.length)) {
+    const now = performance.now(), TT = TILE_SIZE;
     const x0 = -offX / scale - 40, y0 = -offY / scale - 48;
     const x1 = (canvas.width - offX) / scale + 40, y1 = (canvas.height - offY) / scale + 48;
     const items = [];
@@ -1768,10 +1806,15 @@ function drawAll() {
       if (tr.px + tr.dw < x0 || tr.px > x1 || tr.py + tr.dh < y0 || tr.py > y1) continue;
       items.push({ base: tr.py + tr.dh, tr });   // ligne de pied = bas du sprite (bas de tuile)
     }
-    for (const e of sortedEnts) items.push({ base: ipy(e) * T + T / 2, e });
+    for (const w of WALLS) {
+      if ((w.x + 1) * TT < x0 || w.x * TT > x1 || (w.y + 1) * TT < y0 || w.y * TT > y1) continue;
+      items.push({ base: w.base, w });           // occlusion à la CRÊTE (haut de la tuile front)
+    }
+    for (const e of sortedEnts) items.push({ base: ipy(e) * TT + TT / 2, e });
     items.sort((a, b) => a.base - b.base);
     for (const it of items) {
       if (it.tr) drawTreeSliced(ctx, it.tr, now);
+      else if (it.w) ctx.drawImage(CLIFF_SPRITE.img, it.w.c * TT, it.w.r * TT, TT, TT, it.w.x * TT, it.w.y * TT, TT, TT);
       else drawEntity(it.e);
     }
   } else {
