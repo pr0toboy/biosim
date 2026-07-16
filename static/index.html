@@ -378,6 +378,7 @@ const TREE_SPRITES = {
   treesSoft:       { img: new Image(), src: "/static/refonte/trees_soft.png" },
   forestTreesSoft: { img: new Image(), src: "/static/refonte/forest_trees_soft.png" },
   thingsG:         { img: new Image(), src: "/static/refonte/things_g.png" },
+  winterDeadSoft:  { img: new Image(), src: "/static/refonte/winter_dead_soft.png" },  // nº12 feuillus nus
 };
 // Autotile de falaise (refonte nº2) — Cliff.png (7×9). Bloc 3×3 (0,0)-(2,2) = étage 1,
 // (0,3)-(2,5) = étage 2 ; tuile choisie par voisinage (comme l'eau), herbe dessous.
@@ -506,6 +507,10 @@ let lightningAt     = -1e9;   // performance.now() du dernier éclair (flash dé
 // puddleWet le suit avec une forte inertie (les flaques naissent APRÈS le début et sèchent
 // longtemps APRÈS la fin). Purement front (lit currentRain/currentStorm) → hash-neutre.
 let rainWet = 0, puddleWet = 0, _lastWetT = -1;
+// Manteau neigeux (refonte nº12) : cover ∈ [0,1] piloté par la température moteur (currentTemp).
+// Accumulation/fonte LENTES (échelle minute). Rendu = overlay dithéré mis en cache (snowCanvas),
+// reconstruit quand cover bouge de >2 % — pas de reconstruction du biomeCache (plus sûr).
+let snowCover = 0, snowCanvas = null, _snowBuilt = -1;
 function updateWet(now) {
   if (_lastWetT < 0) { _lastWetT = now; return; }
   let dt = (now - _lastWetT) / 1000; _lastWetT = now;
@@ -514,6 +519,35 @@ function updateWet(now) {
   const ease = (v, tgt, rate) => v + Math.sign(tgt - v) * Math.min(Math.abs(tgt - v), dt * rate);
   rainWet   = Math.max(0, Math.min(1, ease(rainWet, target, currentStorm ? 0.5 : 0.35)));
   puddleWet = Math.max(0, Math.min(1, ease(puddleWet, rainWet, 0.12)));   // inertie forte
+  // Neige : cible ∝ froid (temp≤−2 → manteau plein, ≥2 → nu) ; blizzard (averse d'hiver) accélère.
+  const winter = currentSeason === "winter";
+  const snowTgt = currentTemp == null ? 0 : Math.max(0, Math.min(1, (2 - currentTemp) / 4)) * (winter || currentTemp <= 0 ? 1 : 0);
+  const snowRate = (currentRain && winter) ? 0.09 : 0.035;   // accumulation lente ; fonte idem
+  snowCover = Math.max(0, Math.min(1, ease(snowCover, snowTgt, snowRate)));
+  if (Math.abs(snowCover - _snowBuilt) > 0.02) buildSnowCanvas();
+}
+// Overlay manteau : tuiles terrestres blanchies par dithering (pleines au cœur, semi en bord de
+// seuil) ; eau → glace translucide quand il fait très froid. Hash-neutre, reconstruit à la volée.
+function buildSnowCanvas() {
+  _snowBuilt = snowCover;
+  snowCanvas = null;
+  if (!worldData || !worldData.biomes || snowCover < 0.02) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE, bm = worldData.biomes;
+  const cv = document.createElement("canvas"); cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d"); c.imageSmoothingEnabled = false;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const b = bm[y][x];
+      if (b === 0 || b === 5) {   // eau : étang gelé quand cover élevé
+        if (snowCover > 0.4) { c.fillStyle = `rgba(206,226,240,${(0.55 * snowCover).toFixed(3)})`; c.fillRect(x * T, y * T, T, T); }
+        continue;
+      }
+      const [h1] = hash2(x, y, 30);
+      if (h1 < snowCover - 0.12) { c.fillStyle = "rgba(238,244,252,0.82)"; c.fillRect(x * T, y * T, T, T); }
+      else if (h1 < snowCover + 0.12) { c.fillStyle = "rgba(238,244,252,0.42)"; c.fillRect(x * T, y * T, T, T); }
+    }
+  }
+  snowCanvas = cv;
 }
 let entityMap    = {};     // id → entity
 // ── Interpolation de rendu (fluidité) : rendu 60 fps découplé du tick moteur ──
@@ -1149,15 +1183,15 @@ function buildTreeList() {
       const [j1, j2] = hash2(x, y, 14);
       if (d === 0) {
         if (biomes[y][x] === 1 && h1 < 0.05) {
-          // Plaine : arbres épars
+          // Plaine : arbres épars (feuillus → nus en hiver, nº12)
           const c = 1 + Math.floor(h2 * 3);
-          TREES.push({ img: IT, sx: c * T, sw: T, sh: T,
+          TREES.push({ img: IT, sx: c * T, sw: T, sh: T, k: "decid",
             px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
             dw: B, dh: B, seed: j2 });
         } else if (biomes[y][x] === 3 && h1 < 0.35 && _touchesWater(biomes, x, y, W, H)) {
           // Oasis (nº3) : palmiers CoconutTrees (cols 2-5) sur l'anneau de sable de l'eau.
           const c = 2 + Math.floor(h2 * 4);
-          TREES.push({ img: PALM_SPRITE.img, sx: c * T, sw: T, sh: T,
+          TREES.push({ img: PALM_SPRITE.img, sx: c * T, sw: T, sh: T, k: "palm",
             px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
             dw: B, dh: B, seed: j2 });
         }
@@ -1168,11 +1202,11 @@ function buildTreeList() {
       const px = Math.round(x * T - 8 + (j1 - 0.5) * 10);
       const py = Math.round((y + 1) * T - B + (j2 - 0.5) * 6);
       const kind = h2;
-      let img, sx, sw, sh;
-      if (kind < 0.55) { img = IG; sx = (kind < 0.11 ? 3 : 1) * T; sw = 2 * T; sh = 2 * T; }
-      else if (kind < 0.85) { img = IT; sx = (1 + Math.min(Math.floor((kind - 0.55) * 10), 2)) * T; sw = T; sh = T; }
-      else { img = IF; sx = 3 * T; sw = T; sh = T; }   // pin
-      TREES.push({ img, sx, sw, sh, px, py, dw: B, dh: B, seed: j2 });
+      let img, sx, sw, sh, k;
+      if (kind < 0.55) { img = IG; sx = (kind < 0.11 ? 3 : 1) * T; sw = 2 * T; sh = 2 * T; k = "big"; }
+      else if (kind < 0.85) { img = IT; sx = (1 + Math.min(Math.floor((kind - 0.55) * 10), 2)) * T; sw = T; sh = T; k = "decid"; }
+      else { img = IF; sx = 3 * T; sw = T; sh = T; k = "pine"; }   // pin (garde son feuillage l'hiver)
+      TREES.push({ img, sx, sw, sh, px, py, dw: B, dh: B, seed: j2, k });
     }
   }
   buildCanopyCanvas();   // nappe statique tenue en phase avec TREES
@@ -1361,15 +1395,22 @@ const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperc
 // fractionnaire duplique/saute une rangée de pixels → trait sombre). La cime bouge au vent,
 // le tronc reste fixe. Unité partagée par le tri de profondeur (nº9) et la nappe canopée.
 function drawTreeSliced(ctx, tr, t) {
-  if (!tr.img.complete || tr.img.naturalWidth === 0) return;
   const T = TILE_SIZE;
+  let img = tr.img, sx = tr.sx;
+  // Hiver (nº12) : bascule progressive par arbre (seed < couverture). Feuillus → NUS
+  // (WinterDeadTrees cols 2-3, branches enneigées) ; pins gardent leur feuillage ; gros
+  // feuillus 2×2 restent verts (pas d'équivalent nu 2 tuiles — compromis documenté).
+  if (snowCover > 0.05 && tr.k === "decid" && tr.seed < snowCover * 1.08) {
+    img = TREE_SPRITES.winterDeadSoft.img; sx = (2 + Math.floor(tr.seed * 2)) * T;
+  }
+  if (!img.complete || img.naturalWidth === 0) return;
   const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
   const sb = tr.sh === T ? [0, 7, 12, 16] : [0, 14, 24, 32];
   const sc = tr.dh / tr.sh;
   const shifts = [s, Math.trunc(s / 2), 0];   // cime bouge le plus, tronc fixe
   for (let i = 0; i < 3; i++) {
-    ctx.drawImage(tr.img,
-      tr.sx, sb[i], tr.sw, sb[i + 1] - sb[i],
+    ctx.drawImage(img,
+      sx, sb[i], tr.sw, sb[i + 1] - sb[i],
       tr.px + shifts[i], tr.py + sb[i] * sc, tr.dw, (sb[i + 1] - sb[i]) * sc);
   }
 }
@@ -1627,6 +1668,10 @@ function drawAll() {
 
   // Souches d'arbres (forêt coupée, avant l'overlay saisonnier)
   drawStumps(ctx);
+
+  // Manteau neigeux (nº12) : overlay dithéré sur le sol, sous les entités (elles marchent
+  // dessus). Cache reconstruit à la volée quand la couverture bouge (updateWet).
+  if (snowCanvas) ctx.drawImage(snowCanvas, 0, 0);
 
   // Overlay saisonnier
   const seasonOverlay = (SEASONS[currentSeason] || SEASONS.spring).overlay;

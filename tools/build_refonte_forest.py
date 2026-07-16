@@ -131,6 +131,9 @@ outputs = {
     "deep_water": deep_water,
     # nº6 transitions : tuiles de mélange 50/50 (herbe↔sable [0], herbe↔terre-battue [1]).
     "blends": blends_img,
+    # nº12 hiver : feuillus NUS (branches enneigées) — WinterDeadTrees, contour noir adouci
+    # (23,23,23 → brun sombre) pour éviter le trait doublé au dessin ×2. 4 cols (on prend 2-3).
+    "winter_dead_soft": remap(load("Nature/WinterDeadTrees.png"), {(23, 23, 23): (74, 64, 56)}),
 }
 
 for name, im in outputs.items():
