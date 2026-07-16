@@ -638,6 +638,15 @@ setInterval(refreshChronicle, 20000);
 let territoryCanvas = null;   // offscreen HTMLCanvasElement (résolution = tuiles)
 const TERRITORY_ALPHA = 0x40; // opacité du remplissage (~25 %)
 
+// ── Ombres portées (refonte visuelle nº8) : masque d'ombre UNIQUE composité une
+// seule fois, pour que les chevauchements ne noircissent jamais deux fois (fidèle au
+// template8 de Regigigas). La nappe des tuiles forêt est précalculée (statique) ; les
+// créatures et bâtiments (dynamiques) sont redessinés par frame dans le même masque.
+let shadowMask = null;          // offscreen reconstruit chaque frame (px-monde)
+let forestShadowCanvas = null;  // nappe d'ombre des tuiles forêt, précalculée
+const SHADOW_ALPHA = 0.24;
+const SHADOW_COLOR = "#1a2e1a"; // vert très sombre (soleil plein nord, comme le template)
+
 function _hexToRgb(hex) {
   const h = hex.replace("#", "");
   return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
@@ -741,6 +750,60 @@ function buildBiomeCache() {
     }
   }
   biomeCache = off;
+  buildForestShadow();
+}
+
+// Nappe d'ombre des tuiles forêt (biome 2) : une ellipse au pied de chaque tuile
+// boisée. La forêt dense produit ainsi son ombrage continu (comme le template). Statique
+// → précalculé une fois par changement de monde, blitté tel quel dans le masque/frame.
+function buildForestShadow() {
+  if (!worldData || !worldData.biomes) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE;
+  const cv = document.createElement("canvas");
+  cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d");
+  c.fillStyle = SHADOW_COLOR;
+  const biomes = worldData.biomes;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (biomes[y][x] === 2) {   // forêt
+        c.beginPath();
+        c.ellipse((x + 0.5) * T, (y + 0.82) * T, T * 0.42, T * 0.17, 0, 0, Math.PI * 2);
+        c.fill();
+      }
+    }
+  }
+  forestShadowCanvas = cv;
+}
+
+// Passe d'ombres : reconstruit le masque unique (nappe forêt + assises de bâtiments +
+// ellipses de créatures), puis le composite une seule fois à SHADOW_ALPHA. Appelé dans
+// drawAll APRÈS le sol et AVANT tout ce qui est « debout » (bâtiments, créatures).
+function drawShadows(ctx) {
+  if (!worldData) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE;
+  if (!shadowMask) shadowMask = document.createElement("canvas");
+  if (shadowMask.width !== W * T) { shadowMask.width = W * T; shadowMask.height = H * T; }
+  const m = shadowMask.getContext("2d");
+  m.clearRect(0, 0, shadowMask.width, shadowMask.height);
+  m.fillStyle = SHADOW_COLOR;
+  if (forestShadowCanvas) m.drawImage(forestShadowCanvas, 0, 0);   // arbres (statique)
+  buildings.forEach(b => {                                          // assises de bâtiments
+    if (b.btype === "campfire") return;                            // le feu a déjà son halo
+    m.beginPath();
+    m.ellipse((b.x + 0.5) * T, (b.y + 0.92) * T, T * 0.42, T * 0.16, 0, 0, Math.PI * 2);
+    m.fill();
+  });
+  entities.forEach(e => {                                           // créatures (suivent le pied)
+    if (!SPECIES[e.t]) return;
+    m.beginPath();
+    m.ellipse((ipx(e) + 0.5) * T, (ipy(e) + 0.9) * T, T * 0.32, T * 0.14, 0, 0, Math.PI * 2);
+    m.fill();
+  });
+  ctx.save();
+  ctx.globalAlpha = SHADOW_ALPHA;
+  ctx.drawImage(shadowMask, 0, 0);
+  ctx.restore();
 }
 
 function redrawBiomeTile(octx, x, y, biome) {
@@ -950,6 +1013,10 @@ function drawAll() {
       ctx.fillRect(fx * T, fy * T, T, T);
     });
   }
+
+  // Ombres portées (refonte nº8) : sol → OMBRES → tout ce qui est debout (bâtiments,
+  // créatures). Masque unique composité une fois → pas de double noircissement.
+  drawShadows(ctx);
 
   // Maisons construites
   // Filons d'or (C2) : la montagne scintille
