@@ -642,10 +642,14 @@ const TERRITORY_ALPHA = 0x40; // opacité du remplissage (~25 %)
 // seule fois, pour que les chevauchements ne noircissent jamais deux fois (fidèle au
 // template8 de Regigigas). La nappe des tuiles forêt est précalculée (statique) ; les
 // créatures et bâtiments (dynamiques) sont redessinés par frame dans le même masque.
-let shadowMask = null;          // offscreen reconstruit chaque frame (px-monde)
-let forestShadowCanvas = null;  // nappe d'ombre des tuiles forêt, précalculée
+let forestShadowCanvas = null;   // nappe d'ombre des tuiles forêt, statique (rebuild au monde)
+let buildingShadowCanvas = null; // nappe d'ombre des assises de bâtiments, semi-statique
+let buildingShadowSig = "";      // signature de la liste bâtiments ⇒ rebuild ciblé (pas /frame)
 const SHADOW_ALPHA = 0.24;
 const SHADOW_COLOR = "#1a2e1a"; // vert très sombre (soleil plein nord, comme le template)
+// Seuls les bâtiments VOLUMÉTRIQUES projettent une assise ; wheatfield (cultures) et ruin
+// (gravats) sont à plat → pas d'ombre portée, campfire a son propre halo (nº10).
+const SHADOW_SOLID_BTYPE = { house: 1, mill: 1, well: 1, church: 1, forge: 1, market: 1 };
 
 function _hexToRgb(hex) {
   const h = hex.replace("#", "");
@@ -776,33 +780,56 @@ function buildForestShadow() {
   forestShadowCanvas = cv;
 }
 
-// Passe d'ombres : reconstruit le masque unique (nappe forêt + assises de bâtiments +
-// ellipses de créatures), puis le composite une seule fois à SHADOW_ALPHA. Appelé dans
-// drawAll APRÈS le sol et AVANT tout ce qui est « debout » (bâtiments, créatures).
-function drawShadows(ctx) {
+// Signature légère de la liste bâtiments solides : construction/destruction change la
+// chaîne ⇒ on reconstruit la nappe. Recalculée /frame mais O(nb bâtiments) trivial.
+function buildingShadowSignature() {
+  let s = "" + buildings.length;
+  for (const b of buildings) {
+    if (SHADOW_SOLID_BTYPE[b.btype]) s += "|" + b.btype + b.x + "," + b.y;
+  }
+  return s;
+}
+
+// Nappe des assises de bâtiments (semi-statique) : reconstruite UNIQUEMENT quand la liste
+// des bâtiments solides change, jamais par frame.
+function buildBuildingShadow() {
   if (!worldData) return;
   const W = worldData.width, H = worldData.height, T = TILE_SIZE;
-  if (!shadowMask) shadowMask = document.createElement("canvas");
-  if (shadowMask.width !== W * T) { shadowMask.width = W * T; shadowMask.height = H * T; }
-  const m = shadowMask.getContext("2d");
-  m.clearRect(0, 0, shadowMask.width, shadowMask.height);
-  m.fillStyle = SHADOW_COLOR;
-  if (forestShadowCanvas) m.drawImage(forestShadowCanvas, 0, 0);   // arbres (statique)
-  buildings.forEach(b => {                                          // assises de bâtiments
-    if (b.btype === "campfire") return;                            // le feu a déjà son halo
-    m.beginPath();
-    m.ellipse((b.x + 0.5) * T, (b.y + 0.92) * T, T * 0.42, T * 0.16, 0, 0, Math.PI * 2);
-    m.fill();
+  let cv = buildingShadowCanvas;
+  if (!cv) { cv = document.createElement("canvas"); buildingShadowCanvas = cv; }
+  if (cv.width !== W * T) { cv.width = W * T; cv.height = H * T; }
+  const c = cv.getContext("2d");
+  c.clearRect(0, 0, cv.width, cv.height);
+  c.fillStyle = SHADOW_COLOR;
+  buildings.forEach(b => {
+    if (!SHADOW_SOLID_BTYPE[b.btype]) return;
+    c.beginPath();
+    c.ellipse((b.x + 0.5) * T, (b.y + 0.92) * T, T * 0.42, T * 0.16, 0, 0, Math.PI * 2);
+    c.fill();
   });
-  entities.forEach(e => {                                           // créatures (suivent le pied)
-    if (!SPECIES[e.t]) return;
-    m.beginPath();
-    m.ellipse((ipx(e) + 0.5) * T, (ipy(e) + 0.9) * T, T * 0.32, T * 0.14, 0, 0, Math.PI * 2);
-    m.fill();
-  });
+}
+
+// Passe d'ombres (correctifs Regigigas) : plus AUCUN canvas plein-monde reconstruit /frame.
+// Deux nappes composées telles quelles à SHADOW_ALPHA — forêt (statique) + bâtiments
+// (semi-statique) — puis les créatures en ellipses DIRECTES (coût ≈ nb entités). Le
+// double-noircissement entre 2 ombres qui se chevauchent est rarissime et invisible.
+// Appelé dans drawAll APRÈS le sol et AVANT tout ce qui est « debout ».
+function drawShadows(ctx) {
+  if (!worldData) return;
+  const T = TILE_SIZE;
+  const sig = buildingShadowSignature();
+  if (sig !== buildingShadowSig) { buildBuildingShadow(); buildingShadowSig = sig; }
   ctx.save();
   ctx.globalAlpha = SHADOW_ALPHA;
-  ctx.drawImage(shadowMask, 0, 0);
+  if (forestShadowCanvas) ctx.drawImage(forestShadowCanvas, 0, 0);      // arbres (statique)
+  if (buildingShadowCanvas) ctx.drawImage(buildingShadowCanvas, 0, 0);  // assises (semi-statique)
+  ctx.fillStyle = SHADOW_COLOR;
+  entities.forEach(e => {                                               // créatures (direct)
+    if (!SPECIES[e.t]) return;
+    ctx.beginPath();
+    ctx.ellipse((ipx(e) + 0.5) * T, (ipy(e) + 0.9) * T, T * 0.32, T * 0.14, 0, 0, Math.PI * 2);
+    ctx.fill();
+  });
   ctx.restore();
 }
 
