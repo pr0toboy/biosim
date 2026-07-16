@@ -1092,7 +1092,11 @@ function drawAll() {
 
   // Entités (coordonnées en pixels-sprite)
   ctx.imageSmoothingEnabled = false;
-  entities.forEach(e => {
+  // Profondeur (refonte nº9, partie applicable) : les créatures sont dessinées triées
+  // par ligne de pied (y croissant) → une créature plus au sud passe devant une plus au
+  // nord. Le cœur de nº9 (occlusion créature ↔ arbre/mur) attend la tranche B, qui fera
+  // des arbres de vrais objets à insérer dans ce même tri (aujourd'hui = tuiles de biome).
+  [...entities].sort((a, b) => ipy(a) - ipy(b)).forEach(e => {
     if (!SPECIES[e.t]) return;
     const cx = (ipx(e) + 0.5) * T;
     const cy = (ipy(e) + 0.5) * T;
