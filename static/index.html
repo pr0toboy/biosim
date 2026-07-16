@@ -722,14 +722,40 @@ function plaineRow(x, y) {
 // Le moteur donne des montagnes ORGANIQUES (blobs, biome 4 immuable) → tuile falaise
 // choisie par les voisins 4-dir (comme l'eau), pas par des bornes rectangle (raccourci
 // du template). Étage 2 = intérieur profond (Chebyshev ≥ 2), son propre autotile.
-const _isMountain = (bm, x, y, W, H) =>
-  x >= 0 && x < W && y >= 0 && y < H && bm[y][x] === 4;
-function _mountainDepth(bm, x, y, W, H) {
-  if (!_isMountain(bm, x, y, W, H)) return 0;
+//
+// Correctif nº2b (Regigigas) : l'autotile 4-arêtes « perle » sur les contours en escalier
+// diagonal. On lisse le masque de RENDU (jamais le moteur → gameplay intact) : 2 passes
+// qui COMBLENT les crans concaves d'1 tuile (≥3 voisins ortho) ; les promontoires d'1
+// tuile (≤1 voisin ortho) sont rendus en rocher isolé, pas en fragment de falaise.
+let mountainMask = null;   // masque de RENDU lissé (≠ masque moteur)
+function buildMountainMask() {
+  if (!worldData || !worldData.biomes) { mountainMask = null; return; }
+  const W = worldData.width, H = worldData.height, bm = worldData.biomes;
+  let R = [];
+  for (let y = 0; y < H; y++) {
+    const row = new Uint8Array(W);
+    for (let x = 0; x < W; x++) row[x] = bm[y][x] === 4 ? 1 : 0;
+    R.push(row);
+  }
+  const orth = (M, x, y) =>
+    (x > 0 ? M[y][x - 1] : 0) + (x < W - 1 ? M[y][x + 1] : 0) +
+    (y > 0 ? M[y - 1][x] : 0) + (y < H - 1 ? M[y + 1][x] : 0);
+  for (let it = 0; it < 2; it++) {
+    const N = R.map(r => r.slice());
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++)
+        if (!R[y][x] && orth(R, x, y) >= 3) N[y][x] = 1;   // comble le cran concave
+    R = N;
+  }
+  mountainMask = R;
+}
+const _mInSet = (x, y, W, H) => x >= 0 && x < W && y >= 0 && y < H && !!mountainMask[y][x];
+function _maskDepth(x, y, W, H) {
+  if (!_mInSet(x, y, W, H)) return 0;
   for (let d = 1; d <= 2; d++)
     for (let dy = -d; dy <= d; dy++)
       for (let dx = -d; dx <= d; dx++)
-        if (Math.max(Math.abs(dx), Math.abs(dy)) === d && !_isMountain(bm, x + dx, y + dy, W, H))
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === d && !_mInSet(x + dx, y + dy, W, H))
           return d;
   return 3;
 }
@@ -804,20 +830,28 @@ function buildBiomeCache() {
   const octx = off.getContext("2d");
   octx.imageSmoothingEnabled = false;
   const biomes = worldData.biomes;
+  buildMountainMask();   // masque de rendu lissé (nº2) avant de tuiler
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
-      if (b === 4) {
-        // Montagne (nº2) : massif en relief. Herbe SOUS (coins de falaise transparents),
-        // puis étage 1 (autotile voisinage), puis étage 2 sur l'intérieur profond.
+      if (mountainMask[y][x]) {
+        // Montagne (nº2) : relief autotile sur le masque de RENDU lissé. Herbe SOUS (coins
+        // de falaise transparents). Promontoire (≤1 voisin ortho) → rocher isolé gris.
         octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
-        const inMt = (xx, yy) => _isMountain(biomes, xx, yy, W, H);
-        const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
-        octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
-        if (_mountainDepth(biomes, x, y, W, H) >= 2) {
-          const inHi = (xx, yy) => _mountainDepth(biomes, xx, yy, W, H) >= 2;
-          const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
-          octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+        const ortho = (x > 0 && mountainMask[y][x - 1] ? 1 : 0) + (x < W - 1 && mountainMask[y][x + 1] ? 1 : 0)
+                    + (y > 0 && mountainMask[y - 1][x] ? 1 : 0) + (y < H - 1 && mountainMask[y + 1][x] ? 1 : 0);
+        if (ortho <= 1) {
+          // Piton rocheux au pied du massif (Rocks.png gris, cols 0-2 row 0)
+          octx.drawImage(BIOME_SPRITES[4].overlay.img, ((x * 7 + y * 13) % 3) * T, 0, T, T, x * T, y * T, T, T);
+        } else {
+          const inMt = (xx, yy) => _mInSet(xx, yy, W, H);
+          const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
+          octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
+          if (_maskDepth(x, y, W, H) >= 2) {
+            const inHi = (xx, yy) => _maskDepth(xx, yy, W, H) >= 2;
+            const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
+            octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+          }
         }
         continue;
       }
