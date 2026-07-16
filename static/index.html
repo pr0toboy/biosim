@@ -1270,7 +1270,19 @@ function ipy(e){ const p = prevPos[e.id]; if(!p) return e.y; const d = e.y - p.y
 // Frame source [col,row] d'une entité (refonte nº1). Espèce animée + en mouvement →
 // direction (déplacement du dernier tick) + frame de marche (~128 ms, déphasée par id) ;
 // sinon frame idle/fixe. Le chef et les espèces non listées gardent sp.col/sp.row.
+// Poissons (nº4) : 3 espèces (cols 2-4, stable par id) × 4 directions. Mapping marine
+// up:0/left:1/right:2/down:3 — INVERSE des terrestres sur les verticales. 1 frame/dir.
+const FISH_ROWS = { up: 0, left: 1, right: 2, down: 3 };
 function entityFrame(e, sp, isChief) {
+  if (e.t === "fish") {
+    const col = 2 + (Math.abs(e.id | 0) % 3);
+    const p = prevPos[e.id];
+    const dx = p ? e.x - p.x : 0, dy = p ? e.y - p.y : 0;
+    let dir = "right";
+    if (Math.abs(dx) >= 0.02 || Math.abs(dy) >= 0.02)
+      dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
+    return [col, FISH_ROWS[dir]];
+  }
   const anim = !isChief && ENTITY_ANIM[e.t];
   if (!anim) return [sp.col, sp.row];
   const p = prevPos[e.id];
