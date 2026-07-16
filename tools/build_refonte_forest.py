@@ -73,6 +73,13 @@ REMAP_G = {
     (194, 224, 154): (203, 227, 111),
 }
 SOFT = {(23, 23, 23): (72, 124, 52)}  # contour noir → vert feuille (dessin ×2)
+# nº3 : sable texturé — les 3 tuiles mouchetées de TexturedGrass row1 remappées en teintes
+# dérivées du sable actuel (Shore col0 = 231,213,147). Même grain, palette sable.
+REMAP_SAND = {
+    (177, 211, 84): (231, 213, 147),   # base herbe → base sable
+    (203, 227, 111): (243, 229, 175),  # rehaut → crème clair
+    (142, 205, 101): (203, 183, 118),  # brin → ocre discret
+}
 
 things_g = remap(things, REMAP_G)
 
@@ -88,6 +95,8 @@ outputs = {
     # (les 2 buissons reteintés vers la palette du jeu, cf. things_g).
     "plain_extra": compose([tile(things, 6, 0), tile(things, 7, 1), tile(things, 5, 2),
                             tile(things_g, 0, 3), tile(things_g, 1, 3)]),
+    # nº3 désert : sable texturé (3 variantes), remplace le sable plat Shore col0.
+    "sand_tex": remap(grass.crop((0, S, 3 * S, 2 * S)), REMAP_SAND),
 }
 
 for name, im in outputs.items():

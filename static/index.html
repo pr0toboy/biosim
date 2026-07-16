@@ -361,7 +361,9 @@ const BIOME_SPRITES = {
   // debout sont dans la couche canopée (32px, dessinée APRÈS les entités = look WorldBox).
   2: { img: new Image(), src: "/static/refonte/floor_dark.png", col0: 0, cols: 3, rows: 1,
      overlay: { img: new Image(), src: "/static/refonte/forest_floor.png", col0: 0, cols: 4, rows: 1, density: 1.2 } },
-  3: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png",          col0: 0, cols: 1, rows: 1,
+  // Désert (nº3) : sable TEXTURÉ (3 variantes, même grain que l'herbe, palette sable) au
+  // lieu du sable plat Shore col0. Cactus conservés.
+  3: { img: new Image(), src: "/static/refonte/sand_tex.png", col0: 0, cols: 3, rows: 1,
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Cactus.png", col0: 0, cols: 4, rows: 2, density: 2 } },
   4: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Winter.png",         col0: 5, cols: 1, rows: 1,
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Rocks.png", col0: 0, cols: 3, rows: 4, density: 5 } },
@@ -728,6 +730,7 @@ function plaineRow(x, y) {
 // qui COMBLENT les crans concaves d'1 tuile (≥3 voisins ortho) ; les promontoires d'1
 // tuile (≤1 voisin ortho) sont rendus en rocher isolé, pas en fragment de falaise.
 let mountainMask = null;   // masque de RENDU lissé (≠ masque moteur)
+let mesaMask = null;       // sous-ensemble : montagnes entourées de désert (rendu grès, nº3)
 function buildMountainMask() {
   if (!worldData || !worldData.biomes) { mountainMask = null; return; }
   const W = worldData.width, H = worldData.height, bm = worldData.biomes;
@@ -748,6 +751,32 @@ function buildMountainMask() {
     R = N;
   }
   mountainMask = R;
+}
+// Mesa (nº3) : une tuile-montagne est « mesa » (rendue en grès) si le biome NON-montagne
+// le plus proche est le désert (3). BFS multi-source depuis toutes les tuiles hors masque.
+function classifyMesa() {
+  mesaMask = null;
+  if (!worldData || !mountainMask) return;
+  const W = worldData.width, H = worldData.height, bm = worldData.biomes, M = mountainMask;
+  const near = [];
+  for (let y = 0; y < H; y++) near.push(new Int8Array(W).fill(-1));
+  const qx = [], qy = [];
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++)
+      if (!M[y][x]) { near[y][x] = bm[y][x]; qx.push(x); qy.push(y); }
+  const D = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (let h = 0; h < qx.length; h++) {
+    const x = qx[h], y = qy[h], bio = near[y][x];
+    for (const [dx, dy] of D) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H && M[ny][nx] && near[ny][nx] === -1) {
+        near[ny][nx] = bio; qx.push(nx); qy.push(ny);
+      }
+    }
+  }
+  const mesa = [];
+  for (let y = 0; y < H; y++) { const row = new Uint8Array(W); for (let x = 0; x < W; x++) row[x] = (M[y][x] && near[y][x] === 3) ? 1 : 0; mesa.push(row); }
+  mesaMask = mesa;
 }
 const _mInSet = (x, y, W, H) => x >= 0 && x < W && y >= 0 && y < H && !!mountainMask[y][x];
 function _maskDepth(x, y, W, H) {
@@ -831,6 +860,7 @@ function buildBiomeCache() {
   octx.imageSmoothingEnabled = false;
   const biomes = worldData.biomes;
   buildMountainMask();   // masque de rendu lissé (nº2) avant de tuiler
+  classifyMesa();        // montagnes désertiques → grès (nº3)
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
@@ -840,9 +870,15 @@ function buildBiomeCache() {
         octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
         const ortho = (x > 0 && mountainMask[y][x - 1] ? 1 : 0) + (x < W - 1 && mountainMask[y][x + 1] ? 1 : 0)
                     + (y > 0 && mountainMask[y - 1][x] ? 1 : 0) + (y < H - 1 && mountainMask[y + 1][x] ? 1 : 0);
+        const mesa = mesaMask && mesaMask[y][x];
         if (ortho <= 1) {
           // Piton rocheux au pied du massif (Rocks.png gris, cols 0-2 row 0)
           octx.drawImage(BIOME_SPRITES[4].overlay.img, ((x * 7 + y * 13) % 3) * T, 0, T, T, x * T, y * T, T, T);
+        } else if (mesa) {
+          // Mesa (nº3) : bloc GRÈS de Cliff.png (rows 6-8), un seul étage.
+          const inMt = (xx, yy) => _mInSet(xx, yy, W, H);
+          const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 6);
+          octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
         } else {
           const inMt = (xx, yy) => _mInSet(xx, yy, W, H);
           const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
