@@ -13,6 +13,7 @@ Reproduit fidèlement la recette validée de demo/build7.py + build8.py :
 
 Idempotent : relancer régénère à l'identique. Aucune dépendance au moteur.
 """
+import math
 import pathlib
 from PIL import Image
 
@@ -83,6 +84,26 @@ REMAP_SAND = {
 
 things_g = remap(things, REMAP_G)
 
+
+def blend_tile(a, b):
+    """Tuile de mélange 50/50 : masque speckle déterministe par pixel (nº6)."""
+    out = a.copy()
+    pa, pb, po = a.load(), b.load(), out.load()
+    for yy in range(S):
+        for xx in range(S):
+            h = abs(math.sin(xx * 127.1 + yy * 311.7) * 43758.5453) % 1
+            po[xx, yy] = pb[xx, yy] if h < 0.5 else pa[xx, yy]
+    return out
+
+
+# nº6 transitions : tuiles de mélange herbe↔sable [0] et herbe↔terre-battue [1].
+_sand = remap(grass.crop((0, S, 3 * S, 2 * S)), REMAP_SAND)   # même sable que nº3
+_dead = load("Ground/DeadGrass.png")
+blends_img = compose([
+    blend_tile(grass.crop((0, S, S, 2 * S)), _sand.crop((0, 0, S, S))),
+    blend_tile(grass.crop((0, S, S, 2 * S)), tile(_dead, 0, 0)),
+])
+
 # nº4 : 2 paliers d'eau profonde = Shore col4 (66,172,175) assombri ×0.84 et ×0.68.
 shore_img = load("Ground/Shore.png")
 deep_water = Image.new("RGBA", (2 * S, S), (0, 0, 0, 0))
@@ -108,6 +129,8 @@ outputs = {
     "sand_tex": remap(grass.crop((0, S, 3 * S, 2 * S)), REMAP_SAND),
     # nº4 océan : 2 paliers d'eau profonde = Shore col4 assombri ×0.84 et ×0.68.
     "deep_water": deep_water,
+    # nº6 transitions : tuiles de mélange 50/50 (herbe↔sable [0], herbe↔terre-battue [1]).
+    "blends": blends_img,
 }
 
 for name, im in outputs.items():

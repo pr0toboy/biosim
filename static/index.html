@@ -386,6 +386,8 @@ const CLIFF_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Ground/C
 const PALM_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Nature/CoconutTrees.png" };
 // Paliers d'eau profonde (refonte nº4) — Shore col4 assombri ×0.84 (col0) et ×0.68 (col1).
 const DEEPS_SPRITE = { img: new Image(), src: "/static/refonte/deep_water.png" };
+// Tuiles de mélange de frontière (refonte nº6) — herbe↔sable (col0), herbe↔terre (col1).
+const BLENDS_SPRITE = { img: new Image(), src: "/static/refonte/blends.png" };
 
 // Sprite feu de camp (centre de clan)
 const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
@@ -447,7 +449,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CLIFF_SPRITE, PALM_SPRITE, DEEPS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
     { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
@@ -792,6 +794,47 @@ function _touchesWater(bm, x, y, W, H) {
     }
   return false;
 }
+// Transitions (refonte nº6) : nombre de voisins 8-dir de biome `target` autour de (x,y).
+// Plus il y en a, plus le fondu est probable (coins concaves s'arrondissent d'eux-mêmes).
+function _foreignCount(bm, x, y, W, H, target) {
+  let n = 0;
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H && bm[ny][nx] === target) n++;
+    }
+  return n;
+}
+// Choix de fondu (nº6) : probabilité PROPORTIONNELLE au nb de voisins étrangers.
+// p = min(0.16·n, 0.85) ; moitié tuile-mélange (speckle 50/50), moitié échange franc.
+// gh = bruit déterministe [0,1) propre à la tuile → aucune dérive, hash-neutre.
+function _meltPick(gh, n) {
+  const p = Math.min(0.16 * n, 0.85);
+  if (gh < p * 0.5) return "blend";
+  if (gh < p) return "other";
+  return null;
+}
+// Plage (nº6) : frange sableuse dithérée sur une tuile d'herbe au bord de l'eau (proportion-
+// nelle au nb de voisins d'eau/rivière — les criques se sablonnent plus, les pointes moins).
+// L'eau est un masque IMMUABLE → même logique au build et au redraw (surpâturage grass↔dirt).
+// Retourne true si la tuile a été peinte (→ ni herbe ni overlay au-dessus). Partagé.
+function _paintBeach(octx, x, y, W, H, bm) {
+  const nw = _foreignCount(bm, x, y, W, H, 0) + _foreignCount(bm, x, y, W, H, 5);
+  if (nw <= 0) return false;
+  const [gh] = hash2(x, y, 10);
+  const pick = _meltPick(gh, nw);
+  const T = TILE_SIZE;
+  if (pick === "blend") {   // tuile-mélange herbe↔sable (col0)
+    octx.drawImage(BLENDS_SPRITE.img, 0, 0, T, T, x * T, y * T, T, T);
+    return true;
+  }
+  if (pick === "other") {   // sable franc (sand_tex, 3 variantes)
+    octx.drawImage(BIOME_SPRITES[3].img, ((x * 7 + y * 13) % 3) * T, 0, T, T, x * T, y * T, T, T);
+    return true;
+  }
+  return false;
+}
 // Distance à la côte (refonte nº4) : BFS multi-source 8-dir depuis toute tuile NON-eau
 // (biome ≠ 0) vers l'océan → chaque tuile d'eau connaît sa distance à la terre (bornée 12,
 // -1 = plein large). Sert au dégradé de profondeur. Recalculée au chargement (immuable).
@@ -960,10 +1003,27 @@ function buildBiomeCache() {
         }
         continue;
       }
-      if (b === 3 && _touchesWater(biomes, x, y, W, H)) {
-        // Oasis (nº3) : rive humide (Shore col1) sans cactus ; palmiers ajoutés en canopée.
-        octx.drawImage(BIOME_SPRITES[0].img, T, 0, T, T, x * T, y * T, T, T);
-        continue;
+      if (b === 3) {
+        if (_touchesWater(biomes, x, y, W, H)) {
+          // Oasis (nº3) : rive humide (Shore col1) sans cactus ; palmiers ajoutés en canopée.
+          octx.drawImage(BIOME_SPRITES[0].img, T, 0, T, T, x * T, y * T, T, T);
+          continue;
+        }
+        // Fondu sable→herbe (nº6) : bord du désert adouci, proportionnel aux voisins d'herbe.
+        const ng = _foreignCount(biomes, x, y, W, H, 1);
+        if (ng > 0) {
+          const [gh] = hash2(x, y, 9);
+          const pick = _meltPick(gh, ng);
+          if (pick === "blend") {   // tuile-mélange herbe↔sable (col0)
+            octx.drawImage(BLENDS_SPRITE.img, 0, 0, T, T, x * T, y * T, T, T);
+            continue;
+          }
+          if (pick === "other") {   // échange franc → herbe de plaine (pas de fleurs sur l'ex-sable)
+            octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, plaineRow(x, y) * T, T, T, x * T, y * T, T, T);
+            continue;
+          }
+        }
+        // sinon : sable normal → branche générique (sand_tex + cactus)
       }
       if (b === 0) {
         // Océan (nº4) : dégradé de profondeur par distance à la côte + plantes/récifs/vagues.
@@ -988,6 +1048,8 @@ function buildBiomeCache() {
         // Vagues : couche animée séparée (drawWaves), pas bakées ici.
         continue;
       }
+      // Plage (nº6) : frange sableuse sur l'herbe au bord de l'eau (eau immuable → sûr).
+      if (b === 1 && _paintBeach(octx, x, y, W, H, biomes)) continue;
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
       let tc, tr;
       if (b === 1) {
@@ -1275,6 +1337,10 @@ function drawCanopy(ctx) {
 
 function redrawBiomeTile(octx, x, y, biome) {
   const T = TILE_SIZE;
+  // Plage (nº6) : si l'herbe reprend au bord de l'eau, remettre la frange sableuse (cohérence
+  // avec le build ; l'eau est immuable donc l'adjacence est stable malgré le surpâturage).
+  if (biome === 1 && worldData && worldData.biomes &&
+      _paintBeach(octx, x, y, worldData.width, worldData.height, worldData.biomes)) return;
   const sp = BIOME_SPRITES[biome] || BIOME_SPRITES[1];
   const v  = (x * 7 + y * 13) % (sp.cols * sp.rows);
   // Plaine (nº5) : mêmes prairies nuancées qu'au build (cohérence reprise DIRT→GRASS).
