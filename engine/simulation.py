@@ -21,6 +21,16 @@ from .world import (Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD,
 N_CLANS = 4
 CLAN_COLORS = ["#e74c3c", "#3498db", "#27ae60", "#9b59b6"]
 
+# ── Territoire (bloc CONFLIT & TERRITOIRE, T1) ────────────────────────────────
+# Owner-grid : chaque tuile terrestre appartient au clan dont un bâtiment est le plus
+# proche, dans la limite d'un rayon d'influence. Au-delà = terre sauvage (-1).
+# Le calcul est PUR (aucun RNG) → n'affecte pas le hash déterministe ; il n'est PAS mis
+# dans le payload de step() (le front l'obtient via /api/territory) → T1 hash-neutre,
+# pas de regold. Recalculé périodiquement (le territoire bouge lentement, au rythme des
+# constructions/destructions) : ~8 ms sur 220×160, inutile de le refaire chaque tick.
+TERRITORY_MAX_DIST         = 22    # rayon d'influence max d'une ancre (tuiles)
+TERRITORY_RECOMPUTE_PERIOD = 30    # recalcul tous les N ticks (≈ un demi-jour)
+
 # ── Âges technologiques (bloc civilisation A1) ─────────────────────────────────
 # Colonne vertébrale de la progression : un clan accumule de la SCIENCE (selon ses
 # bâtiments + sa population) et franchit des âges à des seuils. L'âge est visible
@@ -2594,6 +2604,10 @@ class Simulation:
         self.tick_count = 0
         self.events_log: list[dict] = []
         self.stats_history: list[dict] = []
+        # Owner-grid du territoire (T1) : int8 H×W, clan_id possédant chaque tuile ou -1
+        # (sauvage/eau). Dérivé des bâtiments (pas sérialisé) ; recalculé périodiquement
+        # dans step() et servi au front via /api/territory. None tant que non calculé.
+        self.territory_grid = None
         # ── Chroniques du monde (bloc K) : annales persistantes des JALONS ──────
         # Dérivées des tick_events déjà émis (aucune clé ajoutée à la sortie de
         # step() → le hash du guard ne bouge pas). Servies par /api/chronicle.
@@ -2714,6 +2728,35 @@ class Simulation:
             self._next_building_id += 1
             self.buildings.append(fire)
 
+        # Territoire (T1) disponible dès le boot, avant le 1er step (pour /api/territory).
+        self.territory_grid = self._compute_territory()
+
+    def _compute_territory(self):
+        """Owner-grid du territoire (T1) : chaque tuile terrestre au clan dont un bâtiment
+        est le plus proche, sous TERRITORY_MAX_DIST ; -1 = sauvage/eau. PUR (aucun RNG →
+        n'affecte pas le hash). Déterministe : ancres triées (clan_id, y, x), égalités
+        tranchées par l'ordre de traitement (< strict), donc indépendant du shuffle
+        d'entités. Vectorisé NumPy (~8 ms sur 220×160)."""
+        w = self.world
+        H, W = w.height, w.width
+        anchors = sorted(
+            ((b.clan_id, b.y, b.x) for b in self.buildings
+             if b.clan_id is not None and b.clan_id >= 0),
+            key=lambda t: (t[0], t[1], t[2]))
+        owner = np.full((H, W), -1, dtype=np.int8)
+        if not anchors:
+            return owner
+        best = np.full((H, W), np.inf, dtype=np.float32)
+        ys = np.arange(H, dtype=np.float32)[:, None]
+        xs = np.arange(W, dtype=np.float32)[None, :]
+        for cid, ay, ax in anchors:
+            d = (xs - ax) ** 2 + (ys - ay) ** 2
+            closer = d < best
+            best = np.where(closer, d, best)
+            owner = np.where(closer, np.int8(cid), owner)
+        owner[best > TERRITORY_MAX_DIST ** 2] = -1   # au-delà du rayon d'influence
+        owner[~w._walkable] = -1                       # l'eau n'est possédée par personne
+        return owner
 
     def step(self) -> dict:
         """Avance d'un tick. Retourne les données à broadcaster."""
@@ -2721,6 +2764,11 @@ class Simulation:
         self.tick_count += 1
         season = get_season(self.tick_count)
         temp_c = get_temperature(self.tick_count)
+
+        # Territoire (T1) : recalcul périodique de l'owner-grid (pur, hors hash ; le front
+        # le lit via /api/territory). Le territoire évolue lentement → inutile chaque tick.
+        if self.territory_grid is None or self.tick_count % TERRITORY_RECOMPUTE_PERIOD == 0:
+            self.territory_grid = self._compute_territory()
 
         births: list[Entity] = []
         tick_events: list[dict] = []

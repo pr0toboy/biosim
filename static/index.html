@@ -519,6 +519,7 @@ function handleInit(data) {
   history   = data.history || [];
   clans     = data.clans  || [];
   refreshChronicle();   // annales (bloc K) : chargement initial
+  refreshTerritory();   // territoire (T1) : owner-grid initial
   stumps         = new Set((data.world.stumps         || []).map(([x, y]) => `${x},${y}`));
   depleted_rocks = new Set((data.world.depleted_rocks || []).map(([x, y]) => `${x},${y}`));
   fires          = new Map((data.world.fires || []).map(([x, y]) => [`${x},${y}`, 80]));
@@ -626,6 +627,48 @@ async function refreshChronicle() {
   } catch (e) { /* serveur occupé → retentera au prochain poll */ }
 }
 setInterval(refreshChronicle, 20000);
+
+// ── Territoire (T1) : owner-grid des clans, poll léger + canvas offscreen ──────
+// Le moteur sert /api/territory (int8 H×W b64, clan_id par tuile, -1 = sauvage). On le
+// rasterise UNE fois par poll dans un canvas 1px/tuile ; drawAll le blitte mis à l'échelle
+// (pas 35k rectangles/frame). Le territoire bouge lentement → poll espacé suffit.
+let territoryCanvas = null;   // offscreen HTMLCanvasElement (résolution = tuiles)
+const TERRITORY_ALPHA = 0x40; // opacité du remplissage (~25 %)
+
+function _hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+}
+
+async function refreshTerritory() {
+  try {
+    const r = await fetch("/api/territory");
+    const d = await r.json();
+    if (!d.available || !d.grid) return;
+    const [H, W] = d.grid.shape;
+    // b64 → octets (int8 : 0..N = clan, 255 = -1 sauvage)
+    const raw = atob(d.grid.b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    // Table clan_id → rgb depuis la liste `clans` reçue au tick (couleurs cohérentes)
+    const rgb = {};
+    clans.forEach(c => { rgb[c.id] = _hexToRgb(c.color); });
+    if (!territoryCanvas) territoryCanvas = document.createElement("canvas");
+    territoryCanvas.width = W; territoryCanvas.height = H;
+    const tctx = territoryCanvas.getContext("2d");
+    const img = tctx.createImageData(W, H);
+    for (let i = 0; i < W * H; i++) {
+      const v = bytes[i];
+      const c = (v !== 255) ? rgb[v] : null;   // 255 = sauvage → transparent
+      if (c) {
+        img.data[i * 4] = c.r; img.data[i * 4 + 1] = c.g;
+        img.data[i * 4 + 2] = c.b; img.data[i * 4 + 3] = TERRITORY_ALPHA;
+      }
+    }
+    tctx.putImageData(img, 0, 0);
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+setInterval(refreshTerritory, 4000);
 
 function updateSeasonBadge() {
   const s = SEASONS[currentSeason] || SEASONS.spring;
@@ -865,68 +908,25 @@ function drawAll() {
   // Météo — couche SOL (ombres de nuages, sous les entités). Ciel dessiné après les entités.
   drawWeatherGround(ctx);
 
-  // Territoires des clans — centré sur chaque feu de camp
+  // Territoires des clans (T1) — vrai owner-grid moteur (via /api/territory), blitté à
+  // l'échelle du monde. Remplace l'ancienne boîte approximative : on voit la vraie carte
+  // de contrôle (zones organiques par proximité aux bâtiments), le visuel « empires ».
   const T = TILE_SIZE;
-  buildings.filter(b => b.btype === "campfire").forEach(fire => {
-    const clan       = clans.find(c => c.id === fire.clan_id);
-    const color      = clan ? clan.color : "#ffffff";
-    const clanLabel  = clan ? `${clan.id + 1}` : "?";
-    const clanHouses = buildings.filter(b => b.clan_id === fire.clan_id && b.btype === "house");
-
-    // Rayon minimum autour du feu — L2 campfire donne +6 tuiles de territoire
-    const minR = (fire.level >= 2 ? 14 : 8) + clanHouses.length;
-    let x1 = fire.x - minR, y1 = fire.y - minR;
-    let x2 = fire.x + minR + 1, y2 = fire.y + minR + 1;
-
-    // Extension pour inclure les maisons construites
-    if (clanHouses.length > 0) {
-      const pad = 3;
-      x1 = Math.min(x1, Math.min(...clanHouses.map(b => b.x)) - pad);
-      y1 = Math.min(y1, Math.min(...clanHouses.map(b => b.y)) - pad);
-      x2 = Math.max(x2, Math.max(...clanHouses.map(b => b.x)) + pad + 1);
-      y2 = Math.max(y2, Math.max(...clanHouses.map(b => b.y)) + pad + 1);
-    }
-
-    const rx = x1 * T, ry = y1 * T, rw = (x2 - x1) * T, rh = (y2 - y1) * T;
-
-    // Fond semi-transparent
-    ctx.fillStyle = color + "3A";
-    ctx.fillRect(rx, ry, rw, rh);
-
-    // Bordure tiretée bien visible
+  if (territoryCanvas && worldData) {
     ctx.save();
-    ctx.setLineDash([T * 0.55, T * 0.25]);
-    ctx.strokeStyle = color + "DD";
-    ctx.lineWidth   = T * 0.22;
-    ctx.strokeRect(rx + ctx.lineWidth / 2, ry + ctx.lineWidth / 2,
-                   rw - ctx.lineWidth,     rh - ctx.lineWidth);
-    ctx.setLineDash([]);
+    ctx.imageSmoothingEnabled = true;   // zones douces (influence) plutôt que pixelisées
+    ctx.drawImage(territoryCanvas, 0, 0, worldData.width * T, worldData.height * T);
     ctx.restore();
-
-    // Crochets aux 4 coins
-    const arm = T * 1.4;
-    ctx.strokeStyle = color + "FF";
-    ctx.lineWidth   = T * 0.28;
-    ctx.lineJoin    = "miter";
-    [[rx,      ry,       1,  1],
-     [rx + rw, ry,      -1,  1],
-     [rx,      ry + rh,  1, -1],
-     [rx + rw, ry + rh, -1, -1]].forEach(([cx2, cy2, sx, sy]) => {
-      ctx.beginPath();
-      ctx.moveTo(cx2 + sx * arm, cy2);
-      ctx.lineTo(cx2,            cy2);
-      ctx.lineTo(cx2,            cy2 + sy * arm);
-      ctx.stroke();
-    });
-
-    // Numéro de clan en filigrane au centre
-    const midX = (x1 + x2) / 2 * T;
-    const midY = (y1 + y2) / 2 * T;
+  }
+  // Numéro de clan en filigrane, centré sur chaque feu de camp (repère de capitale)
+  buildings.filter(b => b.btype === "campfire").forEach(fire => {
+    const clan = clans.find(c => c.id === fire.clan_id);
+    if (!clan) return;
     ctx.font         = `bold ${T * 2.5}px sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
-    ctx.fillStyle    = color + "55";
-    ctx.fillText(clanLabel, midX, midY);
+    ctx.fillStyle    = clan.color + "66";
+    ctx.fillText(`${clan.id + 1}`, fire.x * T, fire.y * T);
   });
 
   // Feux de forêt

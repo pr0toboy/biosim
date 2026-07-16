@@ -40,7 +40,7 @@ def _get_sysinfo() -> dict:
         pass
     return {"cpu": cpu, "ram": ram, "temp": temp}
 
-from engine.world import World
+from engine.world import World, _grid_to_b64
 from engine.simulation import Simulation
 from engine.entities import EntityType
 
@@ -301,6 +301,19 @@ async def chronicle():
     """Annales du monde (bloc K) : jalons persistants (âges, forges, extinctions…)."""
     async with state_lock:
         return {"chronicle": sim.chronicle}
+
+
+@app.get("/api/territory")
+async def territory():
+    """Owner-grid du territoire (T1) : int8 H×W (clan_id possédant chaque tuile, -1 =
+    sauvage/eau) encodé b64. Découplé du flux de ticks (poll léger côté front, comme la
+    chronique) → n'entre pas dans le hash déterministe. Le front mappe les valeurs vers
+    les couleurs via la liste `clans` qu'il reçoit déjà à chaque tick."""
+    async with state_lock:
+        g = sim.territory_grid
+        if g is None:
+            return {"available": False}
+        return {"available": True, "grid": _grid_to_b64(g)}
 
 
 @app.post("/api/pause")
