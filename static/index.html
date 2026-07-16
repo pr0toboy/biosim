@@ -503,6 +503,7 @@ let currentRain     = false;
 let currentStorm    = false;
 let currentHeatwave = false;
 let lightningAt     = -1e9;   // performance.now() du dernier éclair (flash décroissant)
+let lightningBolts  = [];     // éclairs visibles (nº14) : {x, y, t} — polyligne brisée ~450 ms
 // Humidité (refonte nº11) : la pluie moteur est un booléen → on en dérive deux niveaux
 // continus. rainWet monte/descend vite avec l'averse (voile humide, impacts, bourrasque) ;
 // puddleWet le suit avec une forte inertie (les flaques naissent APRÈS le début et sèchent
@@ -685,7 +686,11 @@ function handleTick(data) {
   updateSidebar();
   updateSeasonBadge();
   updateBuildingPanel();
-  if ((data.events || []).some(ev => ev.type === "lightning")) lightningAt = performance.now();
+  (data.events || []).forEach(ev => {
+    if (ev.type !== "lightning") return;
+    lightningAt = performance.now();
+    if (ev.x != null) lightningBolts.push({ x: ev.x, y: ev.y, t: lightningAt });   // éclair visible (nº14)
+  });
   (data.events || []).forEach(addEvent);
 }
 
@@ -1596,6 +1601,42 @@ function drawFireSmoke(ctx) {
   });
 }
 
+// Éclairs visibles (nº14) : sur un event `lightning` (qui porte la tuile frappée), une
+// polyligne brisée déterministe descend du ciel jusqu'au point d'impact, cœur blanc sur halo
+// bleu, pulsante ~450 ms, + flash d'impact radial. La frappe enflamme l'arbre côté moteur (nº13).
+function drawLightning(ctx) {
+  if (!lightningBolts.length) return;
+  const T = TILE_SIZE, now = performance.now();
+  for (let b = lightningBolts.length - 1; b >= 0; b--) {
+    const bolt = lightningBolts[b];
+    const age = now - bolt.t;
+    if (age > 450) { lightningBolts.splice(b, 1); continue; }
+    const life = 1 - age / 450;
+    const a = life * (0.6 + 0.4 * Math.sin(now / 40));   // scintillement rapide
+    const ex = (bolt.x + 0.5) * T, ey = (bolt.y + 0.5) * T, topY = ey - 11 * T;
+    const pts = [], NS = 7;
+    for (let i = 0; i <= NS; i++) {
+      const [jx] = hash2(bolt.x + i, bolt.y, 40 + i);
+      const jit = (i === 0 || i === NS) ? 0 : (jx - 0.5) * T * 2.2;
+      pts.push([ex + jit, topY + (ey - topY) * (i / NS)]);
+    }
+    const stroke = (w, col) => {
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineJoin = "round";
+      ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+    };
+    stroke(3.5, `rgba(150,190,255,${(a * 0.5).toFixed(3)})`);   // halo bleu
+    stroke(1.4, `rgba(255,255,255,${a.toFixed(3)})`);           // cœur blanc
+    const ir = T * (1.2 + (1 - life) * 2);                      // flash d'impact
+    const g = ctx.createRadialGradient(ex, ey, 0, ex, ey, ir);
+    g.addColorStop(0, `rgba(230,240,255,${(a * 0.8).toFixed(3)})`);
+    g.addColorStop(1, "rgba(230,240,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(ex, ey, ir, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
 // Couche CIEL : précipitations (pluie/neige), voile de canicule, flash d'éclair — AU-DESSUS.
 // Dessinée en ESPACE-ÉCRAN (après ctx.restore) → remplit le viewport uniformément,
 // densité constante quel que soit le zoom (en espace-monde les particules se diluaient
@@ -1978,6 +2019,7 @@ function drawAll() {
   // (sol/arbres/bêtes), sous la lumière. Les sélecteurs restent nets (dessinés après).
   drawRainImpacts(ctx);
   drawFireSmoke(ctx);   // fumée des incendies (nº13), au-dessus de la scène
+  drawLightning(ctx);   // éclairs d'orage (nº14), au-dessus de la scène
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
