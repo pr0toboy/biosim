@@ -539,6 +539,11 @@ function updateWet(now) {
   // Sécheresse (nº15) : accumulateur lent piloté par la canicule → herbe qui jaunit + mares boueuses.
   heatDry = Math.max(0, Math.min(1, ease(heatDry, currentHeatwave ? 1 : 0, 0.05)));
   if (Math.abs(heatDry - _dryBuilt) > 0.02) buildDryCanvas();
+  // Nappe canopée (nº16) : reconstruite quand la saison change ou que la neige franchit un palier
+  // (feuillus nus qui apparaissent) → la vue dézoomée par défaut porte bien l'automne/l'hiver.
+  if (TREES.length && (currentSeason !== _nappeSeason || Math.round(snowCover * 10) !== _nappeSnowBucket)) {
+    buildCanopyCanvas();
+  }
 }
 // Overlay sécheresse (nº15) : tuiles d'herbe/terre jaunies par dithering (hash), bords de mare
 // virés au boueux quand la sécheresse s'installe. Même mécanique de cache que la neige.
@@ -578,8 +583,10 @@ function buildSnowCanvas() {
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const b = bm[y][x];
-      if (b === 0 || b === 5) {   // eau : étang gelé quand cover élevé
-        if (snowCover > 0.4) { c.fillStyle = `rgba(206,226,240,${(0.55 * snowCover).toFixed(3)})`; c.fillRect(x * T, y * T, T, T); }
+      if (b === 0 || b === 5) {   // eau : GEL limité aux mares/rivières et à la bande côtière
+        const wd = waterDist ? waterDist[y][x] : -1;   // distance à la terre (petite = près du bord)
+        const freezable = b === 5 || (wd >= 1 && wd <= 2);   // pas le plein large de l'océan
+        if (snowCover > 0.4 && freezable) { c.fillStyle = `rgba(206,226,240,${(0.55 * snowCover).toFixed(3)})`; c.fillRect(x * T, y * T, T, T); }
         continue;
       }
       const [h1] = hash2(x, y, 30);
@@ -1300,8 +1307,10 @@ function buildTreeList() {
   buildCanopyCanvas();   // nappe statique tenue en phase avec TREES
 }
 
-// Nappe canopée statique (vent phase 0) — blittée telle quelle quand on est dézoomé, où
-// le vent est imperceptible. Reconstruite avec TREES (rebuild au changement de monde/forêt).
+// Nappe canopée statique (vent phase 0) — blittée telle quelle quand on est dézoomé, où le vent
+// est imperceptible. Reconstruite avec TREES ET la source SAISONNIÈRE (nº16) → la vue dézoomée
+// par défaut porte bien l'automne/l'hiver. Rebuild au changement de monde/forêt/saison/neige.
+let _nappeSeason = null, _nappeSnowBucket = -1;
 function buildCanopyCanvas() {
   forestCanopyCanvas = null;
   if (!worldData || !TREES.length) return;
@@ -1311,10 +1320,12 @@ function buildCanopyCanvas() {
   const c = cv.getContext("2d");
   c.imageSmoothingEnabled = false;
   for (const tr of TREES) {
-    if (!tr.img.complete || tr.img.naturalWidth === 0) return;   // pas prêt → rebuild ultérieur
-    c.drawImage(tr.img, tr.sx, 0, tr.sw, tr.sh, tr.px, tr.py, tr.dw, tr.dh);
+    const { img, sx } = seasonalTreeSrc(tr);
+    if (!img.complete || img.naturalWidth === 0) return;   // pas prêt → rebuild ultérieur
+    c.drawImage(img, sx, 0, tr.sw, tr.sh, tr.px, tr.py, tr.dw, tr.dh);
   }
   forestCanopyCanvas = cv;
+  _nappeSeason = currentSeason; _nappeSnowBucket = Math.round(snowCover * 10);
 }
 
 // Ombres de la canopée (nº7 + reco perf nº8) : une ellipse STATIQUE au pied de chaque
@@ -1520,24 +1531,28 @@ const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperc
 // Un arbre 32 px dessiné en 3 tranches horizontales à frontières ENTIÈRES (une coupe
 // fractionnaire duplique/saute une rangée de pixels → trait sombre). La cime bouge au vent,
 // le tronc reste fixe. Unité partagée par le tri de profondeur (nº9) et la nappe canopée.
-function drawTreeSliced(ctx, tr, t) {
-  const T = TILE_SIZE;
-  let img = tr.img, sx = tr.sx;
-  const decid = tr.k === "decid", big = tr.k === "big";   // pins & palmiers : jamais reteintés
-  // Saisons (nº12 hiver + nº16). Hiver : feuillus NUS (WinterDeadTrees, bascule par seed<cover) ;
-  // gros feuillus 2×2 restent verts (pas d'équivalent nu). Automne : or 55 % / rouge 45 % par
-  // seed. Printemps : floraison rose sur ~55 % des feuillus. Discret au changement de saison.
+// Source saisonnière d'un arbre (nº12 hiver + nº16) — partagée par le rendu live (drawTreeSliced)
+// ET la nappe canopée statique (buildCanopyCanvas), sinon la vue dézoomée par défaut du monde
+// 220×160 (scale~0.33) resterait verte toute l'année. Hiver : feuillus NUS (WinterDeadTrees,
+// bascule par seed<cover ; gros 2×2 verts, pas d'équivalent nu). Automne : or 55 %/rouge 45 %.
+// Printemps : floraison ~55 %. Pins & palmiers jamais reteintés.
+function seasonalTreeSrc(tr) {
+  const T = TILE_SIZE, decid = tr.k === "decid", big = tr.k === "big";
   if (currentSeason === "winter") {
-    if (snowCover > 0.05 && decid && tr.seed < snowCover * 1.08) {
-      img = TREE_SPRITES.winterDeadSoft.img; sx = (2 + Math.floor(tr.seed * 2)) * T;
-    }
+    if (snowCover > 0.05 && decid && tr.seed < snowCover * 1.08)
+      return { img: TREE_SPRITES.winterDeadSoft.img, sx: (2 + Math.floor(tr.seed * 2)) * T };
   } else if (currentSeason === "autumn" && (decid || big)) {
     const gold = tr.seed < 0.55;
-    img = (decid ? (gold ? TREE_SPRITES.treesAutumn1 : TREE_SPRITES.treesAutumn2)
-                 : (gold ? TREE_SPRITES.thingsAutumn1 : TREE_SPRITES.thingsAutumn2)).img;
+    return { img: (decid ? (gold ? TREE_SPRITES.treesAutumn1 : TREE_SPRITES.treesAutumn2)
+                         : (gold ? TREE_SPRITES.thingsAutumn1 : TREE_SPRITES.thingsAutumn2)).img, sx: tr.sx };
   } else if (currentSeason === "spring" && (decid || big) && tr.seed < 0.55) {
-    img = (decid ? TREE_SPRITES.treesBloom : TREE_SPRITES.thingsBloom).img;
+    return { img: (decid ? TREE_SPRITES.treesBloom : TREE_SPRITES.thingsBloom).img, sx: tr.sx };
   }
+  return { img: tr.img, sx: tr.sx };
+}
+function drawTreeSliced(ctx, tr, t) {
+  const T = TILE_SIZE;
+  const { img, sx } = seasonalTreeSrc(tr);
   if (!img.complete || img.naturalWidth === 0) return;
   const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
   const sb = tr.sh === T ? [0, 7, 12, 16] : [0, 14, 24, 32];
@@ -1700,12 +1715,19 @@ function drawRainImpacts(ctx) {
       ctx.beginPath(); ctx.arc(x, y, (ph - 0.3) * 9, 0, Math.PI * 2); ctx.stroke();
     }
   }
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
-  const k = 0.35 * r;
-  ctx.fillStyle = `rgb(${Math.round(255 - 80 * k)},${Math.round(255 - 65 * k)},${Math.round(255 - 40 * k)})`;
-  ctx.fillRect(x0, y0, vw, vh);
-  ctx.restore();
+  // Voile humide (multiply) CLIPPÉ aux bornes du monde : un fillRect opaque en espace-monde sur
+  // les pixels transparents hors-monde peindrait un letterbox gris (bug relevé par Regigigas).
+  const wpx = worldData.width * TILE_SIZE, hpx = worldData.height * TILE_SIZE;
+  const vx0 = Math.max(x0, 0), vy0 = Math.max(y0, 0);
+  const vx1 = Math.min(x0 + vw, wpx), vy1 = Math.min(y0 + vh, hpx);
+  if (vx1 > vx0 && vy1 > vy0) {
+    ctx.save();
+    ctx.globalCompositeOperation = "multiply";
+    const k = 0.35 * r;
+    ctx.fillStyle = `rgb(${Math.round(255 - 80 * k)},${Math.round(255 - 65 * k)},${Math.round(255 - 40 * k)})`;
+    ctx.fillRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
+    ctx.restore();
+  }
 }
 
 // Fumée des incendies (nº13) : volutes grises montantes, dessinées APRÈS le tri (au-dessus
@@ -1885,11 +1907,13 @@ function drawSeasonFx(ctx) {
   const x0 = -offX / scale, y0 = -offY / scale, vw = canvas.width / scale, vh = canvas.height / scale;
   const N = Math.round(Math.min(vw * vh / 2600, 160));
   const cols = ["#c9822e", "#b8532e", "#d9a441", "#8f5a2b"];
+  const wpx = worldData.width * TILE_SIZE, hpx = worldData.height * TILE_SIZE;
   for (let i = 0; i < N; i++) {
     const cyc = 3400, tt = now + i * 211, ph = (tt % cyc) / cyc, k2 = Math.floor(tt / cyc);
     const [hx] = hash2(i + (k2 % 71), k2 % 67, 42);
     const x = x0 + hx * vw + Math.sin(ph * 6 + i) * 12;
     const y = y0 - 10 + ph * (vh + 20);
+    if (x < 0 || x > wpx || y < 0 || y > hpx) continue;   // pas de feuilles dans le letterbox
     ctx.fillStyle = cols[i & 3];
     ctx.fillRect(Math.round(x), Math.round(y), 2, 2);
   }
