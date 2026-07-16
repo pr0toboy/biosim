@@ -373,15 +373,15 @@ const HOUSE_WIP_SPRITE      = { img: HOUSE_SPRITE.img, col: 1, row: 0, size: 16 
 const BOX_SELECTOR_SPRITE   = { img: new Image(), src: "/static/MiniWorldSprites/User Interface/BoxSelector.png", size: 16 };
 // Sprite champ de blé : 4 stades, Wheatfield.png tuiles (0,0)→(3,0)
 const WHEAT_IMG = new Image();
-WHEAT_IMG.src = "/static/MiniWorldSprites/Wheatfield.png";
+WHEAT_IMG.src = "/static/MiniWorldSprites/Nature/Wheatfield.png";
 const WHEAT_SPRITES = [0,1,2,3].map(col => ({ img: WHEAT_IMG, col, row: 0, size: 16 }));
 // Sprite moulin : Resources.png tuile (1,1)
 const MILL_IMG = new Image();
-MILL_IMG.src = "/static/MiniWorldSprites/Resources.png";
+MILL_IMG.src = "/static/MiniWorldSprites/Buildings/Wood/Resources.png";
 const MILL_SPRITE = { img: MILL_IMG, col: 1, row: 1, size: 16 };
 // Sprite puit : Well.png tuile (2,1)
 const WELL_IMG    = new Image();
-const WELL_SPRITE = { img: WELL_IMG, src: "/static/MiniWorldSprites/Buildings/Well.png", col: 2, row: 1, size: 16 };
+const WELL_SPRITE = { img: WELL_IMG, src: "/static/MiniWorldSprites/Miscellaneous/Well.png", col: 2, row: 1, size: 16 };
 
 // Sprites par espèce : col/row = tuile pose frontale, size = taille px de la tuile source
 const ENTITY_SPRITES = {
@@ -409,7 +409,10 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES),
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
-    CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE, { img: WHEAT_IMG }, { img: MILL_IMG }, { img: WELL_IMG },
+    CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
+    // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
+    { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
   ];
   let loaded = 0;
   const done = () => {
