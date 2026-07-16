@@ -1380,6 +1380,19 @@ function applyLight(ctx, worldW, worldH) {
   if (dark > 0.15) {                                         // halos de feu + lucioles la nuit
     ctx.globalCompositeOperation = "screen";
     buildings.forEach(b => {
+      // Fenêtres allumées (nº20) : les maisons s'éclairent la nuit, seuil décalé par maison.
+      if (b.btype === "house") {
+        const winThresh = 0.2 + ((b.x * 7 + b.y * 13) % 10) / 10 * 0.12;
+        if (dark > winThresh) {
+          const cx = (b.x + 0.5) * T, cy = (b.y + 0.55) * T, rad = T * 1.5;
+          const gr = ctx.createRadialGradient(cx, cy, T * 0.1, cx, cy, rad);
+          gr.addColorStop(0, `rgba(255,200,110,${(0.4 * dark).toFixed(3)})`);
+          gr.addColorStop(1, "rgba(255,200,110,0)");
+          ctx.fillStyle = gr;
+          ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+        }
+        return;
+      }
       if (b.btype !== "campfire") return;
       const flick = 0.8 + 0.13 * Math.sin(now / 90) + 0.07 * Math.sin(now / 37);
       const cx = (b.x + 0.5) * T, cy = (b.y + 0.5) * T, rad = T * 3.0 * flick;
@@ -1894,6 +1907,7 @@ function drawAll() {
     ctx.fillRect((vx + 0.4) * T, (vy + 0.4) * T, T * 0.2, T * 0.2);
   });
   drawBuildings(ctx, T);
+  drawBuildingFx(ctx, T);   // vie des bâtiments (nº20) : fumée, ailes de moulin, braises, fanions
   // Ondes de cloche (C1) : anneau expansif ~40 ticks (vieilli au tick, cf. handleTick)
   bellRings.forEach(r => {
     ctx.beginPath();
@@ -2141,6 +2155,55 @@ function drawAll() {
   // → remplit le viewport uniformément, densité constante quel que soit le zoom/pan.
   // Dessinée par-dessus la nuit → un éclair illumine bien le monde assombri.
   drawWeatherSky(ctx);
+}
+
+// Vie des bâtiments (refonte nº20) : effets procéduraux par-dessus les sprites (aucun asset
+// neuf). Fumée de cheminée + fanion de clan sur les maisons, ailes tournantes des moulins,
+// braise+étincelles des forges. Lit `buildings` moteur → hash-neutre.
+function drawBuildingFx(ctx, T) {
+  if (!buildings.length) return;
+  const now = performance.now();
+  const clanColor = id => (clans.find(c => c.id === id) || {}).color || "#cccccc";
+  buildings.forEach(b => {
+    if (b.btype === "house") {
+      for (let s = 0; s < 2; s++) {                     // fumée de cheminée
+        const cyc = 3200, ph = ((now + s * 1600 + (b.x * 53 + b.y * 29)) % cyc) / cyc;
+        const px = (b.x + 0.68) * T + Math.sin(now / 1100 + b.x) * 3 * ph;
+        const py = b.y * T - ph * T * 1.8;
+        ctx.fillStyle = `rgba(120,116,112,${((1 - ph) * 0.22).toFixed(3)})`;
+        ctx.beginPath(); ctx.arc(px, py, T * (0.1 + ph * 0.32), 0, Math.PI * 2); ctx.fill();
+      }
+      if (b.clan_id != null) {                          // fanion de clan qui claque
+        const fx = (b.x + 0.15) * T, fy = b.y * T - T * 0.15;
+        const flap = ((now >> 8) & 1) ? T * 0.3 : T * 0.22;
+        ctx.strokeStyle = "rgba(90,70,50,0.7)"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(fx, fy - T * 0.4); ctx.lineTo(fx, fy + T * 0.05); ctx.stroke();
+        ctx.fillStyle = clanColor(b.clan_id);
+        ctx.beginPath();
+        ctx.moveTo(fx, fy - T * 0.35); ctx.lineTo(fx, fy); ctx.lineTo(fx + flap, fy - T * 0.18);
+        ctx.closePath(); ctx.fill();
+      }
+    } else if (b.btype === "mill") {                    // ailes en rotation (4 bras 2 tons)
+      const cx = (b.x + 0.5) * T, cy = (b.y + 0.4) * T, rot = now / 1400, arm = T * 0.42;
+      for (let a = 0; a < 4; a++) {
+        const ang = rot + a * Math.PI / 2;
+        ctx.strokeStyle = a % 2 ? "#d9c9a8" : "#b0966e";
+        ctx.lineWidth = Math.max(1.4, T * 0.11);
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(ang) * arm, cy + Math.sin(ang) * arm); ctx.stroke();
+      }
+      ctx.fillStyle = "#6b5535";
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, T * 0.09), 0, Math.PI * 2); ctx.fill();
+    } else if (b.btype === "forge") {                   // braise pulsante + étincelles
+      const cx = (b.x + 0.5) * T, cy = (b.y + 0.62) * T, pulse = 0.6 + 0.4 * Math.sin(now / 180 + b.x);
+      ctx.fillStyle = `rgba(255,120,20,${(0.5 * pulse).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(cx, cy, T * 0.16 * pulse, 0, Math.PI * 2); ctx.fill();
+      for (let s = 0; s < 3; s++) {
+        const cyc = 700, ph = ((now + s * 233 + b.x * 40) % cyc) / cyc;
+        ctx.fillStyle = `rgba(255,${Math.round(200 - ph * 120)},60,${(1 - ph).toFixed(3)})`;
+        ctx.fillRect(Math.round(cx + (s - 1) * 3 * ph), Math.round(cy - ph * T * 0.8), 1, 1);
+      }
+    }
+  });
 }
 
 // ── Bâtiments ────────────────────────────────────────────────────────────────
