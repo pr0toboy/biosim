@@ -74,6 +74,8 @@ REMAP_G = {
 }
 SOFT = {(23, 23, 23): (72, 124, 52)}  # contour noir → vert feuille (dessin ×2)
 
+things_g = remap(things, REMAP_G)
+
 outputs = {
     "floor_dark": darken(grass.crop((0, S, 3 * S, 2 * S)), 0.84),
     "forest_floor": compose([tile(things, 5, 0), tile(things, 7, 0),
@@ -81,7 +83,11 @@ outputs = {
     "trees_soft": remap(trees, SOFT),
     "forest_trees_soft": remap(compose([tile(trees, 1, 0), tile(trees, 2, 0),
                                         tile(trees, 3, 0), tile(pines, 1, 0)]), SOFT),
-    "things_g": remap(things, REMAP_G),
+    "things_g": things_g,
+    # nº5 plaine : litière = champignon / petit rocher / rondin / buisson à baies / buisson
+    # (les 2 buissons reteintés vers la palette du jeu, cf. things_g).
+    "plain_extra": compose([tile(things, 6, 0), tile(things, 7, 1), tile(things, 5, 2),
+                            tile(things_g, 0, 3), tile(things_g, 1, 3)]),
 }
 
 for name, im in outputs.items():

@@ -349,10 +349,14 @@ const TILE_SIZE = 16;
 const BIOME_SPRITES = {
   0: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png", // col 3=normale (bord), col 4=profonde (milieu)
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Ground/free_pixel_16_woods.png", col0: 14, cols: 3, rows: 1, row0: 7, density: 4 } },
-  // Plaine : fleurs seules — les arbres épars sont montés dans la canopée nº7 (couche
-  // 32px après les entités, cf. buildTreeList/drawCanopy).
-  1: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png",  col0: 0, cols: 3, rows: 1, row0: 1,
-     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Basic_Grass_Biom_things.png", col0: 6, cols: 1, rows: 2, row0: 2, density: 3 } },
+  // Plaine (nº5) : base à prairies nuancées (rendu spécial biome 1, cf. plaineRow) ; arbres
+  // épars montés dans la canopée nº7 ; overlays = fleurs + litière (champignons/rocher/
+  // rondin/buissons). row0/cols du base ignorés ici (tc/tr calculés par plaineRow).
+  1: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png",  col0: 0, cols: 3, rows: 2, row0: 0,
+     overlay: [
+       { img: new Image(), src: "/static/MiniWorldSprites/Nature/Basic_Grass_Biom_things.png", col0: 6, cols: 1, rows: 2, row0: 2, density: 3 },
+       { img: new Image(), src: "/static/refonte/plain_extra.png", col0: 0, cols: 5, rows: 1, density: 0.6 },
+     ] },
   // Forêt (refonte nº7) : sol sombre + litière (champignons/rondins/souche) ; les arbres
   // debout sont dans la couche canopée (32px, dessinée APRÈS les entités = look WorldBox).
   2: { img: new Image(), src: "/static/refonte/floor_dark.png", col0: 0, cols: 3, rows: 1,
@@ -703,6 +707,14 @@ function _forestDepth(bm, x, y, W, H) {
   return 3;
 }
 
+// Prairies nuancées (nº5) : rangée du sol de plaine — 0 = herbe claire (~38 %, en patches
+// 4×4 dithérés, rangée « orpheline » de TexturedGrass), 1 = herbe foncée. Rompt le vert plat.
+function plaineRow(x, y) {
+  const [pc] = hash2(x >> 2, y >> 2, 7);
+  const [pj] = hash2(x, y, 8);
+  return (pc + (pj - 0.5) * 0.36 < 0.38) ? 0 : 1;
+}
+
 function _hexToRgb(hex) {
   const h = hex.replace("#", "");
   return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
@@ -784,6 +796,10 @@ function buildBiomeCache() {
         }
         tc = border ? 3 : 4;
         tr = 0;
+      } else if (b === 1) {
+        // Plaine (nº5) : prairies nuancées — rangée claire/foncée dithérée par patch.
+        tc = (x * 7 + y * 13) % 3;
+        tr = plaineRow(x, y);
       } else {
         // Variation déterministe par position dans la plage col0..col0+cols-1
         const v = (x * 7 + y * 13) % (sp.cols * sp.rows);
@@ -1040,8 +1056,9 @@ function redrawBiomeTile(octx, x, y, biome) {
   const T = TILE_SIZE;
   const sp = BIOME_SPRITES[biome] || BIOME_SPRITES[1];
   const v  = (x * 7 + y * 13) % (sp.cols * sp.rows);
-  const tc = sp.col0 + (v % sp.cols);
-  const tr = (sp.row0 || 0) + Math.floor(v / sp.cols);
+  // Plaine (nº5) : mêmes prairies nuancées qu'au build (cohérence reprise DIRT→GRASS).
+  const tc = biome === 1 ? (x * 7 + y * 13) % 3 : sp.col0 + (v % sp.cols);
+  const tr = biome === 1 ? plaineRow(x, y)      : (sp.row0 || 0) + Math.floor(v / sp.cols);
   octx.drawImage(sp.img, tc * T, tr * T, T, T, x * T, y * T, T, T);
   const ovList = sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : [];
   ovList.forEach((ov, i) => {
