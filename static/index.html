@@ -501,6 +501,20 @@ let currentRain     = false;
 let currentStorm    = false;
 let currentHeatwave = false;
 let lightningAt     = -1e9;   // performance.now() du dernier éclair (flash décroissant)
+// Humidité (refonte nº11) : la pluie moteur est un booléen → on en dérive deux niveaux
+// continus. rainWet monte/descend vite avec l'averse (voile humide, impacts, bourrasque) ;
+// puddleWet le suit avec une forte inertie (les flaques naissent APRÈS le début et sèchent
+// longtemps APRÈS la fin). Purement front (lit currentRain/currentStorm) → hash-neutre.
+let rainWet = 0, puddleWet = 0, _lastWetT = -1;
+function updateWet(now) {
+  if (_lastWetT < 0) { _lastWetT = now; return; }
+  let dt = (now - _lastWetT) / 1000; _lastWetT = now;
+  if (dt > 0.1) dt = 0.1;   // onglet inactif → pas de saut d'accumulation
+  const target = (currentRain || currentStorm) ? 1 : 0;
+  const ease = (v, tgt, rate) => v + Math.sign(tgt - v) * Math.min(Math.abs(tgt - v), dt * rate);
+  rainWet   = Math.max(0, Math.min(1, ease(rainWet, target, currentStorm ? 0.5 : 0.35)));
+  puddleWet = Math.max(0, Math.min(1, ease(puddleWet, rainWet, 0.12)));   // inertie forte
+}
 let entityMap    = {};     // id → entity
 // ── Interpolation de rendu (fluidité) : rendu 60 fps découplé du tick moteur ──
 let prevPos      = {};     // id → {x,y} au tick précédent (source de l'interpolation)
@@ -1312,8 +1326,10 @@ function applyLight(ctx, worldW, worldH) {
 // Décalage de vent (nº7) : vague spatiale qui traverse la carte + rafales lentes.
 // Entier (pixels nets). Piloté par le temps réel → oscillation fluide 60 fps.
 function windShift(t, phase) {
+  const wb = 1 + 1.3 * rainWet;   // bourrasque de pluie (nº11) : cimes secouées plus fort/vite
   const gust = 0.55 + 0.45 * Math.sin(t / 4300 + phase * 0.012);
-  return Math.round(2.3 * gust * Math.sin(t / 780 + phase * 0.05));
+  const spd = 780 / Math.min(wb, 1.7);
+  return Math.round(2.3 * wb * gust * Math.sin(t / spd + phase * 0.05));
 }
 
 // Canopée (nº7) : arbres 32 px dessinés APRÈS les entités → les créatures se cachent sous
@@ -1466,6 +1482,54 @@ function drawWeatherGround(ctx) {
     ctx.beginPath(); ctx.arc(0, 0, cw / 2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
+  // Flaques (nº11) : creux qui se remplissent pendant l'averse, sèchent longtemps après.
+  // Positions déterministes (hash), hors eau/rivière/montagne. Taille/opacité ∝ puddleWet.
+  if (puddleWet > 0.03) {
+    const p = puddleWet, T = TILE_SIZE, bm = worldData.biomes;
+    const NP = Math.min(60, Math.round(worldData.width * worldData.height * 0.0025));
+    for (let i = 0; i < NP; i++) {
+      const [hx, hy] = hash2(i * 3 + 1, 7, 21);
+      const tx = Math.floor(hx * worldData.width), ty = Math.floor(hy * worldData.height);
+      const b = bm[ty][tx];
+      if (b === 0 || b === 5 || (mountainMask && mountainMask[ty][tx])) continue;
+      const [jx, jy] = hash2(i, 11, 22);
+      const x = (tx + 0.2 + jx * 0.6) * T, y = (ty + 0.3 + jy * 0.4) * T;
+      const rx = (2.5 + (i % 4) * 1.1) * p, ry = rx * 0.5;
+      ctx.fillStyle = `rgba(90,135,185,${(0.5 * p).toFixed(3)})`;
+      ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = `rgba(225,242,255,${(0.45 * p).toFixed(3)})`;
+      ctx.fillRect(Math.round(x - rx * 0.35), Math.round(y - ry * 0.5), 2, 1);
+    }
+  }
+}
+
+// Impacts de pluie + voile humide (nº11) : dessinés APRÈS le tri de profondeur (sur le sol,
+// les arbres et les bêtes), sous la lumière jour/nuit. Impacts dispersés dans le VIEWPORT
+// (densité stable quel que soit le zoom) ; voile multiply qui assombrit le monde mouillé.
+function drawRainImpacts(ctx) {
+  if (rainWet < 0.02) return;
+  const r = rainWet, now = performance.now();
+  const x0 = -offX / scale, y0 = -offY / scale, vw = canvas.width / scale, vh = canvas.height / scale;
+  const N = Math.round(Math.min(vw * vh / 1400, 260) * r);
+  for (let i = 0; i < N; i++) {
+    const cyc = 650, ph = ((now + i * 97) % cyc) / cyc, k2 = Math.floor((now + i * 97) / cyc);
+    const [hx, hy] = hash2(i * 13 + (k2 % 97), k2 % 89, 23);
+    const x = x0 + hx * vw, y = y0 + hy * vh;
+    if (ph < 0.3) {
+      ctx.fillStyle = "rgba(230,240,255,0.8)";
+      ctx.fillRect(Math.round(x), Math.round(y), 2, 2);
+    } else {
+      ctx.strokeStyle = `rgba(220,235,255,${((1 - ph) * 0.5).toFixed(3)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, (ph - 0.3) * 9, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = "multiply";
+  const k = 0.35 * r;
+  ctx.fillStyle = `rgb(${Math.round(255 - 80 * k)},${Math.round(255 - 65 * k)},${Math.round(255 - 40 * k)})`;
+  ctx.fillRect(x0, y0, vw, vh);
+  ctx.restore();
 }
 
 // Couche CIEL : précipitations (pluie/neige), voile de canicule, flash d'éclair — AU-DESSUS.
@@ -1530,6 +1594,7 @@ function drawWeatherSky(ctx) {
 function drawAll() {
   if (!worldData || !biomeCache) return;
   const W = worldData.width, H = worldData.height;
+  updateWet(performance.now());   // accumulateurs d'humidité (nº11)
 
   // Suivi caméra : recentre sur l'entité suivie
   if (trackedId !== null) {
@@ -1821,6 +1886,10 @@ function drawAll() {
     sortedEnts.forEach(drawEntity);
     drawCanopy(ctx);   // dézoomé → nappe canopée statique
   }
+
+  // Conséquences de la pluie (nº11) : impacts de gouttes + voile humide, par-dessus la scène
+  // (sol/arbres/bêtes), sous la lumière. Les sélecteurs restent nets (dessinés après).
+  drawRainImpacts(ctx);
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
