@@ -349,19 +349,29 @@ const TILE_SIZE = 16;
 const BIOME_SPRITES = {
   0: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png", // col 3=normale (bord), col 4=profonde (milieu)
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Ground/free_pixel_16_woods.png", col0: 14, cols: 3, rows: 1, row0: 7, density: 4 } },
+  // Plaine : fleurs seules — les arbres épars sont montés dans la canopée nº7 (couche
+  // 32px après les entités, cf. buildTreeList/drawCanopy).
   1: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png",  col0: 0, cols: 3, rows: 1, row0: 1,
-     overlay: [
-       { img: new Image(), src: "/static/MiniWorldSprites/Nature/Basic_Grass_Biom_things.png", col0: 6, cols: 1, rows: 2, row0: 2, density: 3 },
-       { img: new Image(), src: "/static/MiniWorldSprites/Nature/Trees.png",                   col0: 0, cols: 4, rows: 1,          density: 0.5 },
-     ] },
-  2: { img: new Image(), src: "/static/MiniWorldSprites/Ground/TexturedGrass.png", col0: 0, cols: 3, rows: 2,
-     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Trees.png", col0: 1, cols: 3, rows: 1, density: 6 } },
+     overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Basic_Grass_Biom_things.png", col0: 6, cols: 1, rows: 2, row0: 2, density: 3 } },
+  // Forêt (refonte nº7) : sol sombre + litière (champignons/rondins/souche) ; les arbres
+  // debout sont dans la couche canopée (32px, dessinée APRÈS les entités = look WorldBox).
+  2: { img: new Image(), src: "/static/refonte/floor_dark.png", col0: 0, cols: 3, rows: 1,
+     overlay: { img: new Image(), src: "/static/refonte/forest_floor.png", col0: 0, cols: 4, rows: 1, density: 1.2 } },
   3: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png",          col0: 0, cols: 1, rows: 1,
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Cactus.png", col0: 0, cols: 4, rows: 2, density: 2 } },
   4: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Winter.png",         col0: 5, cols: 1, rows: 1,
      overlay: { img: new Image(), src: "/static/MiniWorldSprites/Nature/Rocks.png", col0: 0, cols: 3, rows: 4, density: 5 } },
   5: { img: new Image(), src: "/static/MiniWorldSprites/Ground/Shore.png",         col0: 2, cols: 1, rows: 1 }, // eau peu profonde (rivières)
   6: { img: new Image(), src: "/static/MiniWorldSprites/Ground/DeadGrass.png",     col0: 0, cols: 2, rows: 1 }, // terre battue (surpâturage)
+};
+
+// Planches d'arbres de la CANOPÉE (refonte nº7) — dérivées générées par
+// tools/build_refonte_forest.py. Contours noirs remappés vert feuille (le trait double
+// d'épaisseur au dessin ×2), things_g = feuillus 2×2 remappés palette du jeu.
+const TREE_SPRITES = {
+  treesSoft:       { img: new Image(), src: "/static/refonte/trees_soft.png" },
+  forestTreesSoft: { img: new Image(), src: "/static/refonte/forest_trees_soft.png" },
+  thingsG:         { img: new Image(), src: "/static/refonte/things_g.png" },
 };
 
 // Sprite feu de camp (centre de clan)
@@ -409,6 +419,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES),
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
+    ...Object.values(TREE_SPRITES),
     CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
@@ -580,6 +591,9 @@ function handleTick(data) {
       worldData.biomes[y][x] = biome;
       redrawBiomeTile(octx, x, y, biome);
     });
+    // NB : biome_changes ne concerne QUE GRASS↔DIRT (surpâturage). La forêt est un masque
+    // immuable → la canopée (TREES) n'a jamais à être reconstruite ici (elle l'est une
+    // seule fois au chargement, dans buildBiomeCache).
   }
   const tl = document.getElementById("tick-label");
   tl.textContent = tickToDate(currentTick);
@@ -650,6 +664,30 @@ const SHADOW_COLOR = "#1a2e1a"; // vert très sombre (soleil plein nord, comme l
 // Seuls les bâtiments VOLUMÉTRIQUES projettent une assise ; wheatfield (cultures) et ruin
 // (gravats) sont à plat → pas d'ombre portée, campfire a son propre halo (nº10).
 const SHADOW_SOLID_BTYPE = { house: 1, mill: 1, well: 1, church: 1, forge: 1, market: 1 };
+
+// ── Canopée (refonte nº7) — arbres 32 px dessinés APRÈS les entités (look WorldBox) ──
+// TREES : liste plate reconstruite quand le monde/les biomes changent. Chaque arbre porte
+// sa planche source, sa position pixel jitterée et une graine de phase de vent.
+let TREES = [];
+let forestCanopyCanvas = null;   // nappe canopée statique (vent phase 0) — blit dézoomé
+// hash déterministe [0,1)² — même formule que les overlays de biome (positions stables).
+function hash2(x, y, i) {
+  const h1 = Math.abs(Math.sin(x * (127.1 + i * 53) + y * (311.7 + i * 79)) * 43758.5453) % 1;
+  const h2 = Math.abs(Math.sin(x * (269.5 + i * 37) + y * (183.3 + i * 61)) * 43758.5453) % 1;
+  return [h1, h2];
+}
+const _isForest = (bm, x, y, W, H) =>
+  x >= 0 && x < W && y >= 0 && y < H && bm[y][x] === 2;
+// Profondeur forêt : 0 = hors forêt, 1 = lisière, 2 = bande, 3 = cœur (Chebyshev borné 3).
+function _forestDepth(bm, x, y, W, H) {
+  if (!_isForest(bm, x, y, W, H)) return 0;
+  for (let d = 1; d <= 2; d++)
+    for (let dy = -d; dy <= d; dy++)
+      for (let dx = -d; dx <= d; dx++)
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === d && !_isForest(bm, x + dx, y + dy, W, H))
+          return d;
+  return 3;
+}
 
 function _hexToRgb(hex) {
   const h = hex.replace("#", "");
@@ -754,28 +792,83 @@ function buildBiomeCache() {
     }
   }
   biomeCache = off;
-  buildForestShadow();
+  buildTreeList();      // canopée nº7 : liste d'arbres dérivée des biomes
+  buildForestShadow();  // ombres statiques au pied de chaque arbre (lit TREES)
 }
 
-// Nappe d'ombre des tuiles forêt (biome 2) : une ellipse au pied de chaque tuile
-// boisée. La forêt dense produit ainsi son ombrage continu (comme le template). Statique
-// → précalculé une fois par changement de monde, blitté tel quel dans le masque/frame.
-function buildForestShadow() {
+// Construit la liste plate des arbres de la canopée (nº7) à partir des biomes.
+// Plaine (biome 1) : arbres épars 5 %, 2× la taille des créatures. Forêt (biome 2) :
+// densité par profondeur (lisière 55 %, cœur 95 %), mélange feuillus 2×2 / arbres / pins.
+// Déterministe (hash de position) → placement stable d'un rebuild à l'autre.
+function buildTreeList() {
+  TREES = [];
   if (!worldData || !worldData.biomes) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE;
+  const B = 2 * T;   // 32 px = 2× les créatures
+  const biomes = worldData.biomes;
+  const IT = TREE_SPRITES.treesSoft.img, IF = TREE_SPRITES.forestTreesSoft.img,
+        IG = TREE_SPRITES.thingsG.img;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = _forestDepth(biomes, x, y, W, H);
+      const [h1, h2] = hash2(x, y, 0);
+      const [j1, j2] = hash2(x, y, 14);
+      if (d === 0) {
+        // Plaine uniquement (pas d'arbre sur eau/sable/montagne)
+        if (biomes[y][x] === 1 && h1 < 0.05) {
+          const c = 1 + Math.floor(h2 * 3);
+          TREES.push({ img: IT, sx: c * T, sw: T, sh: T,
+            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
+            dw: B, dh: B, seed: j2 });
+        }
+        continue;
+      }
+      const p = d === 1 ? 0.55 : 0.95;   // couvert quasi fermé au cœur
+      if (h1 >= p) continue;
+      const px = Math.round(x * T - 8 + (j1 - 0.5) * 10);
+      const py = Math.round((y + 1) * T - B + (j2 - 0.5) * 6);
+      const kind = h2;
+      let img, sx, sw, sh;
+      if (kind < 0.55) { img = IG; sx = (kind < 0.11 ? 3 : 1) * T; sw = 2 * T; sh = 2 * T; }
+      else if (kind < 0.85) { img = IT; sx = (1 + Math.min(Math.floor((kind - 0.55) * 10), 2)) * T; sw = T; sh = T; }
+      else { img = IF; sx = 3 * T; sw = T; sh = T; }   // pin
+      TREES.push({ img, sx, sw, sh, px, py, dw: B, dh: B, seed: j2 });
+    }
+  }
+  buildCanopyCanvas();   // nappe statique tenue en phase avec TREES
+}
+
+// Nappe canopée statique (vent phase 0) — blittée telle quelle quand on est dézoomé, où
+// le vent est imperceptible. Reconstruite avec TREES (rebuild au changement de monde/forêt).
+function buildCanopyCanvas() {
+  forestCanopyCanvas = null;
+  if (!worldData || !TREES.length) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE;
+  const cv = document.createElement("canvas");
+  cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d");
+  c.imageSmoothingEnabled = false;
+  for (const tr of TREES) {
+    if (!tr.img.complete || tr.img.naturalWidth === 0) return;   // pas prêt → rebuild ultérieur
+    c.drawImage(tr.img, tr.sx, 0, tr.sw, tr.sh, tr.px, tr.py, tr.dw, tr.dh);
+  }
+  forestCanopyCanvas = cv;
+}
+
+// Ombres de la canopée (nº7 + reco perf nº8) : une ellipse STATIQUE au pied de chaque
+// arbre (la respiration de vent est abandonnée pour garder la nappe statique). La forêt
+// dense produit son ombrage continu toute seule. Précalculée une fois par rebuild.
+function buildForestShadow() {
+  if (!worldData) return;
   const W = worldData.width, H = worldData.height, T = TILE_SIZE;
   const cv = document.createElement("canvas");
   cv.width = W * T; cv.height = H * T;
   const c = cv.getContext("2d");
   c.fillStyle = SHADOW_COLOR;
-  const biomes = worldData.biomes;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (biomes[y][x] === 2) {   // forêt
-        c.beginPath();
-        c.ellipse((x + 0.5) * T, (y + 0.82) * T, T * 0.42, T * 0.17, 0, 0, Math.PI * 2);
-        c.fill();
-      }
-    }
+  for (const tr of TREES) {
+    c.beginPath();
+    c.ellipse(tr.px + tr.dw / 2, tr.py + tr.dh - 3, tr.dw * 0.34, 3.5, 0, 0, Math.PI * 2);
+    c.fill();
   }
   forestShadowCanvas = cv;
 }
@@ -888,6 +981,45 @@ function applyLight(ctx, worldW, worldH) {
     });
   }
   ctx.restore();
+}
+
+// Décalage de vent (nº7) : vague spatiale qui traverse la carte + rafales lentes.
+// Entier (pixels nets). Piloté par le temps réel → oscillation fluide 60 fps.
+function windShift(t, phase) {
+  const gust = 0.55 + 0.45 * Math.sin(t / 4300 + phase * 0.012);
+  return Math.round(2.3 * gust * Math.sin(t / 780 + phase * 0.05));
+}
+
+// Canopée (nº7) : arbres 32 px dessinés APRÈS les entités → les créatures se cachent sous
+// le couvert dense (look WorldBox). Le vent oscille par 3 tranches horizontales à
+// frontières ENTIÈRES source+dest (une coupe fractionnaire duplique/saute une rangée de
+// pixels = trait sombre horizontal). Culling au viewport → coût ≈ arbres visibles.
+const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperceptible, perf)
+function drawCanopy(ctx) {
+  if (!TREES.length) return;
+  ctx.imageSmoothingEnabled = false;
+  // Dézoomé : 1 blit de la nappe statique (le vent ±2 px est invisible à cette échelle).
+  if (scale < CANOPY_WIND_MIN_SCALE) {
+    if (forestCanopyCanvas) ctx.drawImage(forestCanopyCanvas, 0, 0);
+    return;
+  }
+  // Zoom rapproché : vent live, culling au viewport (peu d'arbres visibles).
+  const t = performance.now(), T = TILE_SIZE;
+  const x0 = -offX / scale - 40, y0 = -offY / scale - 48;
+  const x1 = (canvas.width - offX) / scale + 40, y1 = (canvas.height - offY) / scale + 48;
+  for (const tr of TREES) {
+    if (tr.px + tr.dw < x0 || tr.px > x1 || tr.py + tr.dh < y0 || tr.py > y1) continue;
+    if (!tr.img.complete || tr.img.naturalWidth === 0) continue;
+    const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
+    const sb = tr.sh === T ? [0, 7, 12, 16] : [0, 14, 24, 32];
+    const sc = tr.dh / tr.sh;
+    const shifts = [s, Math.trunc(s / 2), 0];   // cime bouge le plus, tronc fixe
+    for (let i = 0; i < 3; i++) {
+      ctx.drawImage(tr.img,
+        tr.sx, sb[i], tr.sw, sb[i + 1] - sb[i],
+        tr.px + shifts[i], tr.py + sb[i] * sc, tr.dw, (sb[i + 1] - sb[i]) * sc);
+    }
+  }
 }
 
 function redrawBiomeTile(octx, x, y, biome) {
@@ -1310,7 +1442,10 @@ function drawAll() {
     }
   }
 
-  // Jour/nuit (nº10) : composé sur la scène monde finale, encore sous la transform.
+  // Canopée (nº7) : couche d'arbres 32 px APRÈS les entités → couvert WorldBox.
+  drawCanopy(ctx);
+
+  // Jour/nuit (nº10) : composé sur la scène monde finale (canopée incluse), sous la transform.
   applyLight(ctx, worldData.width * TILE_SIZE, worldData.height * TILE_SIZE);
 
   ctx.restore();
