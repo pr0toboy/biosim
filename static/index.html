@@ -959,6 +959,42 @@ function buildWaterDist() {
   }
   waterDist = dist;
 }
+// Champ de flux des rivières (refonte nº17) : BFS de distance à l'océan à travers eau+rivière →
+// chaque tuile de rivière connaît sa direction AVAL (vers le voisin le plus proche de la mer).
+// Sert aux risées de courant. Recalculé au chargement (rivières immuables).
+let riverTiles = [];
+function buildRiverFlow() {
+  riverTiles = [];
+  if (!worldData || !worldData.biomes) return;
+  const W = worldData.width, H = worldData.height, bm = worldData.biomes;
+  const dist = [];
+  for (let y = 0; y < H; y++) dist.push(new Int16Array(W).fill(-1));
+  const qx = [], qy = [];
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++)
+      if (bm[y][x] === 0) { dist[y][x] = 0; qx.push(x); qy.push(y); }
+  const D4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (let h = 0; h < qx.length; h++) {
+    const x = qx[h], y = qy[h], nd = dist[y][x] + 1;
+    for (const [dx, dy] of D4) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H && dist[ny][nx] === -1 && (bm[ny][nx] === 0 || bm[ny][nx] === 5)) {
+        dist[ny][nx] = nd; qx.push(nx); qy.push(ny);
+      }
+    }
+  }
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      if (bm[y][x] !== 5) continue;
+      let best = dist[y][x] < 0 ? 1e9 : dist[y][x], fx = 0, fy = 0;
+      for (const [dx, dy] of D4) {
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < W && ny >= 0 && ny < H && (bm[ny][nx] === 0 || bm[ny][nx] === 5)
+            && dist[ny][nx] >= 0 && dist[ny][nx] < best) { best = dist[ny][nx]; fx = dx; fy = dy; }
+      }
+      riverTiles.push({ x, y, fx, fy });
+    }
+}
 // Vagues animées (nº4) : liste des tuiles d'eau « à vague » (ni plante ni récif) + nappe
 // statique phase 0 (blit dézoomé). Le cyclage de variante est fait live par drawWaves.
 let waveTiles = [];
@@ -1070,6 +1106,7 @@ function buildBiomeCache() {
   buildMountainMask();   // masque de rendu lissé (nº2) avant de tuiler
   classifyMesa();        // montagnes désertiques → grès (nº3)
   buildWaterDist();      // distance à la côte pour le dégradé de profondeur (nº4)
+  buildRiverFlow();      // champ de flux des rivières pour les risées de courant (nº17)
   WALLS = [];            // fronts de falaise triables (nº9-cœur v2), reconstruits ici
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
@@ -1443,6 +1480,31 @@ function drawWaves(ctx) {
     const px = w.x * T, py = w.y * T;
     if (px + T < x0 || px > x1 || py + T < y0 || py > y1) continue;
     ctx.drawImage(woods, (14 + (w.base + phase) % 3) * T, 7 * T, T, T, px, py, T, T);
+  }
+}
+
+// Risées de courant (refonte nº17) : sur chaque tuile de rivière, 2 traits clairs filant dans
+// le sens de l'AVAL (champ de flux), phase glissante → l'eau vive « coule » visiblement.
+function drawRiverFlow(ctx) {
+  if (!riverTiles.length) return;
+  const T = TILE_SIZE, now = performance.now();
+  const x0 = -offX / scale - T, y0 = -offY / scale - T;
+  const x1 = (canvas.width - offX) / scale + T, y1 = (canvas.height - offY) / scale + T;
+  ctx.strokeStyle = "rgba(225,242,255,0.4)"; ctx.lineWidth = 1;
+  for (const r of riverTiles) {
+    if (!r.fx && !r.fy) continue;
+    const px = r.x * T, py = r.y * T;
+    if (px < x0 || px > x1 || py < y0 || py > y1) continue;
+    for (let s = 0; s < 2; s++) {
+      const ph = (now / 900 + s * 0.5 + r.x * 0.11 + r.y * 0.19) % 1;
+      const cx = px + T * 0.5 + r.fx * (ph - 0.5) * T * 0.7;
+      const cy = py + T * 0.5 + r.fy * (ph - 0.5) * T * 0.7;
+      const len = T * 0.28;
+      ctx.beginPath();
+      ctx.moveTo(cx - r.fx * len, cy - r.fy * len);
+      ctx.lineTo(cx + r.fx * len, cy + r.fy * len);
+      ctx.stroke();
+    }
   }
 }
 
@@ -1866,6 +1928,7 @@ function drawAll() {
 
   // Vagues animées (nº4) : détail de surface de l'eau, au-dessus du fond, sous tout le reste.
   drawWaves(ctx);
+  drawRiverFlow(ctx);   // risées de courant sur les rivières (nº17)
 
   // Souches d'arbres (forêt coupée, avant l'overlay saisonnier)
   drawStumps(ctx);
