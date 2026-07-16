@@ -382,6 +382,8 @@ const TREE_SPRITES = {
 // Autotile de falaise (refonte nº2) — Cliff.png (7×9). Bloc 3×3 (0,0)-(2,2) = étage 1,
 // (0,3)-(2,5) = étage 2 ; tuile choisie par voisinage (comme l'eau), herbe dessous.
 const CLIFF_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Ground/Cliff.png" };
+// Palmiers d'oasis (refonte nº3, cols 2-5) — canopée sur l'anneau de sable autour de l'eau.
+const PALM_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Nature/CoconutTrees.png" };
 
 // Sprite feu de camp (centre de clan)
 const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
@@ -443,7 +445,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CLIFF_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, PALM_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
     { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
@@ -778,6 +780,16 @@ function classifyMesa() {
   for (let y = 0; y < H; y++) { const row = new Uint8Array(W); for (let x = 0; x < W; x++) row[x] = (M[y][x] && near[y][x] === 3) ? 1 : 0; mesa.push(row); }
   mesaMask = mesa;
 }
+// Oasis (nº3) : une tuile touche l'eau si un de ses 8 voisins est eau (biome 0 ou 5).
+function _touchesWater(bm, x, y, W, H) {
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H && (bm[ny][nx] === 0 || bm[ny][nx] === 5)) return true;
+    }
+  return false;
+}
 const _mInSet = (x, y, W, H) => x >= 0 && x < W && y >= 0 && y < H && !!mountainMask[y][x];
 function _maskDepth(x, y, W, H) {
   if (!_mInSet(x, y, W, H)) return 0;
@@ -891,6 +903,11 @@ function buildBiomeCache() {
         }
         continue;
       }
+      if (b === 3 && _touchesWater(biomes, x, y, W, H)) {
+        // Oasis (nº3) : rive humide (Shore col1) sans cactus ; palmiers ajoutés en canopée.
+        octx.drawImage(BIOME_SPRITES[0].img, T, 0, T, T, x * T, y * T, T, T);
+        continue;
+      }
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
       let tc, tr;
       if (b === 0) {
@@ -953,10 +970,16 @@ function buildTreeList() {
       const [h1, h2] = hash2(x, y, 0);
       const [j1, j2] = hash2(x, y, 14);
       if (d === 0) {
-        // Plaine uniquement (pas d'arbre sur eau/sable/montagne)
         if (biomes[y][x] === 1 && h1 < 0.05) {
+          // Plaine : arbres épars
           const c = 1 + Math.floor(h2 * 3);
           TREES.push({ img: IT, sx: c * T, sw: T, sh: T,
+            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
+            dw: B, dh: B, seed: j2 });
+        } else if (biomes[y][x] === 3 && h1 < 0.35 && _touchesWater(biomes, x, y, W, H)) {
+          // Oasis (nº3) : palmiers CoconutTrees (cols 2-5) sur l'anneau de sable de l'eau.
+          const c = 2 + Math.floor(h2 * 4);
+          TREES.push({ img: PALM_SPRITE.img, sx: c * T, sw: T, sh: T,
             px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
             dw: B, dh: B, seed: j2 });
         }
