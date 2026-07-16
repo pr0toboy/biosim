@@ -412,6 +412,20 @@ const ENTITY_SPRITES = {
                   dstW: 3,   dstH: 4 },     // affiché 3T×4T (maintien ratio source)
 };
 
+// Marche animée (refonte nº1) — planches 4×4 standard (rows 0-3 = down/up/left/right,
+// 4 frames de marche). ⚠ gauche/droite DIFFÈRENT par espèce (piège « animaux à l'envers »):
+// chicken + fermier = left:2/right:3 ; sheep/horned_sheep/pig/boar = left:3/right:2.
+// human_chief (Kanji 6×8, layout distinct), fish/shark (aquatique), horse (32px) NON animés
+// ici → frame fixe (follow-up). Immobile → frame idle (identique à la frame fixe actuelle).
+const ENTITY_ANIM = {
+  chicken:      { cols: [0, 1, 2, 3], rows: { down: 0, up: 1, left: 2, right: 3 }, idle: { c: 0, r: 0 } },
+  sheep:        { cols: [0, 1, 2, 3], rows: { down: 0, up: 1, left: 3, right: 2 }, idle: { c: 0, r: 0 } },
+  horned_sheep: { cols: [0, 1, 2, 3], rows: { down: 0, up: 1, left: 3, right: 2 }, idle: { c: 0, r: 0 } },
+  pig:          { cols: [0, 1, 2, 3], rows: { down: 0, up: 1, left: 3, right: 2 }, idle: { c: 0, r: 0 } },
+  boar:         { cols: [0, 1, 2, 3], rows: { down: 0, up: 1, left: 3, right: 2 }, idle: { c: 0, r: 0 } },
+  human:        { cols: [1, 2, 3, 4], rows: { down: 0, up: 1, left: 2, right: 3 }, idle: { c: 1, r: 0 } },
+};
+
 let spritesReady = false;
 
 function loadAllSprites() {
@@ -1058,6 +1072,20 @@ function fitWorld() {
 function ipx(e){ const p = prevPos[e.id]; if(!p) return e.x; const d = e.x - p.x; return Math.abs(d) > 4 ? e.x : p.x + d * renderAlpha; }
 function ipy(e){ const p = prevPos[e.id]; if(!p) return e.y; const d = e.y - p.y; return Math.abs(d) > 4 ? e.y : p.y + d * renderAlpha; }
 
+// Frame source [col,row] d'une entité (refonte nº1). Espèce animée + en mouvement →
+// direction (déplacement du dernier tick) + frame de marche (~128 ms, déphasée par id) ;
+// sinon frame idle/fixe. Le chef et les espèces non listées gardent sp.col/sp.row.
+function entityFrame(e, sp, isChief) {
+  const anim = !isChief && ENTITY_ANIM[e.t];
+  if (!anim) return [sp.col, sp.row];
+  const p = prevPos[e.id];
+  const dx = p ? e.x - p.x : 0, dy = p ? e.y - p.y : 0;
+  if (Math.abs(dx) < 0.02 && Math.abs(dy) < 0.02) return [anim.idle.c, anim.idle.r];
+  const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
+  const frame = ((performance.now() >> 7) + (e.id | 0)) & 3;   // 4 frames, déphasage par id
+  return [anim.cols[frame], anim.rows[dir]];
+}
+
 // Boucle de rendu 60 fps découplée du tick moteur (~6 ticks/s) : interpole les
 // positions → mouvement fluide même quand le moteur calcule lentement.
 function renderLoop(){
@@ -1371,7 +1399,8 @@ function drawAll() {
         ctx.drawImage(sp.img, sp.col * S, sp.row * S, srcW, srcH,
                       cx - dstW / 2, cy - dstH / 2, dstW, dstH);
       } else {
-        ctx.drawImage(sp.img, sp.col * S, sp.row * S, S, S, cx - S / 2, cy - S / 2 + kneel, S, S);
+        const [scol, srow] = entityFrame(e, sp, isChief);   // marche animée nº1
+        ctx.drawImage(sp.img, scol * S, srow * S, S, S, cx - S / 2, cy - S / 2 + kneel, S, S);
       }
     } else {
       // Fallback cercle coloré
