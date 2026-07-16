@@ -527,6 +527,35 @@ function updateWet(now) {
   const snowRate = (currentRain && winter) ? 0.09 : 0.035;   // accumulation lente ; fonte idem
   snowCover = Math.max(0, Math.min(1, ease(snowCover, snowTgt, snowRate)));
   if (Math.abs(snowCover - _snowBuilt) > 0.02) buildSnowCanvas();
+  // Sécheresse (nº15) : accumulateur lent piloté par la canicule → herbe qui jaunit + mares boueuses.
+  heatDry = Math.max(0, Math.min(1, ease(heatDry, currentHeatwave ? 1 : 0, 0.05)));
+  if (Math.abs(heatDry - _dryBuilt) > 0.02) buildDryCanvas();
+}
+// Overlay sécheresse (nº15) : tuiles d'herbe/terre jaunies par dithering (hash), bords de mare
+// virés au boueux quand la sécheresse s'installe. Même mécanique de cache que la neige.
+let heatDry = 0, dryCanvas = null, _dryBuilt = -1, _shimmerCv = null;
+function buildDryCanvas() {
+  _dryBuilt = heatDry;
+  dryCanvas = null;
+  if (!worldData || !worldData.biomes || heatDry < 0.02) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE, bm = worldData.biomes;
+  const cv = document.createElement("canvas"); cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d"); c.imageSmoothingEnabled = false;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const b = bm[y][x];
+      if (b === 0 || b === 5) {   // mare : bords boueux d'abord (sécheresse), via distance à la côte
+        const wd = waterDist ? waterDist[y][x] : -1;
+        if (heatDry > 0.35 && wd >= 1 && wd <= 2) { c.fillStyle = `rgba(150,120,70,${(0.5 * heatDry).toFixed(3)})`; c.fillRect(x * T, y * T, T, T); }
+        continue;
+      }
+      if (b !== 1 && b !== 6) continue;   // seule l'herbe/terre battue jaunit
+      const [h1] = hash2(x, y, 31);
+      if (h1 < heatDry * 0.9 - 0.08) { c.fillStyle = "rgba(200,178,96,0.5)"; c.fillRect(x * T, y * T, T, T); }
+      else if (h1 < heatDry * 0.9) { c.fillStyle = "rgba(200,178,96,0.26)"; c.fillRect(x * T, y * T, T, T); }
+    }
+  }
+  dryCanvas = cv;
 }
 // Overlay manteau : tuiles terrestres blanchies par dithering (pleines au cœur, semi en bord de
 // seuil) ; eau → glace translucide quand il fait très froid. Hash-neutre, reconstruit à la volée.
@@ -1646,6 +1675,20 @@ function drawWeatherSky(ctx) {
   const now = performance.now();
   const winter = currentSeason === "winter";
 
+  // Brume de chaleur (nº15) : la scène finale est ré-échantillonnée en bandes horizontales
+  // décalées d'un sinus → l'air tremble au-dessus du sol chaud. Snapshot puis redraw décalé.
+  if (heatDry > 0.1) {
+    if (!_shimmerCv) _shimmerCv = document.createElement("canvas");
+    if (_shimmerCv.width !== Sw || _shimmerCv.height !== Sh) { _shimmerCv.width = Sw; _shimmerCv.height = Sh; }
+    const sc = _shimmerCv.getContext("2d");
+    sc.clearRect(0, 0, Sw, Sh); sc.drawImage(canvas, 0, 0);
+    const amp = 1.6 * heatDry, bandH = 4;
+    for (let y = 0; y < Sh; y += bandH) {
+      const dx = Math.sin(now / 230 + y * 0.13) * amp;
+      ctx.drawImage(_shimmerCv, 0, y, Sw, bandH, dx, y, Sw, bandH);
+    }
+  }
+
   // Pluie (hors hiver) : voile + stries denses
   if (currentRain && !winter) {
     ctx.fillStyle = currentStorm ? "rgba(28,33,62,0.32)" : "rgba(78,108,172,0.15)";
@@ -1736,6 +1779,7 @@ function drawAll() {
   // Manteau neigeux (nº12) : overlay dithéré sur le sol, sous les entités (elles marchent
   // dessus). Cache reconstruit à la volée quand la couverture bouge (updateWet).
   if (snowCanvas) ctx.drawImage(snowCanvas, 0, 0);
+  if (dryCanvas)  ctx.drawImage(dryCanvas, 0, 0);   // sécheresse (nº15) : herbe jaunie, mares boueuses
 
   // Overlay saisonnier
   const seasonOverlay = (SEASONS[currentSeason] || SEASONS.spring).overlay;
