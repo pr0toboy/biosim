@@ -819,6 +819,33 @@ function buildWaterDist() {
   }
   waterDist = dist;
 }
+// Vagues animées (nº4) : liste des tuiles d'eau « à vague » (ni plante ni récif) + nappe
+// statique phase 0 (blit dézoomé). Le cyclage de variante est fait live par drawWaves.
+let waveTiles = [];
+let waveCanvas = null;
+function buildWaves() {
+  waveTiles = []; waveCanvas = null;
+  if (!worldData || waterDist === null) return;
+  const W = worldData.width, H = worldData.height, T = TILE_SIZE, bm = worldData.biomes;
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      if (bm[y][x] !== 0) continue;
+      const wd = waterDist[y][x], d = wd < 0 ? 99 : wd;
+      const [h1, h2] = hash2(x, y, 0);
+      if (d === 1 && h2 < 0.45) continue;   // plante de bordure
+      if (d >= 3 && h1 < 0.04) continue;     // récif
+      if (h1 >= 0.4) continue;
+      waveTiles.push({ x, y, base: Math.floor(h2 * 3) });
+    }
+  const woods = BIOME_SPRITES[0].overlay.img;
+  if (!woods.complete || woods.naturalWidth === 0) return;
+  const cv = document.createElement("canvas");
+  cv.width = W * T; cv.height = H * T;
+  const c = cv.getContext("2d");
+  c.imageSmoothingEnabled = false;
+  for (const w of waveTiles) c.drawImage(woods, (14 + w.base) * T, 7 * T, T, T, w.x * T, w.y * T, T, T);
+  waveCanvas = cv;
+}
 const _mInSet = (x, y, W, H) => x >= 0 && x < W && y >= 0 && y < H && !!mountainMask[y][x];
 function _maskDepth(x, y, W, H) {
   if (!_mInSet(x, y, W, H)) return 0;
@@ -953,17 +980,12 @@ function buildBiomeCache() {
         octx.drawImage(baseImg, bc * T, 0, T, T, x * T, y * T, T, T);
         const woods = BIOME_SPRITES[0].overlay.img;   // free_pixel_16_woods
         const [h1, h2] = hash2(x, y, 0);
-        let decorated = false;
         if (d === 1 && h2 < 0.45) {        // roseaux/nénuphars/joncs (woods 14-16, row 8)
           octx.drawImage(woods, (14 + Math.floor(h1 * 3)) * T, 8 * T, T, T, x * T, y * T, T, T);
-          decorated = true;
         } else if (d >= 3 && h1 < 0.04) {  // récif émergé (woods 14, row 6)
           octx.drawImage(woods, 14 * T, 6 * T, T, T, x * T, y * T, T, T);
-          decorated = true;
         }
-        if (!decorated && h1 < 0.4) {      // vagues (woods 14-16, row 7)
-          octx.drawImage(woods, (14 + Math.floor(h2 * 3)) * T, 7 * T, T, T, x * T, y * T, T, T);
-        }
+        // Vagues : couche animée séparée (drawWaves), pas bakées ici.
         continue;
       }
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
@@ -996,6 +1018,7 @@ function buildBiomeCache() {
   biomeCache = off;
   buildTreeList();      // canopée nº7 : liste d'arbres dérivée des biomes
   buildForestShadow();  // ombres statiques au pied de chaque arbre (lit TREES)
+  buildWaves();         // couche de vagues animées (nº4)
 }
 
 // Construit la liste plate des arbres de la canopée (nº7) à partir des biomes.
@@ -1202,6 +1225,26 @@ function windShift(t, phase) {
 // le couvert dense (look WorldBox). Le vent oscille par 3 tranches horizontales à
 // frontières ENTIÈRES source+dest (une coupe fractionnaire duplique/saute une rangée de
 // pixels = trait sombre horizontal). Culling au viewport → coût ≈ arbres visibles.
+// Vagues (nº4) : dézoomé → 1 blit de la nappe statique (scintillement imperceptible) ;
+// zoomé → cycle des 3 variantes toutes les 500 ms, culling au viewport.
+function drawWaves(ctx) {
+  if (!waveTiles.length) return;
+  ctx.imageSmoothingEnabled = false;
+  if (scale < CANOPY_WIND_MIN_SCALE) {
+    if (waveCanvas) ctx.drawImage(waveCanvas, 0, 0);
+    return;
+  }
+  const T = TILE_SIZE, woods = BIOME_SPRITES[0].overlay.img;
+  const phase = Math.floor(performance.now() / 500) % 3;
+  const x0 = -offX / scale - 32, y0 = -offY / scale - 32;
+  const x1 = (canvas.width - offX) / scale + 32, y1 = (canvas.height - offY) / scale + 32;
+  for (const w of waveTiles) {
+    const px = w.x * T, py = w.y * T;
+    if (px + T < x0 || px > x1 || py + T < y0 || py > y1) continue;
+    ctx.drawImage(woods, (14 + (w.base + phase) % 3) * T, 7 * T, T, T, px, py, T, T);
+  }
+}
+
 const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperceptible, perf)
 function drawCanopy(ctx) {
   if (!TREES.length) return;
@@ -1413,6 +1456,9 @@ function drawAll() {
   // Fond biomes (pas d'interpolation → pixels nets)
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(biomeCache, 0, 0);
+
+  // Vagues animées (nº4) : détail de surface de l'eau, au-dessus du fond, sous tout le reste.
+  drawWaves(ctx);
 
   // Souches d'arbres (forêt coupée, avant l'overlay saisonnier)
   drawStumps(ctx);
