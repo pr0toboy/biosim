@@ -1261,32 +1261,35 @@ function buildTreeList() {
       const d = _forestDepth(biomes, x, y, W, H);
       const [h1, h2] = hash2(x, y, 0);
       const [j1, j2] = hash2(x, y, 14);
+      // Variété de taille (nº22) : chaque arbre 0.82–1.24× (ancré aux pieds → base inchangée).
+      const [szh] = hash2(x, y, 15);
+      const BS = Math.round(B * (0.82 + szh * 0.42));
       if (d === 0) {
         if (biomes[y][x] === 1 && h1 < 0.05) {
           // Plaine : arbres épars (feuillus → nus en hiver, nº12)
           const c = 1 + Math.floor(h2 * 3);
           TREES.push({ img: IT, sx: c * T, sw: T, sh: T, k: "decid",
-            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
-            dw: B, dh: B, seed: j2 });
+            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - BS),
+            dw: BS, dh: BS, seed: j2 });
         } else if (biomes[y][x] === 3 && h1 < 0.35 && _touchesWater(biomes, x, y, W, H)) {
           // Oasis (nº3) : palmiers CoconutTrees (cols 2-5) sur l'anneau de sable de l'eau.
           const c = 2 + Math.floor(h2 * 4);
           TREES.push({ img: PALM_SPRITE.img, sx: c * T, sw: T, sh: T, k: "palm",
-            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - B),
-            dw: B, dh: B, seed: j2 });
+            px: Math.round(x * T - 8 + (j1 - 0.5) * 8), py: Math.round((y + 1) * T - BS),
+            dw: BS, dh: BS, seed: j2 });
         }
         continue;
       }
       const p = d === 1 ? 0.55 : 0.95;   // couvert quasi fermé au cœur
       if (h1 >= p) continue;
       const px = Math.round(x * T - 8 + (j1 - 0.5) * 10);
-      const py = Math.round((y + 1) * T - B + (j2 - 0.5) * 6);
+      const py = Math.round((y + 1) * T - BS + (j2 - 0.5) * 6);
       const kind = h2;
       let img, sx, sw, sh, k;
       if (kind < 0.55) { img = IG; sx = (kind < 0.11 ? 3 : 1) * T; sw = 2 * T; sh = 2 * T; k = "big"; }
       else if (kind < 0.85) { img = IT; sx = (1 + Math.min(Math.floor((kind - 0.55) * 10), 2)) * T; sw = T; sh = T; k = "decid"; }
       else { img = IF; sx = 3 * T; sw = T; sh = T; k = "pine"; }   // pin (garde son feuillage l'hiver)
-      TREES.push({ img, sx, sw, sh, px, py, dw: B, dh: B, seed: j2, k });
+      TREES.push({ img, sx, sw, sh, px, py, dw: BS, dh: BS, seed: j2, k });
     }
   }
   buildCanopyCanvas();   // nappe statique tenue en phase avec TREES
@@ -1855,6 +1858,16 @@ function drawAmbient(ctx) {
       const sy = y0 + ph * vh * 0.7 + Math.sin(ph * 8 + i) * 10;
       ctx.fillStyle = "rgba(250,250,240,0.8)";
       ctx.beginPath(); ctx.arc(sx, sy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // Pollen (nº19) : au printemps/été, fines particules dorées en suspension (jour clair).
+  if ((currentSeason === "spring" || currentSeason === "summer") && calm) {
+    for (let i = 0; i < 12; i++) {
+      const cyc = 4200, ph = ((now + i * 350) % cyc) / cyc;
+      const gx = x0 + ((i * 0.083 + now / 30000) % 1) * vw + Math.sin(now / 800 + i * 1.7) * 8;
+      const gy = y0 + ((i * 0.11) % 1) * vh + Math.sin(ph * 6 + i) * 12;
+      ctx.fillStyle = `rgba(250,224,120,${(0.35 + 0.25 * Math.sin(ph * Math.PI * 2)).toFixed(3)})`;
+      ctx.fillRect(Math.round(gx), Math.round(gy), 1, 1);
     }
   }
 }
