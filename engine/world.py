@@ -14,6 +14,20 @@ from enum import IntEnum
 _MAX_DIM        = 4096                 # dimension max d'un monde chargé
 _MAX_GRID_CELLS = _MAX_DIM * _MAX_DIM  # cellules max d'une grille chargée
 
+# ── ÉCHELLE DE TEMPS (réalisme, 2026-07-15, demande Alexis) ───────────────────
+# Ralentit l'HORLOGE BIOLOGIQUE du monde d'un facteur TIME_SCALE, en laissant la
+# VITESSE de déplacement inchangée. Effet : une créature vit toujours le même nombre
+# de JOURS, mais parcourt TIME_SCALE× plus de terrain pendant ce temps → fini le
+# « quelques cases par jour » irréaliste. Les saisons se vivent (5 min au lieu de 50 s).
+#
+# Règle d'application (tout écart casse l'équilibre — tous les rapports doivent tenir) :
+#   × TIME_SCALE  : les DURÉES en ticks (vie, gestation, cooldowns, périodes, chantiers).
+#   ÷ TIME_SCALE  : les TAUX par tick (faim, soif, repousse, fertilité, science, probas/tick).
+#   INCHANGÉ      : vitesse, vision, distances, seuils, quantités par ACTION, timeouts de
+#                   trajet (bornés par la vitesse, qui ne bouge pas).
+# Importé par entities.py et simulation.py (world.py = module le plus bas, aucun cycle).
+TIME_SCALE = 6
+
 
 def _grid_to_b64(arr: np.ndarray) -> dict:
     """Encode une grille numpy en base64 (compact + sans perte) pour la sauvegarde."""
@@ -72,7 +86,7 @@ BIOME_FOOD_MAX = {
     Biome.DIRT:     0,    # terre battue : aucune nourriture
 }
 
-BIOME_FOOD_REGEN = {
+BIOME_FOOD_REGEN = {   # valeurs de BASE (par tick) — divisées par TIME_SCALE juste après
     Biome.WATER:    2.0,
     Biome.GRASS:    3,
     Biome.FOREST:   2,
@@ -81,42 +95,44 @@ BIOME_FOOD_REGEN = {
     Biome.RIVER:    1.0,
     Biome.DIRT:     0.0,
 }
+# Taux/tick → ralentis avec l'horloge biologique (cf. TIME_SCALE)
+BIOME_FOOD_REGEN = {k: v / TIME_SCALE for k, v in BIOME_FOOD_REGEN.items()}
 
 
 TREE_STUMP_THRESHOLD  = 50.0   # en-dessous : souche visible
-TREE_REGEN_RATE       = 0.08   # santé régénérée par tick (50 → ~625 ticks ≈ 2 saisons)
-WOOD_PER_CHOP         = 2      # bois obtenu par abattage (sans outil)
+TREE_REGEN_RATE       = 0.08 / TIME_SCALE   # santé/tick (taux → ralenti avec l'horloge)
+WOOD_PER_CHOP         = 2      # bois obtenu par abattage (sans outil) — par ACTION, inchangé
 
 # ── Feu de forêt ─────────────────────────────────────────────────────────────
-FIRE_INTENSITY_INIT   = 80.0   # intensité initiale quand une tuile s'embrase
-FIRE_BURN_RATE        = 1.2    # intensité perdue par tick (tuile brûle ~67 ticks)
-FIRE_SPREAD_PROB_DRY  = 0.012  # probabilité de propagation/tick en été (forêt sèche)
-FIRE_SPREAD_PROB_WET  = 0.003  # probabilité hors été
-FIRE_RAIN_DAMP        = 4.0    # intensité retirée par tick sous la pluie
+FIRE_INTENSITY_INIT   = 80.0   # intensité initiale quand une tuile s'embrase (seuil, inchangé)
+FIRE_BURN_RATE        = 1.2  / TIME_SCALE   # intensité perdue/tick (la tuile brûle TIME_SCALE× plus de ticks)
+FIRE_SPREAD_PROB_DRY  = 0.012 / TIME_SCALE  # proba de propagation/tick en été (forêt sèche)
+FIRE_SPREAD_PROB_WET  = 0.003 / TIME_SCALE  # proba hors été
+FIRE_RAIN_DAMP        = 4.0  / TIME_SCALE   # intensité retirée/tick sous la pluie
 
 STONE_STUMP_THRESHOLD = 50.0   # en-dessous : roche épuisée (visible)
-STONE_REGEN_RATE      = 0.021  # santé régénérée par tick (0→50 en ~2400 ticks ≈ 8 saisons)
-STONE_PER_MINE        = 1      # pierre obtenue par minage (sans outil)
+STONE_REGEN_RATE      = 0.021 / TIME_SCALE  # santé/tick
+STONE_PER_MINE        = 1      # pierre par minage (sans outil) — par ACTION, inchangé
 
 # ── Fer (bloc B : rare, dans un sous-ensemble des montagnes) ───────────────────
 IRON_FRACTION         = 0.16   # part des tuiles montagne portant du fer
 IRON_STUMP_THRESHOLD  = 50.0   # en-dessous : gisement de fer épuisé
-IRON_REGEN_RATE       = 0.012  # régen plus lente que la pierre (le fer est rare)
+IRON_REGEN_RATE       = 0.012 / TIME_SCALE  # régen plus lente que la pierre (le fer est rare)
 IRON_PER_MINE         = 3      # fer obtenu par minage (veine riche → 1 voyage suffit)
 
 # ── Or (bloc C2 : plus rare que le fer, filons distincts) ──────────────────────
 GOLD_FRACTION         = 0.05   # part des tuiles montagne (hors fer) portant de l'or
 GOLD_STUMP_THRESHOLD  = 50.0
-GOLD_REGEN_RATE       = 0.008  # la plus lente : l'or est précieux
+GOLD_REGEN_RATE       = 0.008 / TIME_SCALE  # la plus lente : l'or est précieux
 GOLD_PER_MINE         = 1      # 1 pièce par coup (< MAX_GOLD_CARRY=2 : jamais écrêté)
 
 # ── Fertilité / pâturage ──────────────────────────────────────────────────────
-FERTILITY_MAX          = 100.0   # fertilité pleine
-FERTILITY_CONSUME      = 12.0    # fertilité retirée par action de broutage (manger)
-FERTILITY_TRAMPLE      = 0.3     # fertilité retirée par tick de présence sur herbe
-FERTILITY_REGEN_BASE   = 0.05    # regen/tick (~2000 ticks = 6-7 saisons)
-FERTILITY_REGEN_RAIN   = 0.12    # bonus regen/tick sous la pluie
-FERTILITY_REGEN_SPRING = 0.03    # bonus regen/tick au printemps
+FERTILITY_MAX          = 100.0   # fertilité pleine (seuil, inchangé)
+FERTILITY_CONSUME      = 12.0    # retirée par ACTION de broutage → inchangé
+FERTILITY_TRAMPLE      = 0.3  / TIME_SCALE   # retirée par TICK de présence → taux
+FERTILITY_REGEN_BASE   = 0.05 / TIME_SCALE   # regen/tick
+FERTILITY_REGEN_RAIN   = 0.12 / TIME_SCALE   # bonus regen/tick sous la pluie
+FERTILITY_REGEN_SPRING = 0.03 / TIME_SCALE   # bonus regen/tick au printemps
 
 
 class World:

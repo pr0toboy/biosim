@@ -736,7 +736,8 @@ def test_c1_office_procession_blessing_and_hunger():
     """C1 office : à la cloche, les fidèles processionnent vers l'église (distances
     décroissantes), s'agenouillent et sont bénis ; l'affamé est exclu ; l'effet de
     la bénédiction sur la faim est RÉEL (vs contrôle non-béni à traits égaux)."""
-    from engine.simulation import Clan, State
+    from engine.simulation import (Clan, State, CHURCH_SERVICE_PERIOD,
+                                   PRAY_DURATION, CHURCH_CALL_RADIUS)
     world = World(width=60, height=45, seed=7)
     world.stone_grid[:] = 0.0
     world.food_grid[:] = 0.0   # personne ne mange → faim comparable
@@ -766,20 +767,31 @@ def test_c1_office_procession_blessing_and_hunger():
                 break
         if tx is not None:
             break
-    temoin = spawn(EntityType.HUMAN, tx, ty, Sex.MALE)  # hors rayon
-    temoin.clan_id = 0; temoin.hunger = 5.0; temoin.thirst = 5.0
+    # Témoin : contrôle non-béni, traits identiques, pour prouver l'effet RÉEL sur la faim.
+    # Il doit être inéligible par STRUCTURE, pas par distance : un humain du clan 0 dérive
+    # vers son centre de clan (= la tuile de l'église) et finit dans le rayon d'appel dès
+    # que la fenêtre d'office est longue. On le met donc dans un clan SANS église : son
+    # _cb.get("church") est vide ⇒ il ne prie jamais, où qu'il soit et quelle que soit la
+    # fenêtre. (Loin quand même, pour ne pas interférer avec le clan 0.)
+    temoin = spawn(EntityType.HUMAN, tx, ty, Sex.MALE)
+    temoin.clan_id = 1; temoin.hunger = 5.0; temoin.thirst = 5.0
     temoin.pick = "iron_pick"; temoin.tool = "iron_axe"
     temoin.traits = dict(fideles[0].traits)
     sim.entities = fideles + [gourmand, temoin]
     sim.clans = [Clan(id=0, cx=float(lx), cy=float(ly), color="#f00",
-                      chief_id=fideles[0].id, age=3)]
+                      chief_id=fideles[0].id, age=3),
+                 Clan(id=1, cx=float(tx), cy=float(ty), color="#00f",
+                      chief_id=temoin.id, age=3)]
     sim.buildings = [church, house]
-    sim.tick_count = 299   # 1er step → tick 300 : fenêtre d'office ouverte (cid 0)
+    # Dérivé de la constante (jamais figé) : 1er step → fenêtre d'office ouverte (cid 0)
+    sim.tick_count = CHURCH_SERVICE_PERIOD - 1
 
     d0 = [_dist(h.x, h.y, church.x, church.y) for h in fideles]
     dmin = list(d0)   # distance min atteinte PENDANT la fenêtre (après, ils repartent)
     prayed = set(); gourmand_prayed = False
-    for _ in range(220):
+    # Budget = approche (bornée par le rayon d'appel, vitesse inchangée) + prière + marge.
+    # Suit TIME_SCALE tout seul.
+    for _ in range(CHURCH_CALL_RADIUS + 2 * PRAY_DURATION):
         sim.step()
         for i, h in enumerate(fideles):
             if h.state == State.PRAYING:
@@ -792,7 +804,7 @@ def test_c1_office_procession_blessing_and_hunger():
         f"la procession ne converge pas: {[f'{a:.0f}->min{b:.0f}' for a, b in zip(d0, dmin)]}"
     assert blessed >= 3, f"seulement {blessed} bénis"
     assert not gourmand_prayed, "l'affamé (hunger 60 > 55) a participé à l'office"
-    assert temoin.blessed_ticks == 0, "le témoin hors rayon a été béni"
+    assert temoin.blessed_ticks == 0, "le témoin (clan sans église) a été béni"
     b0 = next(h for h in fideles if h.blessed_ticks > 0)
     assert b0.hunger < temoin.hunger, \
         f"bénédiction sans effet réel: béni {b0.hunger:.1f} vs témoin {temoin.hunger:.1f}"
@@ -827,7 +839,12 @@ def test_c1_pilgrimage_pays_offering_and_conserves():
                     + ha.cargo_wood + hb.cargo_wood + ha.wood + hb.wood)
         w0 = wood_total()
         seen = set()
-        for _ in range(900):
+        # Budget DÉRIVÉ (jamais figé) : le 1er contrôle pèlerin (t = PILGRIM_CHECK_PERIOD)
+        # est capté par la caravane — les deux périodes coïncident et les caravanes sont
+        # dispatchées d'abord. Le pèlerin ne part donc qu'au contrôle SUIVANT, une fois la
+        # mission de troc rendue. Il faut couvrir ce 2e contrôle + l'aller-retour (~900
+        # ticks, borné par le TRAJET → vitesse inchangée → indépendant de TIME_SCALE).
+        for _ in range(S.PILGRIM_CHECK_PERIOD + 900):
             data = sim.step()
             for ev in data["events"]:
                 if ev.get("type", "").startswith("pilgrim"):
@@ -1000,7 +1017,11 @@ def test_c2_gold_offering_circulates_and_conserves():
         g0 = gold_total()
         assert g0 == 1 + 0 + GOLD_TREASURY_MAX
         seen = []
-        for _ in range(1400):
+        # Budget DÉRIVÉ : la chaîne A→B→C demande DEUX départs, donc deux contrôles
+        # pèlerins distincts (B ne peut re-dépenser qu'après avoir reçu la pièce de A).
+        # On offre ~6 contrôles comme l'ancien barème (1400/240) ; la boucle sort dès la
+        # dorure de C, donc cette borne ne coûte rien quand tout va bien.
+        for _ in range(6 * S.PILGRIM_CHECK_PERIOD):
             data = sim.step()
             for ev in data["events"]:
                 if ev.get("type") in ("pilgrim_depart", "pilgrim_blessed", "church_gilt"):

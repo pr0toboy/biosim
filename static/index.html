@@ -512,6 +512,7 @@ function setStatus(text, ok) {
 let goldVeins = [];   // filons d'or [x, y] (C2, statique)
 function handleInit(data) {
   worldData = data.world;
+  if (data.ticks_per_season) CAL_TICKS_PER_SEASON = data.ticks_per_season;
   goldVeins = data.world.gold_veins || [];
   entities  = data.entities;
   stats     = data.stats;
@@ -591,12 +592,19 @@ function handleTick(data) {
   (data.events || []).forEach(addEvent);
 }
 
-// ── Calendrier (bloc I) : 300 ticks = 1 saison de 30 jours, 1200 ticks = 1 an ──
+// ── Calendrier (bloc I) : 1 saison = 30 jours ; la LONGUEUR de la saison vient du
+// moteur (full_state.ticks_per_season) — jamais figée ici : une valeur en dur
+// afficherait des dates fausses en silence au prochain changement de TIME_SCALE.
+// À 1800 t/saison → jour de 60 ticks → une bête parcourt ~60 cases/jour = réaliste
+// (c'était 10 ticks/jour = « quelques cases par jour », l'irréalisme signalé par Alexis).
+let   CAL_TICKS_PER_SEASON = 1800;   // défaut de repli, écrasé à l'init par le serveur
+const CAL_DAYS_PER_SEASON  = 30;
 const SEASON_FR = ["Printemps", "Été", "Automne", "Hiver"];
 function tickToDate(tick) {
-  const an     = Math.floor(tick / 1200) + 1;
-  const saison = SEASON_FR[Math.floor(tick / 300) % 4];
-  const jour   = Math.floor((tick % 300) / 10) + 1;   // 30 jours de 10 ticks
+  const an     = Math.floor(tick / (CAL_TICKS_PER_SEASON * 4)) + 1;
+  const saison = SEASON_FR[Math.floor(tick / CAL_TICKS_PER_SEASON) % 4];
+  const jour   = Math.floor((tick % CAL_TICKS_PER_SEASON)
+                            / (CAL_TICKS_PER_SEASON / CAL_DAYS_PER_SEASON)) + 1;
   return `An ${an} · ${saison}, j.${jour}`;
 }
 

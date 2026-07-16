@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
+from .world import TIME_SCALE   # échelle de temps biologique (contrat documenté dans world.py)
 
 
 class EntityType(str, Enum):
@@ -277,6 +278,28 @@ SPECS: dict[EntityType, EntitySpec] = {
         max_pop=40,          # I1 : prédateur apex aquatique → plafond bas (peu nombreux).
     ),
 }
+
+
+# ── Application de l'ÉCHELLE DE TEMPS (réalisme, cf. contrat dans world.py) ────
+# Les valeurs ci-dessus sont écrites dans l'échelle de BASE historique ; la conversion
+# se fait ICI en une passe unique → aucune espèce ne peut être oubliée (contrairement à
+# 9×4 éditions à la main), et régler TIME_SCALE suffit à re-calibrer tout le vivant.
+#   × TIME_SCALE : vie / gestation / cooldown de repro → le cycle de vie s'étire en ticks.
+#   ÷ TIME_SCALE : faim par tick → elle monte TIME_SCALE× plus lentement.
+#   INCHANGÉ     : speed, vision, seuils (max_hunger, repro_hunger_min, hunt_hunger),
+#                  quantités par action (eat_amount, eat_meat), litter_size, max_pop.
+# ⇒ une bête vit le même nombre de JOURS, mais parcourt TIME_SCALE× plus de terrain
+#   pendant sa vie, puisque sa VITESSE (cases/tick) ne bouge pas. C'est tout le but.
+for _sp in SPECS.values():
+    _sp.max_age        = _sp.max_age * TIME_SCALE
+    _sp.gestation      = int(round(_sp.gestation * TIME_SCALE))
+    _sp.repro_cooldown = int(round(_sp.repro_cooldown * TIME_SCALE))
+    _sp.hunger_rate    = _sp.hunger_rate / TIME_SCALE
+
+# Chantiers : un bâtiment demande TIME_SCALE× plus de ticks de travail → même durée
+# en JOURS (le bâtisseur travaille toujours 1 tick à la fois).
+for _bs in BUILDING_SPECS.values():
+    _bs.build_time = int(round(_bs.build_time * TIME_SCALE))
 
 
 # ── Compteur global d'IDs ───────────────────────────────────────────────────

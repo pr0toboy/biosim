@@ -24,37 +24,43 @@ REGOLD (quand un changement moteur modifie VOLONTAIREMENT le comportement) :
   2. Rejouer une 2ᵉ fois EN PROCESSUS FRAIS → EXIGER un hash IDENTIQUE
      (sinon non-déterminisme = bug, pas regold)
   3. Remplacer GOLDEN / GOLDEN_CIV ci-dessous + noter l'évolution dans NEXT-STEPS.
+
+⚠ Les budgets (TICKS/CIV_TICKS/PROD_TICKS) sont des DURÉES : ils suivent TIME_SCALE.
+  Les figer en ticks bruts ampute la couverture EN SILENCE, sans faire rougir le test
+  (mesuré au rescale ×6 : à 1000t bruts le scénario CIV ne voyait plus AUCUN système
+  avancé — ni cloche ni troc — alors qu'il existe précisément pour les exercer).
 """
 import sys, json, hashlib, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.world import World
+from engine.world import World, TIME_SCALE
 from engine.simulation import Simulation
 
 # ── Scénario BASE (Âge du Bois) ──────────────────────────────────────────────
 SEED = 424242
-TICKS = 500
+TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE (= mêmes 500t d'ancien barème)
 WIDTH = 140
 HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "e6f0d72337014e29a9e5fccc4c077218e9c34c0a27d9ef816007684a9acc67e9"
+GOLDEN = "b5e5902dc64c11d2998925eaabd3c3ad6debd55b30c38802d2b5a3a95b9b2b56"  # regold RESCALE TEMPS 2026-07-16 (ex-e6f0d723 ; TICKS 500→3000 = même durée simulée, pop 706→810)
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
-CIV_TICKS = 1000
+CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
+                                # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "6967be2ce8201850c07152aba2065e6a0f8641835e4350be2fe65a8280dbe271"  # regold PRÉDATION 2026-07-15 (ex-2626773c, pop 925→1028)
+GOLDEN_CIV = "07de9ac6df9d2bb455cb38eb70678d2e87b5c59ba907ef482d2a14f3ea222195"  # regold RESCALE TEMPS 2026-07-16 (ex-6967be2c ; CIV_TICKS 1000→6000 : à 1000t bruts plus AUCUN système avancé ne tirait, pop 1028→1205)
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
 # « le golden garde le 140x100, pas le 220x160 servi » (tore np.roll du feu, coûts
 # de scan, entity_grid tous différents à ce gabarit). Non câblé au runner test_smoke.
 PROD_SEED = 424242
-PROD_TICKS = 500
+PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "d66eafffc373444bb4820bae93e2b1dad8ebeeab333ecf65f29a960c77c96f0d"  # regold PRÉDATION 2026-07-15 (ex-cc574753, pop 480→532)
+GOLDEN_PROD = "7a42b41e43f82895f27d8f9b58cb54377978eee337d027f07796328e76e48600"  # regold RESCALE TEMPS 2026-07-16 (ex-d66eafff ; PROD_TICKS 500→3000, pop 532→806)
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):

@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
                        get_id_counter, set_id_counter)
 from .world import (Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD,
-                    IRON_STUMP_THRESHOLD, GOLD_STUMP_THRESHOLD, FERTILITY_TRAMPLE)
+                    IRON_STUMP_THRESHOLD, GOLD_STUMP_THRESHOLD, FERTILITY_TRAMPLE,
+                    TIME_SCALE)   # échelle de temps biologique (contrat dans world.py)
 
 # ── Clans ─────────────────────────────────────────────────────────────────────
 N_CLANS = 4
@@ -28,8 +29,10 @@ CLAN_COLORS = ["#e74c3c", "#3498db", "#27ae60", "#9b59b6"]
 # (forge/fer, économie…) se brancheront sur `clan.age >= X`.
 AGE_NAMES = ["Bois", "Pierre", "Fer", "Acier"]
 AGE_SCIENCE_THRESHOLDS = [0, 700, 2500, 6000]   # science cumulée requise pour l'âge i
-SCIENCE_PER_BUILDING   = 0.20   # science/tick par bâtiment durable du clan
-SCIENCE_PER_POP        = 0.05   # science/tick par humain vivant du clan
+SCIENCE_PER_BUILDING   = 0.20 / TIME_SCALE  # science/TICK par bâtiment durable → taux
+SCIENCE_PER_POP        = 0.05 / TIME_SCALE  # science/TICK par humain vivant → taux
+# (les seuils AGE_SCIENCE_THRESHOLDS restent inchangés : les taux ralentis suffisent à
+#  conserver la même progression PAR JOUR — un clan monte d'âge au même rythme vécu.)
 AGE_POP_BONUS          = 2      # capacité de population supplémentaire par âge franchi
 
 @dataclass
@@ -133,7 +136,7 @@ IRON_PICK_BONUS    = 2     # pierre bonus par minage roche avec pioche fer (tota
                            # IRON_PER_MINE=3 sature déjà MAX_IRON_CARRY (gate-review B).
 # Hache fer : le bonus de rendement serait mangé par MAX_CARRY=5 (2+8 capé → identique
 # pierre, prouvé au gate-review). Son vrai effet = COUPER PLUS VITE (cooldown réduit).
-IRON_AXE_COOLDOWN  = 6     # ticks entre 2 coupes avec hache fer (CHOP_COOLDOWN=12 sinon)
+IRON_AXE_COOLDOWN  = 6 * TIME_SCALE   # ticks entre 2 coupes (hache fer) → durée
 FORGE_MAX_IRON     = 20    # stock de fer max dans une forge (cap de dépôt)
 # Hystérésis anti-pendule (gate-review B) : les mineurs ne partent en expédition fer
 # que si la forge passe SOUS ce seuil (l'upgrade en consomme 3 → si on rouvrait la
@@ -147,7 +150,7 @@ IRON_RESTOCK_THRESHOLD = 8
 # 2×3500 ticks, scratchpad/probe_s*.jsonl) : bois de clan mûr = 100-165 (sature),
 # pierre = 0-19 chronique chez les pauvres vs 300-6000 chez le thésauriseur.
 MARKET_AGE           = 1     # Âge de Pierre requis pour bâtir un marché
-TRADE_CHECK_PERIOD   = 120   # ticks entre 2 évaluations de routes (dérivé de tick_count)
+TRADE_CHECK_PERIOD   = 120 * TIME_SCALE   # période d'évaluation des routes → ×
 TRADE_WOOD_LOT       = 12    # bois emporté par caravane (cargo dédié, hors MAX_CARRY)
 TRADE_WOOD_SURPLUS   = 60    # pool bois min de l'acheteur A (peut payer en bois)
 # (TRADE_STONE_PRICE / TRADE_STONE_SURPLUS / TRADE_STONE_DEFICIT : subsumés par D2 —
@@ -172,21 +175,22 @@ STONE_VALUE_TIERS = (12, 30, 60)
 
 # ── Société v1 (bloc C1 « Le Sanctuaire ») — constantes ratifiées panel C1 ──────
 CHURCH_AGE            = 3     # Acier : MESURÉ t1503-2106 (s7) / t1901-2070 (s42)
-CHURCH_SERVICE_PERIOD = 300   # 1 cloche/saison ; phase (tick + cid*37) % PERIOD → offices déphasés
-CHURCH_SERVICE_WINDOW = 70    # durée d'office (approche ≤26 tuiles + prière 16 < 70)
+CHURCH_SERVICE_PERIOD = 300 * TIME_SCALE   # 1 cloche/saison → doit suivre TICKS_PER_SEASON
+CHURCH_SERVICE_WINDOW = 70 * TIME_SCALE   # durée d'office → × (contient approche +
+                              # prière : 26 tuiles @ speed 1 + PRAY_DURATION 96 < 420)
 CHURCH_CALL_RADIUS    = 26    # éligibles mesurés 7-44 par clan → processions garanties
 PRAY_RADIUS           = 2.5   # distance au parvis pour prier
-PRAY_DURATION         = 16    # ticks agenouillé avant bénédiction
-BLESS_DURATION        = 600   # ticks de bénédiction (2 saisons)
+PRAY_DURATION         = 16 * TIME_SCALE   # durée agenouillé → ×
+BLESS_DURATION        = 600 * TIME_SCALE   # durée de bénédiction (2 saisons) → suit les saisons
 BLESS_HUNGER_MULT     = 0.85  # SEUL effet : faim ralentie 15 % (quasi neutre en glut mesuré)
 PRAY_HUNGER_MAX       = 55    # éligibilité office (jamais au détriment de la survie)
 PRAY_THIRST_MAX       = 50
 OFFERING_WOOD         = 8     # offrande du pèlerin (lot fixe, tout-ou-rien au pool)
 PILGRIM_WOOD_MIN      = 30    # pool bois min du clan pèlerin (< SURPLUS=60 : les pauvres accèdent)
-PILGRIM_CHECK_PERIOD  = 240   # dispatch pèlerins APRÈS caravanes aux ticks communs (gardes croisées)
+PILGRIM_CHECK_PERIOD  = 240 * TIME_SCALE   # période de dispatch → ×
 PILGRIM_TIMEOUT       = 1600  # pire trajet mesuré 179 tuiles, couvert même à eff_speed 0.5
 CHURCH_FAME_GAP       = 3     # hystérésis (amendé 5→3 par le juge : fenêtre Acier serrée ~600 ticks)
-ALTAR_BURN_PERIOD     = 6     # 1 offrande consumée / 6 ticks (cierges — le puits économique)
+ALTAR_BURN_PERIOD     = 6 * TIME_SCALE   # 1 offrande / N ticks → durée
 ALTAR_MAX             = 30    # cap de pile d'autel (surplus consumé immédiatement)
 CHURCH_FAME_MILESTONE = 10    # pèlerins reçus → chronique « le sanctuaire rayonne »
 
@@ -201,63 +205,63 @@ OFFERING_GOLD          = 1    # 1 pièce = 1 offrande (même renom qu'une offran
 GILT_MILESTONE         = 3    # dorure cumulée → chronique « resplendit au soleil »
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
-MARKET_DRAIN_PERIOD  = 4     # 1 ressource étal→maisons tous les N ticks
+MARKET_DRAIN_PERIOD  = 4 * TIME_SCALE   # 1 ressource / N ticks → durée
 MERCHANT_HUNGER_MAX  = 50    # éligibilité au recrutement d'un marchand
 MERCHANT_THIRST_MAX  = 45
 
 # ── Champ de blé ──────────────────────────────────────────────────────────────
-WHEAT_TICKS_PER_STAGE  = 180   # ticks pour passer d'un stade au suivant (×3 = 540 total)
+WHEAT_TICKS_PER_STAGE  = 180 * TIME_SCALE   # croissance du blé → biologique, ×
 WHEAT_HARVEST_FOOD     = 45.0  # réduction de faim lors de la récolte
 WHEAT_HUNGER_THRESH    = 35    # faim min pour décider de récolter (chercher de la nourriture)
 WHEAT_WORK_THRESH      = 65   # faim max pour travailler les champs (planter/arroser quand reposé)
 SICKLE_STONE_COST      = 5    # pierre pour fabriquer une faucille
 SICKLE_HARVEST_BONUS   = 25.0 # nourriture bonus récupérée avec la faucille
 WATERING_CAN_WOOD_COST = 6    # bois pour fabriquer un arrosoir
-WATERED_TICKS          = 25   # ticks d'accélération de croissance après arrosage (×2)
+WATERED_TICKS          = 25 * TIME_SCALE   # durée d'accélération après arrosage → ×
 FISHING_ROD_WOOD_COST  = 4    # bois pour fabriquer une canne à pêche
-FISHING_CATCH_PROB     = 0.10 # probabilité de prise par tick (~1 poisson / 10 ticks)
+FISHING_CATCH_PROB     = 0.10 / TIME_SCALE   # proba de prise par TICK → taux
 FISHING_FOOD           = 35.0 # réduction de faim par prise
 FISHING_HUNGER_THRESH  = 40   # faim min pour décider de pêcher
 
 # ── Météo / Pluie ─────────────────────────────────────────────────────────────
-RAIN_PROB = {
-    "spring": 0.004,   # ~1 épisode / 250 ticks
+RAIN_PROB = {k: v / TIME_SCALE for k, v in {   # proba PAR TICK de démarrer un épisode → taux
+    "spring": 0.004,   # ~1 épisode / 250 ticks (échelle de base)
     "summer": 0.001,
     "autumn": 0.006,
     "winter": 0.002,
-}
-STORM_PROB = {        # probabilité qu'un épisode pluvieux soit un orage
+}.items()}
+STORM_PROB = {        # proba qu'un épisode pluvieux SOIT un orage → RATIO, inchangé
     "spring": 0.25,
     "summer": 0.45,   # orages d'été fréquents
     "autumn": 0.20,
     "winter": 0.05,
 }
-RAIN_DURATION_MIN  = 40    # ticks min d'un épisode pluvieux
-RAIN_DURATION_MAX  = 120   # ticks max
-RAIN_THIRST_REDUCE = 0.06  # soif retirée / tick sous la pluie
-RAIN_SPEED_MULT    = 0.65  # vitesse humains sous la pluie
-RAIN_WHEAT_BONUS   = 1     # grow_ticks bonus / tick (cumul avec arrosoir)
-LIGHTNING_PROB     = 0.015 # probabilité de foudre par tick d'orage (frappe un arbre aléatoire)
+RAIN_DURATION_MIN  = 40  * TIME_SCALE   # durée d'un épisode → ×
+RAIN_DURATION_MAX  = 120 * TIME_SCALE
+RAIN_THIRST_REDUCE = 0.06 / TIME_SCALE  # soif retirée / TICK sous la pluie → taux
+RAIN_SPEED_MULT    = 0.65  # vitesse humains sous la pluie → VITESSE, inchangée
+RAIN_WHEAT_BONUS   = 1     # grow_ticks bonus/tick — ratio vs croissance (+1/tick) → inchangé
+LIGHTNING_PROB     = 0.015 / TIME_SCALE  # proba de foudre par TICK d'orage → taux
 
 # ── Canicule ──────────────────────────────────────────────────────────────────
-HEATWAVE_PROB         = 0.0015  # probabilité de déclenchement par tick (été uniquement)
-HEATWAVE_DURATION_MIN = 60      # ticks
-HEATWAVE_DURATION_MAX = 180
-HEATWAVE_THIRST_MULT  = 2.2     # multiplicateur de soif pendant la canicule
-HEATWAVE_FIRE_PROB    = 0.008   # probabilité d'incendie spontané par tick de canicule
+HEATWAVE_PROB         = 0.0015 / TIME_SCALE  # proba de déclenchement par TICK (été) → taux
+HEATWAVE_DURATION_MIN = 60  * TIME_SCALE     # durée → ×
+HEATWAVE_DURATION_MAX = 180 * TIME_SCALE
+HEATWAVE_THIRST_MULT  = 2.2     # multiplicateur de soif → RATIO, inchangé
+HEATWAVE_FIRE_PROB    = 0.008 / TIME_SCALE   # proba d'incendie par TICK de canicule → taux
 
 # ── Moulin ────────────────────────────────────────────────────────────────────
 MILL_BREAD_COST_WHEAT  = 1    # 1 récolte de blé (stockée) par pain
-MILL_BREAD_TICKS       = 80   # ticks de production d'un pain
+MILL_BREAD_TICKS       = 80 * TIME_SCALE   # durée de production d'un pain → ×
 MILL_BREAD_FOOD        = 65.0 # réduction de faim en mangeant un pain
 MILL_MAX_BREAD         = 5    # stock max de pains dans un moulin
 
 # ── Ruines ─────────────────────────────────────────────────────────────────────
-RUIN_LIFETIME = 2500   # ticks qu'une ruine (bâtiment d'un clan éteint) reste visible
+RUIN_LIFETIME = 2500 * TIME_SCALE   # durée de visibilité d'une ruine → ×
                        # avant que la nature la reprenne (borne la mémoire = invariant infini)
 
 # ── Saisons ──────────────────────────────────────────────────────────────────
-TICKS_PER_SEASON = 300   # 1200 ticks = 1 année complète
+TICKS_PER_SEASON = 300 * TIME_SCALE   # durée d'une saison → × (4 saisons = 1 année)
 
 SEASON_NAMES = ["spring", "summer", "autumn", "winter"]
 
@@ -318,7 +322,7 @@ WELL_DRINK_AMOUNT = 85.0   # soif retirée en buvant au puit (même valeur qu'un
 
 
 # ── Soif ─────────────────────────────────────────────────────────────────────
-THIRST_RATE = 0.04    # soif gagnée par tick
+THIRST_RATE = 0.04 / TIME_SCALE    # soif gagnée par TICK → taux
 MAX_THIRST  = 100.0   # mort au-delà
 DRINK_AMOUNT = 85.0   # soif retirée en buvant une fois
 
@@ -482,7 +486,7 @@ REBOUND_FLOOR = 50     # I3 : sous ce seuil, une espèce ANIMALE recolonise 2× 
                        # préservation de proie (qui coupe la prédation). Humains exclus.
 
 HERD_RADIUS = 8    # tuiles de détection des congénères
-CHOP_COOLDOWN = 12  # ticks minimum entre deux coupes d'arbre
+CHOP_COOLDOWN = 12 * TIME_SCALE   # ticks entre 2 coupes → durée
 HERD_MIN    = 2    # membres min pour déclencher le comportement de troupeau
 
 
@@ -3432,6 +3436,10 @@ class Simulation:
         return {
             "world":     self.world.to_dict(),
             "tick":      self.tick_count,
+            # Le front en dérive son calendrier : il ne doit JAMAIS figer la valeur,
+            # sinon un changement de TIME_SCALE lui fait afficher des dates fausses
+            # en silence. Envoyé une seule fois, à la connexion → coût nul par tick.
+            "ticks_per_season": TICKS_PER_SEASON,
             "season":    get_season(self.tick_count),
             "temp_c":    get_temperature(self.tick_count),
             "raining":   self.raining,
