@@ -1757,6 +1757,37 @@ function drawLightning(ctx) {
   }
 }
 
+// Vent dans l'air (refonte nº18) : traits blancs ondulants qui traversent (alpha sin(π·ph)) +
+// pétales/brins portés par la bourrasque. Couche au-dessus de tout, amplifiée par la pluie.
+function drawWindAir(ctx) {
+  if (!worldData) return;
+  const now = performance.now();
+  const x0 = -offX / scale, y0 = -offY / scale, vw = canvas.width / scale, vh = canvas.height / scale;
+  const gust = 1 + 1.3 * rainWet;
+  for (let i = 0; i < 3; i++) {                          // traits de vent ondulants
+    const cyc = (3600 + i * 700) / gust, ph = ((now + i * 1500) % cyc) / cyc;
+    const y = y0 + (0.18 + i * 0.28) * vh + Math.sin(now / 800 + i) * 20;
+    const x = x0 - 40 + ph * (vw + 80);
+    ctx.globalAlpha = Math.sin(Math.PI * ph) * 0.45;
+    ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let k = 0; k < 22; k++) {
+      const xx = x - k * 4, yy = y + Math.sin(k * 0.5 + now / 300) * 3;
+      if (k === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const cols = ["#d9e88f", "#e8c9a0"];
+  for (let i = 0; i < 10; i++) {                         // pétales/brins portés
+    const cyc = 5000 / gust, ph = ((now + i * 500) % cyc) / cyc;
+    const x = x0 - 20 + ph * (vw + 40) + Math.sin(now / 600 + i) * 10;
+    const y = y0 + ((i * 0.1) % 1) * vh + Math.sin(ph * 10 + i) * 14;
+    ctx.fillStyle = cols[i & 1];
+    ctx.fillRect(Math.round(x), Math.round(y), 2, 2);
+  }
+}
+
 // Ambiance vivante (refonte nº21) : papillons + oiseaux + scintillements d'eau + brume d'aube
 // sur les mares. Purement décoratif, dispersé dans le viewport (densité stable au zoom).
 function drawAmbient(ctx) {
@@ -2224,6 +2255,7 @@ function drawAll() {
   drawLightning(ctx);   // éclairs d'orage (nº14), au-dessus de la scène
   drawSeasonFx(ctx);    // feuilles d'automne (nº16), au-dessus de la scène
   drawAmbient(ctx);     // papillons, oiseaux, scintillements, brume (nº21)
+  drawWindAir(ctx);     // traits de vent + pétales portés (nº18)
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
@@ -2375,7 +2407,16 @@ function drawBuildings(c, T) {
       if (!WHEAT_IMG.complete || !WHEAT_IMG.naturalWidth) return;
       const stage = Math.min(4, Math.max(1, b.stage || 1));
       const sp = WHEAT_SPRITES[stage - 1];
-      c.drawImage(sp.img, sp.col * S, sp.row * S, S, S, b.x * T, b.y * T, T, T);
+      if (stage >= 3) {
+        // Blé mûr (nº18) : la cime (épis, haut ~55 %) ondule au vent, la tige reste fixe →
+        // vague qui roule sur le champ (phase par position, cf. windShift).
+        const wob = windShift(performance.now(), b.x * 3 + b.y * 5) * 0.6;
+        const cut = Math.round(S * 0.55), th = cut / S * T;
+        c.drawImage(sp.img, sp.col * S, sp.row * S, S, cut, b.x * T + wob, b.y * T, T, th);
+        c.drawImage(sp.img, sp.col * S, sp.row * S + cut, S, S - cut, b.x * T, b.y * T + th, T, T - th);
+      } else {
+        c.drawImage(sp.img, sp.col * S, sp.row * S, S, S, b.x * T, b.y * T, T, T);
+      }
       // Indicateur arrosé — petit carré bleu en haut à gauche
       if (b.watered) {
         c.fillStyle = "#38bdf8";
