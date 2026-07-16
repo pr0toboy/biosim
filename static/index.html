@@ -379,6 +379,13 @@ const TREE_SPRITES = {
   forestTreesSoft: { img: new Image(), src: "/static/refonte/forest_trees_soft.png" },
   thingsG:         { img: new Image(), src: "/static/refonte/things_g.png" },
   winterDeadSoft:  { img: new Image(), src: "/static/refonte/winter_dead_soft.png" },  // nº12 feuillus nus
+  // nº16 saisons : automne (or/rouge) + floraison (printemps), petits feuillus & gros feuillus
+  treesAutumn1:    { img: new Image(), src: "/static/refonte/trees_autumn1.png" },
+  treesAutumn2:    { img: new Image(), src: "/static/refonte/trees_autumn2.png" },
+  treesBloom:      { img: new Image(), src: "/static/refonte/trees_bloom.png" },
+  thingsAutumn1:   { img: new Image(), src: "/static/refonte/things_autumn1.png" },
+  thingsAutumn2:   { img: new Image(), src: "/static/refonte/things_autumn2.png" },
+  thingsBloom:     { img: new Image(), src: "/static/refonte/things_bloom.png" },
 };
 // Autotile de falaise (refonte nº2) — Cliff.png (7×9). Bloc 3×3 (0,0)-(2,2) = étage 1,
 // (0,3)-(2,5) = étage 2 ; tuile choisie par voisinage (comme l'eau), herbe dessous.
@@ -1433,11 +1440,20 @@ const CANOPY_WIND_MIN_SCALE = 1.0;   // en-dessous : nappe statique (vent imperc
 function drawTreeSliced(ctx, tr, t) {
   const T = TILE_SIZE;
   let img = tr.img, sx = tr.sx;
-  // Hiver (nº12) : bascule progressive par arbre (seed < couverture). Feuillus → NUS
-  // (WinterDeadTrees cols 2-3, branches enneigées) ; pins gardent leur feuillage ; gros
-  // feuillus 2×2 restent verts (pas d'équivalent nu 2 tuiles — compromis documenté).
-  if (snowCover > 0.05 && tr.k === "decid" && tr.seed < snowCover * 1.08) {
-    img = TREE_SPRITES.winterDeadSoft.img; sx = (2 + Math.floor(tr.seed * 2)) * T;
+  const decid = tr.k === "decid", big = tr.k === "big";   // pins & palmiers : jamais reteintés
+  // Saisons (nº12 hiver + nº16). Hiver : feuillus NUS (WinterDeadTrees, bascule par seed<cover) ;
+  // gros feuillus 2×2 restent verts (pas d'équivalent nu). Automne : or 55 % / rouge 45 % par
+  // seed. Printemps : floraison rose sur ~55 % des feuillus. Discret au changement de saison.
+  if (currentSeason === "winter") {
+    if (snowCover > 0.05 && decid && tr.seed < snowCover * 1.08) {
+      img = TREE_SPRITES.winterDeadSoft.img; sx = (2 + Math.floor(tr.seed * 2)) * T;
+    }
+  } else if (currentSeason === "autumn" && (decid || big)) {
+    const gold = tr.seed < 0.55;
+    img = (decid ? (gold ? TREE_SPRITES.treesAutumn1 : TREE_SPRITES.treesAutumn2)
+                 : (gold ? TREE_SPRITES.thingsAutumn1 : TREE_SPRITES.thingsAutumn2)).img;
+  } else if (currentSeason === "spring" && (decid || big) && tr.seed < 0.55) {
+    img = (decid ? TREE_SPRITES.treesBloom : TREE_SPRITES.thingsBloom).img;
   }
   if (!img.complete || img.naturalWidth === 0) return;
   const s = windShift(t, tr.px + tr.py * 0.35 + tr.seed * 60);
@@ -1663,6 +1679,24 @@ function drawLightning(ctx) {
     g.addColorStop(1, "rgba(230,240,255,0)");
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(ex, ey, ir, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Feuilles d'automne (nº16) : pluie de feuilles dérivant du haut du viewport (densité stable
+// au zoom), 4 teintes, oscillation au vent. Purement décoratif, saison automne uniquement.
+function drawSeasonFx(ctx) {
+  if (currentSeason !== "autumn") return;
+  const now = performance.now();
+  const x0 = -offX / scale, y0 = -offY / scale, vw = canvas.width / scale, vh = canvas.height / scale;
+  const N = Math.round(Math.min(vw * vh / 2600, 160));
+  const cols = ["#c9822e", "#b8532e", "#d9a441", "#8f5a2b"];
+  for (let i = 0; i < N; i++) {
+    const cyc = 3400, tt = now + i * 211, ph = (tt % cyc) / cyc, k2 = Math.floor(tt / cyc);
+    const [hx] = hash2(i + (k2 % 71), k2 % 67, 42);
+    const x = x0 + hx * vw + Math.sin(ph * 6 + i) * 12;
+    const y = y0 - 10 + ph * (vh + 20);
+    ctx.fillStyle = cols[i & 3];
+    ctx.fillRect(Math.round(x), Math.round(y), 2, 2);
   }
 }
 
@@ -2064,6 +2098,7 @@ function drawAll() {
   drawRainImpacts(ctx);
   drawFireSmoke(ctx);   // fumée des incendies (nº13), au-dessus de la scène
   drawLightning(ctx);   // éclairs d'orage (nº14), au-dessus de la scène
+  drawSeasonFx(ctx);    // feuilles d'automne (nº16), au-dessus de la scène
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {

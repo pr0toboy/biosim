@@ -83,6 +83,43 @@ REMAP_SAND = {
 }
 
 things_g = remap(things, REMAP_G)
+trees_soft_img = remap(trees, SOFT)
+
+
+# nº16 saisons : recoloration par luminance (automne or/rouge) + mouchetis de fleurs (printemps).
+def _lum(c):
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def season_ramp(im, ramp):
+    """ramp = [(sombre), (moyen), (clair)] appliqué par luminance aux pixels verts (feuillage)."""
+    im = im.copy()
+    px = im.load()
+    for yy in range(im.height):
+        for xx in range(im.width):
+            r, g, b, a = px[xx, yy]
+            if a > 0 and g > r * 1.02 and g > b * 1.08:
+                lum = _lum((r, g, b))
+                px[xx, yy] = (ramp[0] if lum < 130 else (ramp[1] if lum < 185 else ramp[2])) + (a,)
+    return im
+
+
+def bloom(im, density=0.13):
+    """Mouchetis de fleurs roses sur les zones vertes (hash déterministe, printemps)."""
+    im = im.copy()
+    px = im.load()
+    for yy in range(im.height):
+        for xx in range(im.width):
+            r, g, b, a = px[xx, yy]
+            if a > 0 and g > r * 1.02 and g > b * 1.08:
+                h = abs(math.sin(xx * 127.1 + yy * 311.7) * 43758.5453) % 1
+                if h < density:
+                    px[xx, yy] = ((245, 190, 210) if h < density * 0.6 else (250, 225, 235)) + (a,)
+    return im
+
+
+GOLD = [(160, 96, 40), (224, 152, 60), (240, 200, 96)]
+RED = [(140, 52, 36), (202, 84, 50), (232, 126, 74)]
 
 
 def blend_tile(a, b):
@@ -134,6 +171,13 @@ outputs = {
     # nº12 hiver : feuillus NUS (branches enneigées) — WinterDeadTrees, contour noir adouci
     # (23,23,23 → brun sombre) pour éviter le trait doublé au dessin ×2. 4 cols (on prend 2-3).
     "winter_dead_soft": remap(load("Nature/WinterDeadTrees.png"), {(23, 23, 23): (74, 64, 56)}),
+    # nº16 saisons : feuillages d'automne (or/rouge par luminance) + floraison de printemps.
+    "trees_autumn1": season_ramp(trees_soft_img, GOLD),
+    "trees_autumn2": season_ramp(trees_soft_img, RED),
+    "trees_bloom": bloom(trees_soft_img),
+    "things_autumn1": season_ramp(things_g, GOLD),
+    "things_autumn2": season_ramp(things_g, RED),
+    "things_bloom": bloom(things_g),
 }
 
 for name, im in outputs.items():
