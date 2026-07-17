@@ -1791,38 +1791,8 @@ function drawLightning(ctx) {
   }
 }
 
-// Vent dans l'air (refonte nº18) : traits blancs ondulants qui traversent (alpha sin(π·ph)) +
-// pétales/brins portés par la bourrasque. Couche au-dessus de tout, amplifiée par la pluie.
-function drawWindAir(ctx) {
-  if (!worldData) return;
-  const now = performance.now();
-  const x0 = -offX / scale, y0 = -offY / scale, vw = canvas.width / scale, vh = canvas.height / scale;
-  const gust = 1 + 1.3 * rainWet;
-  for (let i = 0; i < 3; i++) {                          // traits de vent ondulants
-    const cyc = (3600 + i * 700) / gust, ph = ((now + i * 1500) % cyc) / cyc;
-    const y = y0 + (0.18 + i * 0.28) * vh + Math.sin(now / 800 + i) * 20;
-    const x = x0 - 40 + ph * (vw + 80);
-    ctx.globalAlpha = Math.sin(Math.PI * ph) * 0.45;
-    ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    for (let k = 0; k < 22; k++) {
-      const xx = x - k * 4, yy = y + Math.sin(k * 0.5 + now / 300) * 3;
-      if (k === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
-    }
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-  const cols = ["#d9e88f", "#e8c9a0"];
-  const wpx = worldData.width * TILE_SIZE, hpx = worldData.height * TILE_SIZE;
-  for (let i = 0; i < 10; i++) {                         // pétales/brins portés
-    const cyc = 5000 / gust, ph = ((now + i * 500) % cyc) / cyc;
-    const x = x0 - 20 + ph * (vw + 40) + Math.sin(now / 600 + i) * 10;
-    const y = y0 + ((i * 0.1) % 1) * vh + Math.sin(ph * 10 + i) * 14;
-    if (x < 0 || x > wpx || y < 0 || y > hpx) continue;   // pas dans le letterbox
-    ctx.fillStyle = cols[i & 1];
-    ctx.fillRect(Math.round(x), Math.round(y), 2, 2);
-  }
-}
+// (nº18 « vent dans l'air » — traits blancs + pétales portés — RETIRÉ à la demande d'Alexis
+// le 2026-07-17. La houle du blé mûr et le vent des cimes/canopée restent, eux, en place.)
 
 // Ambiance vivante (refonte nº21) : papillons + oiseaux + scintillements d'eau + brume d'aube
 // sur les mares. Purement décoratif, dispersé dans le viewport (densité stable au zoom).
@@ -2404,7 +2374,6 @@ function drawAll() {
   drawLightning(ctx);   // éclairs d'orage (nº14), au-dessus de la scène
   drawSeasonFx(ctx);    // feuilles d'automne (nº16), au-dessus de la scène
   drawAmbient(ctx);     // papillons, oiseaux, scintillements, brume (nº21)
-  drawWindAir(ctx);     // traits de vent + pétales portés (nº18)
 
   // Sélecteur de personnage suivi
   if (trackedId !== null) {
