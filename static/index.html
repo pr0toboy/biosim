@@ -2940,6 +2940,21 @@ function addEvent(ev) {
     div.textContent = `🎓 Clan ${ev.clan_id + 1} entre dans l'Âge du/de la ${ev.age_name}`;
     div.style.borderColor = "#a78bfa"; div.style.color = "#c4b5fd";
     if (cn) div.style.borderColor = cn.color;
+  } else if (ev.type === "clan_mode") {
+    // Société : déclaration de guerre / retour à la paix / famine (rare, dramatique → visible)
+    div.className = "ev-item";
+    const cn = clans.find(c => c.id === ev.clan_id);
+    if (ev.mode === "war") {
+      div.textContent = `⚔️ Clan ${ev.clan_id + 1} entre en guerre`;
+      div.style.borderColor = "#ef4444"; div.style.color = "#fca5a5";
+    } else if (ev.mode === "famine") {
+      div.textContent = `🍖 Clan ${ev.clan_id + 1} sombre dans la famine`;
+      div.style.borderColor = "#f59e0b"; div.style.color = "#fcd34d";
+    } else {
+      div.textContent = `🕊️ Clan ${ev.clan_id + 1} revient à la paix`;
+      div.style.borderColor = "#22c55e"; div.style.color = "#86efac";
+    }
+    if (cn) div.style.borderColor = cn.color;
   } else if (ev.type === "build_house") {
     div.className = "ev-item build_house";
     const cn = clans.find(c => c.id === ev.clan_id);

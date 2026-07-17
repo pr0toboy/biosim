@@ -54,12 +54,19 @@ class Clan:
     chief_id: int
     science: float = 0.0   # savoir accumulé (bâtiments + population) — pilote les âges
     age: int = 0           # âge technologique : index dans AGE_NAMES (0 = Bois)
+    mode: str = "peace"    # gouvernement (société) : "peace" | "war" | "famine"
+    war_target: int = -1   # clan_id ciblé en guerre (-1 = aucun ; int → asdict/JSON stable)
+    mode_ticks: int = 0    # ticks écoulés dans le mode courant (hystérésis)
 
     def to_dict(self):
-        return {"id": self.id, "cx": self.cx, "cy": self.cy,
-                "color": self.color, "chief_id": self.chief_id,
-                "science": round(self.science, 1), "age": self.age,
-                "age_name": AGE_NAMES[min(self.age, len(AGE_NAMES) - 1)]}
+        d = {"id": self.id, "cx": self.cx, "cy": self.cy,
+             "color": self.color, "chief_id": self.chief_id,
+             "science": round(self.science, 1), "age": self.age,
+             "age_name": AGE_NAMES[min(self.age, len(AGE_NAMES) - 1)]}
+        if _SOCIETY_ON:   # kill-switch d'imputation : off → payload identique au pré-bloc
+            d["mode"] = self.mode
+            d["war_target"] = self.war_target
+        return d
 
 
 _next_building_id = 0
@@ -213,6 +220,20 @@ GOLD_RESTOCK_THRESHOLD = 4    # hystérésis type IRON_RESTOCK : expédition ssi
                               # ferme la vanne (substitution : la circulation éteint la source)
 OFFERING_GOLD          = 1    # 1 pièce = 1 offrande (même renom qu'une offrande bois : +1)
 GILT_MILESTONE         = 3    # dorure cumulée → chronique « resplendit au soleil »
+
+# ── Société : gouvernements de clan (PAIX/GUERRE/FAMINE) + conflit gouverné ──────────
+# Le chef choisit le mode selon l'état du clan, réévalué périodiquement (déphasé par clan),
+# 100 % déterministe (thresholds, zéro RNG). Kill-switch d'imputation : SOCIETY_OFF=1 → mode
+# figé "peace", décision et conflit-de-guerre coupés, `mode` absent du payload → hash pré-bloc.
+_SOCIETY_ON     = os.environ.get("SOCIETY_OFF") != "1"
+MODE_PERIOD     = 120 * TIME_SCALE   # ré-évaluation du mode par le chef (déphasée par clan)
+FAMINE_HUNGER   = 55                 # faim moyenne du clan → mode FAMINE (survie prime tout)
+WAR_MIN_POP     = 4                  # pop humaine mini du clan pour déclarer la guerre
+# Périodicité (une guerre est un ÉVÉNEMENT, pas un état permanent) : elle dure au plus
+# WAR_MAX_TICKS puis retombe en paix, et un cooldown PEACE_MIN_TICKS empêche d'en redéclarer
+# aussitôt → cycle guerre→paix→(éventuelle reprise). Sans ça les clans restent en guerre ~95 %.
+WAR_MAX_TICKS   = 240 * TIME_SCALE   # durée max d'une guerre → paix forcée
+PEACE_MIN_TICKS = 480 * TIME_SCALE   # cooldown de paix avant de pouvoir redéclarer la guerre
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4 * TIME_SCALE   # 1 ressource / N ticks → durée
@@ -1370,31 +1391,51 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                                "prey": prey.etype.value,
                                "x": entity.ix, "y": entity.iy})
             return True
-    # 2b. Conflit inter-clan (humains très affamés attaquent clan ennemi).
-    # Trêve marchande (D1) : un marchand n'attaque pas, une caravane n'est pas
-    # attaquée — sinon toute route passant en vision d'ennemis affamés mourrait.
+    # 2b. Conflit inter-clan. Deux moteurs (trêve marchand/pèlerin/béni dans les deux) :
+    #   - SURVIE (existant) : humain très affamé (hunger>65) attaque un ennemi pour se nourrir.
+    #   - GUERRE (société) : clan en mode "war" → ses membres attaquent le CLAN-CIBLE même sans
+    #     faim (acte de guerre, pas repas). Plancher d'espèce (<30, comme la prédation) respecté
+    #     → anti-cascade. SOCIETY_OFF : `_at_war`=False + plancher désactivé → comportement pré-bloc.
+    ec = clans.get(entity.clan_id) if (clans and entity.clan_id is not None) else None
+    _at_war = _SOCIETY_ON and ec is not None and ec.mode == "war"
+    _hungry = entity.hunger > 65
+    # D3 : en guerre pure (pas affamé), si le plancher d'espèce bloque déjà les kills, ne pas
+    # scanner ni monopoliser le tick → le membre "en guerre" vaque à ses autres tâches.
+    if (_at_war and not _hungry
+            and (species_counts or {}).get(EntityType.HUMAN.value, 0) <= 30):
+        _at_war = False
     if (entity.etype == EntityType.HUMAN and entity.clan_id is not None
-            and entity.hunger > 65 and clans
+            and (_hungry or _at_war) and clans
             and entity.trade_phase is None
             and entity.pilgrim_phase is None
             and entity.blessed_ticks == 0):   # Trêve de Dieu : un béni n'attaque pas (C1)
-        for e in all_entities:
+        # D2 : scanner le VOISINAGE (grille spatiale) et non tout le monde — une guerre longue
+        # ferait sinon un O(N²) soutenu. Gated _SOCIETY_ON : sous SOCIETY_OFF le raid-faim garde
+        # le scan all_entities d'origine → l'imputation (hash pré-bloc) reste exacte.
+        _scan = (_grid_neighbors(entity_grid, entity.ix, entity.iy, reach=1)
+                 if (_SOCIETY_ON and entity_grid is not None) else all_entities)
+        for e in _scan:
             if (e is not entity and e.alive
                     and e.etype == EntityType.HUMAN
                     and e.clan_id is not None
                     and e.clan_id != entity.clan_id
                     and e.trade_phase is None
                     and e.pilgrim_phase is None):
+                # En guerre (pas affamé) : ne cible QUE le clan désigné (les autres restent en paix).
+                if _at_war and not _hungry and ec.war_target >= 0 and e.clan_id != ec.war_target:
+                    continue
                 d = _dist(entity.x, entity.y, e.x, e.y)
                 if d < entity.traits["vision"]:
                     entity.state = State.HUNTING
                     _move_toward(entity, e.x, e.y, _eff_speed * 1.1, world)
-                    if d < 0.8:
+                    _floor_ok = (not _SOCIETY_ON) or (species_counts or {}).get(e.etype.value, 0) > 30
+                    if d < 0.8 and _floor_ok:
                         e.alive = False
                         e.state = State.DEAD
                         if species_counts is not None:
                             species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
-                        entity.hunger = max(0, entity.hunger - 25)
+                        if _hungry:
+                            entity.hunger = max(0, entity.hunger - 25)   # repas de survie
                         events.append({"type": "clan_fight",
                                        "attacker_clan": entity.clan_id,
                                        "victim_clan":   e.clan_id,
@@ -2854,6 +2895,8 @@ class Simulation:
         # Pèlerinages (C1) : APRÈS les caravanes (gardes croisées → pas de double-booking)
         if self.tick_count % PILGRIM_CHECK_PERIOD == 0 and len(self.clans) >= 2:
             self._dispatch_pilgrims(clan_bldg, tick_events)
+        # Société : le chef réévalue le mode de gouvernement du clan (déterministe, déphasé).
+        self._update_society(clan_bldg, tick_events)
 
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
@@ -3055,6 +3098,11 @@ class Simulation:
                                     "y": int(c.cy) if c else 0,
                                     "ruins": ruins_per_clan.get(cid, 0)})
             self.clans = [c for c in self.clans if c.id not in dead_clan_ids]
+            if _SOCIETY_ON:   # société (D1) : la guerre s'arrête quand la cible s'éteint
+                for c in self.clans:
+                    if c.war_target in dead_clan_ids:
+                        c.mode = "peace"; c.war_target = -1; c.mode_ticks = 0
+                        tick_events.append({"type": "clan_mode", "clan_id": c.id, "mode": "peace"})
 
         # Décroissance des ruines : la nature les reprend (borne la mémoire → le
         # jeu tourne à l'infini sans accumulation de bâtiments morts).
@@ -3141,6 +3189,59 @@ class Simulation:
         return {"populations": counts, "total": len(self.entities)}
 
     # ── Économie / caravanes (blocs D1+D2) ───────────────────────────────────
+    def _update_society(self, clan_bldg: dict, tick_events: list):
+        """Société : le chef choisit PAIX/GUERRE/FAMINE selon l'état du clan. Réévalué
+        périodiquement, DÉPHASÉ par clan (un scan des entités seulement sur un tick de décision),
+        100 % déterministe (thresholds, zéro RNG). mode_ticks avance chaque tick (hystérésis).
+
+        Priorité : FAMINE (survie) > GUERRE (rival en contact + assez nombreux, hystérésis) > PAIX.
+        Émet `clan_mode` au changement (consommé par les chroniques I3). SOCIETY_OFF → no-op."""
+        if not _SOCIETY_ON or not self.clans:
+            return
+        for c in self.clans:          # hystérésis : le temps passé dans le mode courant
+            c.mode_ticks += 1
+        n = len(self.clans)
+        phase = max(1, MODE_PERIOD // n)
+        due = [c for c in self.clans if (self.tick_count + c.id * phase) % MODE_PERIOD == 0]
+        if not due:
+            return
+        # Métriques par clan : population humaine, faim moyenne, stock de pain (un seul scan).
+        pop: dict = {}
+        hsum: dict = {}
+        for e in self.entities:
+            if e.alive and e.etype == EntityType.HUMAN and e.clan_id is not None:
+                pop[e.clan_id] = pop.get(e.clan_id, 0) + 1
+                hsum[e.clan_id] = hsum.get(e.clan_id, 0.0) + e.hunger
+        for c in due:
+            p = pop.get(c.id, 0)
+            avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
+            bread = sum(getattr(b, "bread", 0) for b in clan_bldg.get(c.id, {}).get("mill", []))
+            rivals = [o for o in self.clans if o.id != c.id and pop.get(o.id, 0) >= 1]
+            pick = lambda: max(rivals, key=lambda o: (pop.get(o.id, 0), -o.id)).id  # rival + peuplé, tie-break id
+            old = c.mode
+            if avg_h >= FAMINE_HUNGER or (bread == 0 and avg_h >= 40):
+                new_mode, target = "famine", -1                # survie : prime sur tout
+            elif c.mode == "war":
+                # Guerre en cours : dure jusqu'à WAR_MAX_TICKS puis retombe en paix ; se recible
+                # si l'ennemi a disparu (D1 : plus de guerre passive sur un clan éteint).
+                if c.mode_ticks >= WAR_MAX_TICKS or not rivals:
+                    new_mode, target = "peace", -1
+                elif c.war_target < 0 or pop.get(c.war_target, 0) == 0:
+                    new_mode, target = "war", pick()
+                else:
+                    new_mode, target = "war", c.war_target
+            elif c.mode_ticks < PEACE_MIN_TICKS:
+                new_mode, target = "peace", -1                 # cooldown : pas de nouvelle guerre
+            elif p >= WAR_MIN_POP and rivals:
+                new_mode, target = "war", pick()               # nouvelle guerre après le cooldown
+            else:
+                new_mode, target = "peace", -1
+            c.war_target = target
+            if new_mode != old:
+                c.mode = new_mode
+                c.mode_ticks = 0
+                tick_events.append({"type": "clan_mode", "clan_id": c.id, "mode": new_mode})
+
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
         """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
         routes et recrute AU PLUS UNE caravane par appel. Mission paramétrée :
