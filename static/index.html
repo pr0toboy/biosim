@@ -387,9 +387,15 @@ const TREE_SPRITES = {
   thingsAutumn2:   { img: new Image(), src: "/static/refonte/things_autumn2.png" },
   thingsBloom:     { img: new Image(), src: "/static/refonte/things_bloom.png" },
 };
-// Autotile de falaise (refonte nº2) — Cliff.png (7×9). Bloc 3×3 (0,0)-(2,2) = étage 1,
-// (0,3)-(2,5) = étage 2 ; tuile choisie par voisinage (comme l'eau), herbe dessous.
-const CLIFF_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Ground/Cliff.png" };
+// Autotile de falaise (nº2, matériau nº26) — cliff_rock.png = Cliff.png passé pierre par
+// tools/build_refonte_mountain.py (plateau VERT dans la tuile d'origine → rampe de gris ;
+// rangées grès 6-8 en rampe sable). Même géométrie 7×9, mêmes coordonnées de tuiles.
+const CLIFF_SPRITE = { img: new Image(), src: "/static/refonte/cliff_rock.png" };
+// Étage 2 (rangées 3-5) blanchi 22 % « altitude » (nº26).
+const CLIFF_HIGH_SPRITE = { img: new Image(), src: "/static/refonte/cliff_rock_high.png" };
+// Gravier (nº26) : sol SOUS les tuiles falaise (coins transparents) + frange d'éboulis.
+// Même 3×2 que TexturedGrass → mêmes (col,row) que l'herbe qu'il remplace.
+const GRAVEL_SPRITE = { img: new Image(), src: "/static/refonte/gravel.png" };
 // Palmiers d'oasis (refonte nº3, cols 2-5) — canopée sur l'anneau de sable autour de l'eau.
 const PALM_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Nature/CoconutTrees.png" };
 // Paliers d'eau profonde (refonte nº4) — Shore col4 assombri ×0.84 (col0) et ×0.68 (col1).
@@ -480,7 +486,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CLIFF_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, CLIFF_HIGH_SPRITE, GRAVEL_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     ...CLAN_FARMER_SPRITES, ...CLAN_HUT_SPRITES,   // fermiers + huttes colorés par clan (nº22)
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
@@ -1068,6 +1074,15 @@ function _maskDepth(x, y, W, H) {
           return d;
   return 3;
 }
+// Distance au massif (nº26) : 0 = dedans, 1-2 = frange d'éboulis, 3 = loin.
+function _mtDist(x, y, W, H) {
+  if (_mInSet(x, y, W, H)) return 0;
+  for (let d = 1; d <= 2; d++)
+    for (let dy = -d; dy <= d; dy++)
+      for (let dx = -d; dx <= d; dx++)
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === d && _mInSet(x + dx, y + dy, W, H)) return d;
+  return 3;
+}
 // Bloc 3×3 : bord = voisin hors ensemble. col0/row0 = coin haut-gauche du bloc dans Cliff.png.
 function cliffTileNbr(inSet, x, y, col0, row0) {
   const c = !inSet(x - 1, y) ? 0 : !inSet(x + 1, y) ? 2 : 1;
@@ -1148,14 +1163,14 @@ function buildBiomeCache() {
     for (let x = 0; x < W; x++) {
       const b = biomes[y][x];
       if (mountainMask[y][x]) {
-        // Montagne (nº2) : relief autotile sur le masque de RENDU lissé. Herbe SOUS (coins
-        // de falaise transparents). Promontoire (≤1 voisin ortho) → rocher isolé gris.
-        octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
+        // Montagne (nº2, matériau nº26) : relief autotile sur le masque de RENDU lissé.
+        // Sous la falaise (coins transparents) : GRAVIER (nº26) — plus un brin d'herbe.
+        octx.drawImage(GRAVEL_SPRITE.img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
         const ortho = (x > 0 && mountainMask[y][x - 1] ? 1 : 0) + (x < W - 1 && mountainMask[y][x + 1] ? 1 : 0)
                     + (y > 0 && mountainMask[y - 1][x] ? 1 : 0) + (y < H - 1 && mountainMask[y + 1][x] ? 1 : 0);
         const mesa = mesaMask && mesaMask[y][x];
         if (ortho <= 1) {
-          // Piton rocheux au pied du massif (Rocks.png gris, cols 0-2 row 0)
+          // Piton rocheux au pied du massif (Rocks.png gris, cols 0-2 row 0) — sur gravier.
           octx.drawImage(BIOME_SPRITES[4].overlay.img, ((x * 7 + y * 13) % 3) * T, 0, T, T, x * T, y * T, T, T);
         } else {
           // Face sud ouverte (voisin S non-montagne ou bord bas) = FRONT de falaise : sorti
@@ -1171,14 +1186,26 @@ function buildBiomeCache() {
             const [c1, r1] = cliffTileNbr(inMt, x, y, 0, 0);
             if (sOpen) {
               // Front baké sans 2e étage (un front est en bordure → profondeur 1).
-              WALLS.push({ x, y, c: c1, r: r1, base: y * T - 1 });
+              // Grotte (nº26) : semée sur les faces sud pleines des parois profondes (tuile (4,1)).
+              const [gh] = hash2(x, y, 8);
+              const cave = c1 === 1 && _maskDepth(x, y - 1, W, H) >= 2 && gh < 0.3;
+              WALLS.push({ x, y, c: cave ? 4 : c1, r: cave ? 1 : r1, base: y * T - 1 });
             } else {
               octx.drawImage(CLIFF_SPRITE.img, c1 * T, r1 * T, T, T, x * T, y * T, T, T);
               if (_maskDepth(x, y, W, H) >= 2) {
                 const inHi = (xx, yy) => _maskDepth(xx, yy, W, H) >= 2;
                 const [c2, r2] = cliffTileNbr(inHi, x, y, 0, 3);
-                octx.drawImage(CLIFF_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
+                octx.drawImage(CLIFF_HIGH_SPRITE.img, c2 * T, r2 * T, T, T, x * T, y * T, T, T);
               }
+              // Plateau rocheux (nº26) : rochers gris épars ; cœur (profondeur 3) →
+              // rochers ENNEIGÉS (Rocks row 3) = sommet qui lit « altitude ».
+              const dep = _maskDepth(x, y, W, H);
+              const [rh1, rh2] = hash2(x, y, 5);
+              const RK = BIOME_SPRITES[4].overlay.img;
+              if (dep >= 3 && rh1 < 0.38)
+                octx.drawImage(RK, Math.floor(rh2 * 3) * T, 3 * T, T, T, x * T, y * T, T, T);
+              else if (dep < 3 && rh1 < 0.15)
+                octx.drawImage(RK, Math.floor(rh2 * 3) * T, 0, T, T, x * T, y * T, T, T);
             }
           }
         }
@@ -1231,6 +1258,16 @@ function buildBiomeCache() {
       }
       // Plage (nº6) : frange sableuse sur l'herbe au bord de l'eau (eau immuable → sûr).
       if (b === 1 && _paintBeach(octx, x, y, W, H, biomes)) continue;
+      // Frange d'éboulis au pied du massif (nº26) — HERBE SEULEMENT (la plage garde priorité,
+      // forêt/désert/terre battue non touchés). d=1 : bande de gravier + petits rochers semés.
+      const md = (b === 1 && mountainMask) ? _mtDist(x, y, W, H) : 3;
+      if (md === 1) {
+        octx.drawImage(GRAVEL_SPRITE.img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
+        const [, eh2] = hash2(x, y, 7);
+        if (eh2 < 0.18)
+          octx.drawImage(BIOME_SPRITES[4].overlay.img, (Math.floor(eh2 * 16) % 3) * T, 0, T, T, x * T, y * T, T, T);
+        continue;
+      }
       const sp = BIOME_SPRITES[b] || BIOME_SPRITES[1];
       let tc, tr;
       if (b === 1) {
@@ -1244,6 +1281,14 @@ function buildBiomeCache() {
         tr = (sp.row0 || 0) + Math.floor(v / sp.cols);
       }
       octx.drawImage(sp.img, tc * T, tr * T, T, T, x * T, y * T, T, T);
+      // Éboulis épars SUR l'herbe à distance 2 (nº26, pas de damier gravier/herbe) — et NI
+      // touffe NI fleur au contact de la roche (continue → boucle d'overlays sautée).
+      if (md === 2) {
+        const [eh, eh2] = hash2(x, y, 7);
+        if (eh < 0.22)
+          octx.drawImage(BIOME_SPRITES[4].overlay.img, Math.floor(eh2 * 3) * T, 0, T, T, x * T, y * T, T, T);
+        continue;
+      }
       // Overlays (arbres, fleurs, cailloux…) — tableau ou objet unique
       const ovList = sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : [];
       ovList.forEach((ov, i) => {
@@ -1606,6 +1651,25 @@ function redrawBiomeTile(octx, x, y, biome) {
   // avec le build ; l'eau est immuable donc l'adjacence est stable malgré le surpâturage).
   if (biome === 1 && worldData && worldData.biomes &&
       _paintBeach(octx, x, y, worldData.width, worldData.height, worldData.biomes)) return;
+  // Frange d'éboulis (nº26, miroir du build) : herbe qui reprend à ≤2 tuiles du massif immuable
+  // → gravier (d=1) / rochers épars (d=2), zéro overlay. (La terre battue à d≤2 reste telle quelle.)
+  if (biome === 1 && mountainMask) {
+    const md = _mtDist(x, y, worldData.width, worldData.height);
+    if (md === 1) {
+      octx.drawImage(GRAVEL_SPRITE.img, ((x * 7 + y * 13) % 3) * T, T, T, T, x * T, y * T, T, T);
+      const [, eh2] = hash2(x, y, 7);
+      if (eh2 < 0.18)
+        octx.drawImage(BIOME_SPRITES[4].overlay.img, (Math.floor(eh2 * 16) % 3) * T, 0, T, T, x * T, y * T, T, T);
+      return;
+    }
+    if (md === 2) {
+      octx.drawImage(BIOME_SPRITES[1].img, ((x * 7 + y * 13) % 3) * T, plaineRow(x, y) * T, T, T, x * T, y * T, T, T);
+      const [eh, eh2] = hash2(x, y, 7);
+      if (eh < 0.22)
+        octx.drawImage(BIOME_SPRITES[4].overlay.img, Math.floor(eh2 * 3) * T, 0, T, T, x * T, y * T, T, T);
+      return;
+    }
+  }
   const sp = BIOME_SPRITES[biome] || BIOME_SPRITES[1];
   const v  = (x * 7 + y * 13) % (sp.cols * sp.rows);
   // Plaine (nº5) : mêmes prairies nuancées qu'au build (cohérence reprise DIRT→GRASS).
