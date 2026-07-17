@@ -1392,6 +1392,7 @@ function drawShadows(ctx) {
   ctx.fillStyle = SHADOW_COLOR;
   entities.forEach(e => {                                               // créatures (direct)
     if (!SPECIES[e.t]) return;
+    if (e.t === "fish" || e.t === "shark") return;   // pas d'ombre portée sur les aquatiques (Alexis)
     ctx.beginPath();
     ctx.ellipse((ipx(e) + 0.5) * T, (ipy(e) + 0.9) * T, T * 0.32, T * 0.14, 0, 0, Math.PI * 2);
     ctx.fill();
