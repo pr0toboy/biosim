@@ -437,7 +437,12 @@ const ENTITY_SPRITES = {
 
 // Fermiers COLORÉS PAR CLAN (refonte nº22 « différences ») : le pack MiniWorldSprites fournit
 // FarmerCyan/Lime/Purple/Red (mêmes dims 80×192 = 5×12 que FarmerTemplate → drop-in, même
-// ENTITY_ANIM). Mapping par clan_id : 1→Cyan(bleu), 2→Lime(vert), 3→Purple(violet), 4→Red.
+// ENTITY_ANIM).
+// ⚠️ clan_id est 0-BASED côté moteur (enumerate sur clan_positions) et CLAN_COLORS =
+// [rouge, bleu, vert, violet]. L'indexation `((clan_id-1)%4+4)%4` sur ce tableau ordonné
+// [Cyan,Lime,Purple,Red] mappe 0→Red(rouge), 1→Cyan(bleu), 2→Lime(vert), 3→Purple(violet) =
+// EXACTEMENT les couleurs moteur (vérifié in-game). NE PAS « corriger » le -1 en croyant à du
+// 1-based : ça ne tombe juste que grâce à l'ordre du tableau (Red en fin). Même mapping pour les huttes.
 const CLAN_FARMER_SPRITES = [
   { img: new Image(), src: "/static/MiniWorldSprites/Characters/Workers/CyanWorker/FarmerCyan.png",     size: 16 },
   { img: new Image(), src: "/static/MiniWorldSprites/Characters/Workers/LimeWorker/FarmerLime.png",     size: 16 },
@@ -2512,10 +2517,12 @@ function drawBuildings(c, T) {
       return;
     }
     if (b.btype === "house") {
-      // Hutte colorée du clan (nº22) → village distinct ; L1 = variantes 0-3, L2 = variante 4.
+      // Hutte colorée du clan (nº22) → village distinct. Le strip 5×1 : col 0 = panneau/étal
+      // VIDE (pas une maison, Regigigas) → L1 = cols 1-3 (3 variantes), L2 = col 4 (hutte à
+      // fenêtre éclairée, lisible comme upgrade). clan_id = index CLAN_HUT_SPRITES (cf. mapping).
       const hut = b.clan_id != null ? CLAN_HUT_SPRITES[((b.clan_id - 1) % 4 + 4) % 4] : null;
       if (hut && hut.img.complete && hut.img.naturalWidth > 0) {
-        const hc = b.level >= 2 ? 4 : (b.x * 7 + b.y * 13) % 4;
+        const hc = b.level >= 2 ? 4 : 1 + (b.x * 7 + b.y * 13) % 3;
         c.drawImage(hut.img, hc * S, 0, S, S, b.x * T, b.y * T, T, T);
       } else {
         if (!HOUSE_SPRITE.img.complete || !HOUSE_SPRITE.img.naturalWidth) return;
