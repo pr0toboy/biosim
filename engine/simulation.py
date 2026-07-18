@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, asdict
 from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
-                       get_id_counter, set_id_counter)
+                       get_id_counter, set_id_counter, _JOBS_ON)
 from .world import (Biome, TREE_STUMP_THRESHOLD, STONE_STUMP_THRESHOLD,
                     IRON_STUMP_THRESHOLD, GOLD_STUMP_THRESHOLD, FERTILITY_TRAMPLE,
                     TIME_SCALE)   # échelle de temps biologique (contrat dans world.py)
@@ -237,6 +237,70 @@ PEACE_MIN_TICKS = 480 * TIME_SCALE   # cooldown de paix avant de pouvoir redécl
 # Défection (S2a) : en guerre, une victime dont le clan perd NETTEMENT (pop < ce ratio × pop de
 # l'attaquant) ABANDONNE et rejoint le vainqueur au lieu de mourir → conquête par absorption.
 DEFECT_RATIO    = 0.5
+
+# ── Métiers (P1, chantier A du plan civilisation) ────────────────────────────────────
+# Champ Entity.role assigné par clan selon la pop, 100 % déterministe (seuils + tri id, zéro
+# RNG), ré-évalué périodiquement (déphasé). Un rôle = biais de la cascade _beh_work (guards) +
+# petit bonus. La survie n'est JAMAIS modifiée. versatile = cascade actuelle intacte (fallback).
+# _JOBS_ON importé d'entities.py (kill-switch JOBS_OFF → tout versatile, clé job absente du wire).
+JOB_PERIOD         = 120 * TIME_SCALE   # ré-évaluation, déphasée par clan (tick + clan_id*41)
+JOB_BONUS_COOLDOWN = 0.85               # cooldown de travail du spécialiste (×, arrondi int min 1)
+_JOB_ROLES = ("farmer", "woodcutter", "miner", "builder", "warrior", "merchant", "priest", "scout")
+# Sections de _beh_work réservées par métier (P1) : versatile partout ; un rôle absent de la
+# valeur saute la section. Sections non listées (dépôts, crafts, office, repro) = tous autorisés.
+_ROLE_SECTIONS = {
+    "farm":  ("farmer", "versatile"),
+    "chop":  ("woodcutter", "versatile"),
+    "mine":  ("miner", "versatile"),
+    "build": ("builder", "versatile"),
+    "scout": ("scout", "versatile"),
+}
+def _role_ok(role, section):
+    if not _JOBS_ON:
+        return True                      # kill-switch : aucune restriction de métier
+    allowed = _ROLE_SECTIONS.get(section)
+    return allowed is None or role in allowed
+
+def _job_quotas(pop, clan, at_war, has_market, has_church, has_site):
+    """Quotas de rôles pour un clan de `pop` humains (hors chef), selon la table de la spec P1.
+    Pourcentages = floor(pop*p/100). Modificateurs appliqués DANS L'ORDRE (déterministe)."""
+    q = {r: 0 for r in _JOB_ROLES}
+    stone = clan.age >= 1
+    if pop <= 5:
+        pass                                   # tous versatile
+    elif pop <= 9:
+        q["farmer"] = 2; q["woodcutter"] = 1; q["builder"] = 1
+    elif pop <= 15:
+        q["farmer"] = 3; q["woodcutter"] = 2; q["builder"] = 1
+        if stone: q["miner"] = 1
+        if at_war: q["warrior"] = 1
+        if has_market: q["merchant"] = 1        # 0-1 → 1 si marché
+    elif pop <= 24:
+        q["farmer"] = pop * 30 // 100; q["woodcutter"] = pop * 15 // 100
+        q["miner"] = (pop * 10 // 100) if stone else 0
+        q["builder"] = pop * 10 // 100; q["warrior"] = pop * 10 // 100
+        if has_market: q["merchant"] = 1
+        if has_church: q["priest"] = 1
+    else:                                       # >= 25
+        q["farmer"] = pop * 30 // 100; q["woodcutter"] = pop * 12 // 100
+        q["miner"] = (pop * 10 // 100) if stone else 0
+        q["builder"] = pop * 10 // 100; q["warrior"] = pop * 15 // 100
+        if has_market: q["merchant"] = 2
+        if has_church: q["priest"] = 2
+        q["scout"] = 1
+    # 1. famine → +2 farmer, retirés du quota miner puis woodcutter (plancher 0)
+    if clan.mode == "famine":
+        q["farmer"] += 2
+        rm = 2
+        for src in ("miner", "woodcutter"):
+            take = min(rm, q[src]); q[src] -= take; rm -= take
+    # 2. guerre → warrior ×2
+    if clan.mode == "war":
+        q["warrior"] *= 2
+    # 3. chantier actif → +2 builder
+    if has_site:
+        q["builder"] += 2
+    return q
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4 * TIME_SCALE   # 1 ressource / N ticks → durée
@@ -1400,7 +1464,10 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
     #     faim (acte de guerre, pas repas). Plancher d'espèce (<30, comme la prédation) respecté
     #     → anti-cascade. SOCIETY_OFF : `_at_war`=False + plancher désactivé → comportement pré-bloc.
     ec = clans.get(entity.clan_id) if (clans and entity.clan_id is not None) else None
-    _at_war = _SOCIETY_ON and ec is not None and ec.mode == "war"
+    # Warrior-only (P1) : en guerre, seuls les WARRIORS agressent (gated _JOBS_ON) ; les autres
+    # vaquent. Le raid de survie (faim>65) reste universel. JOBS_OFF → comportement société I1.
+    _at_war = (_SOCIETY_ON and ec is not None and ec.mode == "war"
+               and (not _JOBS_ON or entity.role == "warrior"))
     _hungry = entity.hunger > 65
     # D3 : en guerre pure (pas affamé), si le plancher d'espèce bloque déjà les kills, ne pas
     # scanner ni monopoliser le tick → le membre "en guerre" vaque à ses autres tâches.
@@ -1747,15 +1814,15 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
 
     # 4.1 Travailler sur un chantier en cours du clan (n'importe quel humain peut contribuer)
     # Ne pas interrompre un humain qui se rend déjà sur son propre chantier planifié
-    if (entity.spec.can_build and entity.clan_id is not None and entity.hunger < 80
-            and entity._build_target_type is None):
+    if (_role_ok(entity.role, "build") and entity.spec.can_build and entity.clan_id is not None
+            and entity.hunger < 80 and entity._build_target_type is None):
         clan_sites = [b for btl in [v for k, v in _cb.items() if k.startswith("site_")] for b in btl if b.work_done < b.work_needed]
         if clan_sites:
             near = min(clan_sites,
                        key=lambda b: _dist(entity.x, entity.y, b.x, b.y))
             entity.state = State.BUILDING
             if _dist(entity.x, entity.y, near.x, near.y) < 1.5:
-                near.work_done += 1
+                near.work_done += 2 if (_JOBS_ON and entity.role == "builder") else 1  # bâtisseur ×2 (P1)
                 entity.target_x = None
                 entity.target_y = None
             else:
@@ -2209,7 +2276,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                                      _eff_speed, world)
                         return True
     # 4.3a Récolte : champ mûr (priorité élevée : affamé OU adjacent à un champ mûr)
-    if entity.spec.can_build and entity.clan_id is not None:
+    if _role_ok(entity.role, "farm") and entity.spec.can_build and entity.clan_id is not None:
         clan_fields = _cb.get("wheatfield", [])
         clan_mills  = _cb.get("mill", [])
         ripe_adj = next((b for b in clan_fields
@@ -2229,6 +2296,8 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 mill_dst.wheat += 1
             else:
                 food = WHEAT_HARVEST_FOOD + (SICKLE_HARVEST_BONUS if entity.sickle else 0.0)
+                if _JOBS_ON and entity.role == "farmer":
+                    food += 10.0                       # spécialiste : meilleure part (P1)
                 entity.hunger = max(0.0, entity.hunger - food)
             return True
         # Chercher un champ mûr si affamé
@@ -2356,7 +2425,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     _clan_houses_wood = _cb.get("house", [])
     _total_clan_wood = sum(b.wood for b in _clan_houses_wood)
     _wood_full = bool(_clan_houses_wood) and _total_clan_wood >= CLAN_WOOD_CAP
-    if (entity.spec.can_chop and entity.wood < MAX_CARRY
+    if (_role_ok(entity.role, "chop") and entity.spec.can_chop and entity.wood < MAX_CARRY
             and entity.hunger < 70 and entity.chop_cooldown_left == 0
             and not _wood_full):
         # Coupe si debout sur une tuile d'arbre debout
@@ -2370,8 +2439,10 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             elif entity.tool == "axe":
                 wood += AXE_BONUS
             entity.wood = min(MAX_CARRY, entity.wood + wood)
-            entity.chop_cooldown_left = (IRON_AXE_COOLDOWN if entity.tool == "iron_axe"
-                                         else CHOP_COOLDOWN)
+            cd = (IRON_AXE_COOLDOWN if entity.tool == "iron_axe" else CHOP_COOLDOWN)
+            if _JOBS_ON and entity.role == "woodcutter":   # spécialiste : coupe plus vite (P1)
+                cd = max(1, int(cd * JOB_BONUS_COOLDOWN))
+            entity.chop_cooldown_left = cd
             return True
         # Arbre dans le champ de vision → se déplace vers le plus proche (numpy)
         r = int(entity.traits["vision"])
@@ -2418,7 +2489,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     # IRON_RESTOCK_THRESHOLD — sinon la vanne se rouvrirait à chaque upgrade (−3) et
     # les mineurs pendouleraient fer↔forge en permanence, affamant la chaîne pierre.
     _cobj_fer = clans.get(entity.clan_id) if (clans and entity.clan_id is not None) else None
-    if (entity.spec.can_mine and entity.pick is not None
+    if (_role_ok(entity.role, "mine") and entity.spec.can_mine and entity.pick is not None
             and entity.iron < MAX_IRON_CARRY and entity.hunger < 65
             and _cobj_fer is not None and _cobj_fer.age >= FER_AGE
             and any(f.iron < IRON_RESTOCK_THRESHOLD for f in _cb.get("forge", []))):
@@ -2458,7 +2529,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     # sous l'hystérésis (GOLD_RESTOCK). L'or reçu en offrande ferme la vanne →
     # substitution source↔circulation, anti-pompe par construction. Le fer (4.55)
     # garde la priorité : l'outil avant le trésor. Pas de bonus pioche (1 < carry 2).
-    if (entity.spec.can_mine and entity.pick is not None
+    if (_role_ok(entity.role, "mine") and entity.spec.can_mine and entity.pick is not None
             and entity.gold < MAX_GOLD_CARRY and entity.hunger < 65
             and _cobj_fer is not None and _cobj_fer.age >= GOLD_AGE):
         _chs_gold = _cb.get("church", [])
@@ -2489,7 +2560,7 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _move_toward(entity, entity.target_x, entity.target_y, _eff_speed * 0.8, world)
                 return True
     # 4.6 Mine la pierre (entités avec can_mine + pioche, si portée non pleine et pas trop affamées)
-    if (entity.spec.can_mine
+    if (_role_ok(entity.role, "mine") and entity.spec.can_mine
             and entity.pick is not None
             and entity.stone < MAX_STONE_CARRY
             and entity.hunger < 65):
@@ -2568,8 +2639,10 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 entity.state = State.EXPLORING
                 _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
                 return True
-    # 4.7 Exploration (humain sans tâche urgente : explore loin du clan)
-    if (entity.etype == EntityType.HUMAN
+    # 4.7 Exploration (humain sans tâche urgente : explore loin du clan) — scout/versatile (P1).
+    # _role_ok EN TÊTE (avant random()) : sous JOBS_OFF transparent (random consommé comme avant).
+    if (_role_ok(entity.role, "scout")
+            and entity.etype == EntityType.HUMAN
             and entity.clan_id is not None
             and entity.hunger < 65
             and entity.thirst < 55
@@ -2920,6 +2993,8 @@ class Simulation:
             self._dispatch_pilgrims(clan_bldg, tick_events)
         # Société : le chef réévalue le mode de gouvernement du clan (déterministe, déphasé).
         self._update_society(clan_bldg, tick_events)
+        # Métiers (P1) : assignation des rôles selon la pop (déterministe, déphasé *41).
+        self._update_jobs(clan_bldg, tick_events)
 
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
@@ -3212,6 +3287,55 @@ class Simulation:
         return {"populations": counts, "total": len(self.entities)}
 
     # ── Économie / caravanes (blocs D1+D2) ───────────────────────────────────
+    def _update_jobs(self, clan_bldg: dict, tick_events: list):
+        """Métiers (P1) : assigne le rôle de chaque humain selon la pop du clan, périodiquement
+        (déphasé par clan), 100 % déterministe (tri id + seuils, zéro RNG). Churn minimal : les
+        membres gardant un quota pour leur rôle actuel le conservent (passe 1), les slots restants
+        sont recrutés parmi les non-conservés dans l'ordre des id (passe 2), le reste → versatile.
+        Le chef reste versatile. Event `clan_jobs` au changement. JOBS_OFF → no-op."""
+        if not _JOBS_ON or not self.clans:
+            return
+        for c in self.clans:
+            if (self.tick_count + c.id * 41) % JOB_PERIOD != 0:
+                continue
+            cb = clan_bldg.get(c.id, {})
+            has_site = any(bt.startswith("site_") for bt in cb)
+            q = _job_quotas(len([e for e in self.entities
+                                 if e.alive and e.etype is EntityType.HUMAN
+                                 and e.clan_id == c.id and e.id != c.chief_id]),
+                            c, c.mode == "war", bool(cb.get("market")),
+                            bool(cb.get("church")), has_site)
+            members = sorted((e for e in self.entities
+                              if e.alive and e.etype is EntityType.HUMAN
+                              and e.clan_id == c.id and e.id != c.chief_id),
+                             key=lambda e: e.id)
+            avail = dict(q)
+            assign = {}
+            for e in members:                       # passe 1 : conservation
+                if avail.get(e.role, 0) > 0:
+                    avail[e.role] -= 1; assign[e.id] = e.role
+            for e in members:                       # passe 2 : recrutement (ordre id)
+                if e.id in assign:
+                    continue
+                r = "versatile"
+                for cand in _JOB_ROLES:
+                    if avail.get(cand, 0) > 0:
+                        avail[cand] -= 1; r = cand; break
+                assign[e.id] = r
+            changed = False
+            counts = {}
+            for e in members:
+                nr = assign.get(e.id, "versatile")
+                if e.role != nr:
+                    e.role = nr; changed = True
+                if nr != "versatile":
+                    counts[nr] = counts.get(nr, 0) + 1
+            chief = next((e for e in self.entities if e.id == c.chief_id), None)
+            if chief is not None and chief.role != "versatile":
+                chief.role = "versatile"; changed = True
+            if changed:
+                tick_events.append({"type": "clan_jobs", "clan": c.id, "jobs": counts})
+
     def _update_society(self, clan_bldg: dict, tick_events: list):
         """Société : le chef choisit PAIX/GUERRE/FAMINE selon l'état du clan. Réévalué
         périodiquement, DÉPHASÉ par clan (un scan des entités seulement sur un tick de décision),

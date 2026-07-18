@@ -3,12 +3,16 @@ BioSim — Entités (animaux)
 Chaque entité est un agent autonome avec état interne.
 Extensible : ajouter une espèce = définir son EntitySpec.
 """
+import os
 import random
 import math
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
 from .world import TIME_SCALE   # échelle de temps biologique (contrat documenté dans world.py)
+
+# Métiers (P1) : kill-switch d'imputation. Off → aucun job au wire → hash pré-bloc reproduit.
+_JOBS_ON = os.environ.get("JOBS_OFF") != "1"
 
 
 class EntityType(str, Enum):
@@ -328,7 +332,7 @@ class Entity:
         "repro_cooldown_left", "gestation_left", "alive",
         "target_x", "target_y", "target_id",
         "_move_frac_x", "_move_frac_y",
-        "clan_id", "traits", "wood", "stone", "iron", "meat",
+        "clan_id", "role", "traits", "wood", "stone", "iron", "meat",
         "building_ticks_left", "building_type",
         "tool", "pick", "sickle", "watering_can", "can_filled", "fishing_rod", "thirst",
         "_stuck_ticks", "chop_cooldown_left",
@@ -360,6 +364,7 @@ class Entity:
         self._move_frac_y = 0.0
         self.thirst: float = random.uniform(0, 30)
         self.clan_id: Optional[int] = None
+        self.role: str = "versatile"      # métier (P1) : assigné par le clan selon la pop
         self.wood: int = 0
         self.stone: int = 0
         self.iron: int = 0                # fer porté (bloc B) — déposé à la forge
@@ -426,6 +431,8 @@ class Entity:
         }
         if self.clan_id is not None:
             d["clan"] = self.clan_id
+        if _JOBS_ON and self.clan_id is not None and self.role != "versatile":
+            d["job"] = self.role   # jamais de clé par défaut (discipline golden, comme gold)
         if self.spec.can_chop or self.spec.can_mine or self.spec.can_build:
             d["inv"]       = self.wood
             d["stone"]     = self.stone
@@ -475,7 +482,7 @@ class Entity:
             # traits COPIÉ (gate F1) : self.traits est muté en place par le clamp anti-dérive
             # (simulation.py) ; sans copie, save_state aliase le dict vivant → snapshot déchiré
             # pendant le json.dump hors state_lock (même classe que le chronicle #89/#101 / I5).
-            "clan_id": self.clan_id, "traits": dict(self.traits),
+            "clan_id": self.clan_id, "role": self.role, "traits": dict(self.traits),
             "wood": self.wood, "stone": self.stone, "iron": self.iron,
             "meat": self.meat,
             "building_ticks_left": self.building_ticks_left,
@@ -515,7 +522,8 @@ class Entity:
         e.target_x = d["target_x"]; e.target_y = d["target_y"]
         e.target_id = d["target_id"]
         e._move_frac_x = d["_move_frac_x"]; e._move_frac_y = d["_move_frac_y"]
-        e.clan_id = d["clan_id"]; e.traits = dict(d["traits"])   # copie (gate F1, symétrie)
+        e.clan_id = d["clan_id"]; e.role = d.get("role", "versatile")   # P1 (défaut vieux saves)
+        e.traits = dict(d["traits"])   # copie (gate F1, symétrie)
         e.wood = d["wood"]; e.stone = d["stone"]; e.iron = d.get("iron", 0)
         e.meat = d["meat"]
         e.building_ticks_left = d["building_ticks_left"]

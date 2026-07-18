@@ -2872,6 +2872,8 @@ const SILENT_EVENTS = new Set([
   "build_wheatfield",
   // défection (S2a) : fréquente pendant une guerre → la carte raconte l'absorption (couleurs)
   "clan_defect",
+  // assignation des métiers (P1) : périodique → pas de spam (le tooltip montre les rôles)
+  "clan_jobs",
 ]);
 
 function addEvent(ev) {
@@ -3257,6 +3259,11 @@ function updateBuildingPanel() {
   else hideBuildingPanel();
 }
 
+// Métiers (P1) : libellés pour le tooltip + le panneau clan.
+const JOB_LABELS = {
+  farmer: "🌾 Fermier", woodcutter: "🪵 Bûcheron", miner: "⛏ Mineur", builder: "🔨 Bâtisseur",
+  warrior: "⚔️ Guerrier", merchant: "🐫 Marchand", priest: "⛪ Prêtre", scout: "🧭 Éclaireur",
+};
 // ── Tooltip au survol ─────────────────────────────────────────────────────────
 const tooltip = document.getElementById("tooltip");
 
@@ -3302,6 +3309,7 @@ canvas.addEventListener("mousemove", (ev) => {
     tooltip.innerHTML = `
       <b>${isChiefTT ? "👑 Chef — " : ""}${sp?.label || closest.t} ${closest.sex === "F" ? "♀" : "♂"}</b>
       ${isChiefTT ? `<div class="tt-row"><span>Clan</span><span style="color:${clans.find(c=>c.chief_id===closest.id)?.color}">${clans.find(c=>c.chief_id===closest.id)?.id ?? ""}</span></div>` : ""}
+      ${closest.job ? `<div class="tt-row"><span>Métier</span><span>${JOB_LABELS[closest.job] || closest.job}</span></div>` : ""}
       ${closest.pil ? `<div class="tt-row"><span>🚶 Pèlerin</span><span>${closest.cargo && (closest.cargo[3] ?? 0) > 0 ? "1 or offert " : closest.cargo && closest.cargo[0] > 0 ? closest.cargo[0] + " bois offerts " : ""}→ clan ${(closest.pdest ?? 0) + 1}</span></div>` : closest.cargo ? `<div class="tt-row"><span>🐫 Marchand</span><span>${closest.cargo[0] > 0 ? closest.cargo[0] + " bois" : (closest.cargo[2] ?? 0) > 0 ? closest.cargo[2] + " fer" : closest.cargo[1] + " pierre"}${closest.good ? " (" + (closest.good === "iron" ? "fer" : "pierre") + ")" : ""} → clan ${(closest.dest ?? 0) + 1}</span></div>` : ""}
       ${closest.gold ? `<div class="tt-row"><span>🪙 Or porté</span><span>${closest.gold}</span></div>` : ""}
       <div class="tt-row"><span>État</span><span>${icon} ${closest.s}</span></div>

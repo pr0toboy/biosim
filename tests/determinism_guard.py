@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "5f244402f794b8b34fb3aa586617596f45203ea72f1b352e3af1e44c6266cc2e"  # regold SOCIÉTÉ I1 2026-07-17 (ex-b5e5902d ; gouvernements de clan périodiques + conflit gouverné + scan grille + plancher >30 ; imputation SOCIETY_OFF=1 → b5e5902d exact, pop 810)
+GOLDEN = "5c14d2d046de82490ab9bfc86b2bbe9d53d15b7bd7ad4aba752460070fd0c11c"  # regold P1 MÉTIERS 2026-07-18 (ex-5f244402 ; rôles + warrior-only + guards de section ; imputation JOBS_OFF=1 → 5f244402 exact, SOCIETY_OFF=1 → b5e5902d, pop 821)
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "cc2154fd5ea3ade7d9054bc0d041e782cc7e74f4f909aa4086861ae0ddf83388"  # regold FIX S2a défection 2026-07-18 (ex-8342bd1a ; décrément direct de clan_human_pop → le plancher>3 tient malgré N défections/tick, pop 1134). BASE 5f244402 / PROD 70372807 inchangés
+GOLDEN_CIV = "1b9e2e7f96982b2d76321d6bfa152a5e950d7365491a6284cdf85f0ef2bd7150"  # regold P1 MÉTIERS 2026-07-18 (ex-cc2154fd ; rôles/warrior-only actifs à l'Âge Acier multi-clans, pop 1172)
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "703728073addc8f042f25c35d5096081aab7b4ed08f8bc643ccfb225842c6dd3"  # regold SOCIÉTÉ I1 2026-07-17 (ex-7a42b41e ; gouvernements de clan périodiques, pop 804)
+GOLDEN_PROD = "cb0f4b53e2ea9d01bef6f9a5812762b63222f65fdb5049e93f1cc5cdabdc9103"  # regold P1 MÉTIERS 2026-07-18 (ex-70372807 ; rôles/warrior-only, pop 787)
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):
