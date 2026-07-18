@@ -234,6 +234,9 @@ WAR_MIN_POP     = 4                  # pop humaine mini du clan pour déclarer l
 # aussitôt → cycle guerre→paix→(éventuelle reprise). Sans ça les clans restent en guerre ~95 %.
 WAR_MAX_TICKS   = 240 * TIME_SCALE   # durée max d'une guerre → paix forcée
 PEACE_MIN_TICKS = 480 * TIME_SCALE   # cooldown de paix avant de pouvoir redéclarer la guerre
+# Défection (S2a) : en guerre, une victime dont le clan perd NETTEMENT (pop < ce ratio × pop de
+# l'attaquant) ABANDONNE et rejoint le vainqueur au lieu de mourir → conquête par absorption.
+DEFECT_RATIO    = 0.5
 TRADE_TIMEOUT        = 1200  # ticks max d'une mission → abort propre (trajets ≤ ~230)
 MARKET_MAX_STOCK     = 40    # cap de stock d'étal (borne mémoire/économie)
 MARKET_DRAIN_PERIOD  = 4 * TIME_SCALE   # 1 ressource / N ticks → durée
@@ -1428,18 +1431,33 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                 if d < entity.traits["vision"]:
                     entity.state = State.HUNTING
                     _move_toward(entity, e.x, e.y, _eff_speed * 1.1, world)
-                    _floor_ok = (not _SOCIETY_ON) or (species_counts or {}).get(e.etype.value, 0) > 30
-                    if d < 0.8 and _floor_ok:
-                        e.alive = False
-                        e.state = State.DEAD
-                        if species_counts is not None:
-                            species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
-                        if _hungry:
-                            entity.hunger = max(0, entity.hunger - 25)   # repas de survie
-                        events.append({"type": "clan_fight",
-                                       "attacker_clan": entity.clan_id,
-                                       "victim_clan":   e.clan_id,
-                                       "x": entity.ix, "y": entity.iy})
+                    if d < 0.8:
+                        # Défection (S2a) : en guerre, si le clan de la victime perd nettement
+                        # (pop < DEFECT_RATIO × pop attaquant, attaquant ≥3), elle ABANDONNE et
+                        # rejoint le vainqueur au lieu de mourir → SAIGNE le perdant pendant la
+                        # guerre. Plancher perdant >3 (reco Regigigas) : à ≤3 c'est l'absorption-
+                        # coup-de-grâce de fin de guerre (P3, distincte) — sans ce plancher la
+                        # défection viderait le clan avant que l'absorption existe.
+                        _apop = ctx.clan_human_pop.get(entity.clan_id, 0)
+                        _vpop = ctx.clan_human_pop.get(e.clan_id, 0)
+                        if (_SOCIETY_ON and _at_war and not _hungry and _apop >= 3
+                                and _vpop > 3 and _vpop < _apop * DEFECT_RATIO):
+                            _old = e.clan_id
+                            e.clan_id = entity.clan_id
+                            e.state = State.RESTING
+                            events.append({"type": "clan_defect", "from_clan": _old,
+                                           "to_clan": entity.clan_id, "x": e.ix, "y": e.iy})
+                        elif (not _SOCIETY_ON) or (species_counts or {}).get(e.etype.value, 0) > 30:
+                            e.alive = False
+                            e.state = State.DEAD
+                            if species_counts is not None:
+                                species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
+                            if _hungry:
+                                entity.hunger = max(0, entity.hunger - 25)   # repas de survie
+                            events.append({"type": "clan_fight",
+                                           "attacker_clan": entity.clan_id,
+                                           "victim_clan":   e.clan_id,
+                                           "x": entity.ix, "y": entity.iy})
                     return True
     # 3.0 Mange le pain au moulin (humains affamés, moulin adjacent avec du pain)
     if entity.spec.can_build and entity.clan_id is not None and entity.hunger > 35:
