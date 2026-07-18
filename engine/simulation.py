@@ -2311,6 +2311,9 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                              _eff_speed, world)
                 return True
     # 4.3b/c Entretien des champs : arrosage + plantation (quand reposé et non trop affamé)
+    # DÉCISION P1 (écart spec assumé) : l'entretien reste UNIVERSEL (pas guardé farmer) — seule la
+    # RÉCOLTE (4.3a) est réservée. Arroser/planter occupe les non-spécialistes sans casser la chaîne
+    # alimentaire ; guarder aussi l'entretien affamerait un clan à peu de fermiers.
     if (entity.spec.can_build and entity.clan_id is not None
             and entity.hunger < WHEAT_WORK_THRESH):
         clan_fields = _cb.get("wheatfield", [])
@@ -2560,6 +2563,8 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 _move_toward(entity, entity.target_x, entity.target_y, _eff_speed * 0.8, world)
                 return True
     # 4.6 Mine la pierre (entités avec can_mine + pioche, si portée non pleine et pas trop affamées)
+    # ÉCART spec P1 (assumé) : le minage n'a PAS de cooldown → le bonus « mineur cooldown ×0.85 »
+    # de la spec est inapplicable ici ; seul le guard miner s'applique. Bonus mineur autrement en S2c.
     if (_role_ok(entity.role, "mine") and entity.spec.can_mine
             and entity.pick is not None
             and entity.stone < MAX_STONE_CARRY
