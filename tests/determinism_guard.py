@@ -50,7 +50,7 @@ CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "8342bd1aeb90d4d3b1da25cdb59faf49c339ee57b933ff99c5f5e9405e35b56e"  # regold SOCIÉTÉ S2a défection 2026-07-18 (ex-aae84996 ; défection s'exerce à l'Âge Acier multi-clans, pop 1154). BASE/PROD inchangés (5f244402/70372807 : défection inerte en Bois court)
+GOLDEN_CIV = "cc2154fd5ea3ade7d9054bc0d041e782cc7e74f4f909aa4086861ae0ddf83388"  # regold FIX S2a défection 2026-07-18 (ex-8342bd1a ; décrément direct de clan_human_pop → le plancher>3 tient malgré N défections/tick, pop 1134). BASE 5f244402 / PROD 70372807 inchangés
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort

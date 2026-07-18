@@ -1445,6 +1445,11 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                             _old = e.clan_id
                             e.clan_id = entity.clan_id
                             e.state = State.RESTING
+                            # FIX (Regigigas) : décrémenter le snapshot EN DIRECT — sinon plusieurs
+                            # défections du même tick lisent la même pop et franchissent le plancher
+                            # >3 (même correctif que species_counts au kill : N acteurs, 1 tick).
+                            ctx.clan_human_pop[_old] = _vpop - 1
+                            ctx.clan_human_pop[entity.clan_id] = _apop + 1
                             events.append({"type": "clan_defect", "from_clan": _old,
                                            "to_clan": entity.clan_id, "x": e.ix, "y": e.iy})
                         elif (not _SOCIETY_ON) or (species_counts or {}).get(e.etype.value, 0) > 30:
