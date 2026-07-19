@@ -237,6 +237,14 @@ PEACE_MIN_TICKS = 480 * TIME_SCALE   # cooldown de paix avant de pouvoir redécl
 # Défection (S2a) : en guerre, une victime dont le clan perd NETTEMENT (pop < ce ratio × pop de
 # l'attaquant) ABANDONNE et rejoint le vainqueur au lieu de mourir → conquête par absorption.
 DEFECT_RATIO    = 0.5
+# Plancher anti-anéantissement (S2c équilibrage) : une war-kill (acte de guerre) ne réduit JAMAIS
+# un clan sous ce seuil → un clan battu survit en « rump » au lieu de disparaître. Sans ça, la
+# marche de guerre (assaut fiable) broie le war_target jusqu'à l'extinction → le monde converge
+# vers 1 clan à long horizon (attracteur « dernier debout » que Société II combat ; mesuré : 4/6
+# seeds → 1 clan à 18000t sans ce plancher). Symétrique du plancher de défection (>3). La force
+# régénératrice complète = P4 rébellions (plus tard) ; P3 raffinera l'absorption du rump. Le raid
+# de SURVIE (faim) et le pré-société gardent le seul plancher d'espèce (un affamé mange l'ennemi).
+WAR_MIN_CLAN_POP = 3
 
 # ── Métiers (P1, chantier A du plan civilisation) ────────────────────────────────────
 # Champ Entity.role assigné par clan selon la pop, 100 % déterministe (seuils + tri id, zéro
@@ -255,6 +263,17 @@ _ROLE_SECTIONS = {
     "build": ("builder", "versatile"),
     "scout": ("scout", "versatile"),
 }
+# ── Comportements guerriers (S2c) ────────────────────────────────────────────────────
+# Sans ça, la guerre ne se déclenche qu'au CONTACT FORTUIT : un warrior sans ennemi dans son
+# voisinage vaque et la guerre reste lettre morte. S2c donne deux comportements au warrior :
+#   • MARCHE DE GUERRE (_beh_survival) : en guerre, pas d'ennemi engagé et pas affamé → converge
+#     vers le feu du clan ciblé (`war_target`) et attaque à vue en route (via le scan de conflit).
+#   • GARDE EN PAIX (_beh_wander) : en paix, errance ancrée au rayon WARBAND_GUARD_R du feu du clan.
+# Gated _WARBEH_ON (+ _JOBS_ON + _SOCIETY_ON aux points d'usage) : kill-switch d'imputation
+# WARBEH_OFF=1 → aucune marche ni garde → hash P1 (5c14d2d0…) restauré ; JOBS_OFF/SOCIETY_OFF
+# inchangés (pas de warriors / pas de mode war → jamais déclenché).
+_WARBEH_ON     = os.environ.get("WARBEH_OFF") != "1"
+WARBAND_GUARD_R = 10                     # rayon d'errance d'un warrior en paix (garnison au feu)
 def _role_ok(role, section):
     if not _JOBS_ON:
         return True                      # kill-switch : aucune restriction de métier
@@ -1519,18 +1538,45 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                             ctx.clan_human_pop[entity.clan_id] = _apop + 1
                             events.append({"type": "clan_defect", "from_clan": _old,
                                            "to_clan": entity.clan_id, "x": e.ix, "y": e.iy})
-                        elif (not _SOCIETY_ON) or (species_counts or {}).get(e.etype.value, 0) > 30:
-                            e.alive = False
-                            e.state = State.DEAD
-                            if species_counts is not None:
-                                species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
-                            if _hungry:
-                                entity.hunger = max(0, entity.hunger - 25)   # repas de survie
-                            events.append({"type": "clan_fight",
-                                           "attacker_clan": entity.clan_id,
-                                           "victim_clan":   e.clan_id,
-                                           "x": entity.ix, "y": entity.iy})
+                        else:
+                            # Plancher anti-anéantissement (S2c) : une war-kill (acte de guerre)
+                            # ne peut pas exterminer le dernier carré du clan-cible → un rump
+                            # ≥ WAR_MIN_CLAN_POP survit, le monde reste multi-clan à long horizon.
+                            # Gated _WARBEH_ON : sous WARBEH_OFF, war-kill non planchée = P1 exact.
+                            _warkill = (_WARBEH_ON and _JOBS_ON and _SOCIETY_ON
+                                        and _at_war and not _hungry)
+                            if ((not _warkill or _vpop > WAR_MIN_CLAN_POP)
+                                    and ((not _SOCIETY_ON)
+                                         or (species_counts or {}).get(e.etype.value, 0) > 30)):
+                                e.alive = False
+                                e.state = State.DEAD
+                                if species_counts is not None:
+                                    species_counts[e.etype.value] = species_counts.get(e.etype.value, 0) - 1
+                                if _warkill:
+                                    # décrément direct du snapshot (comme la défection) : sinon
+                                    # N war-kills du même tick lisent la même pop et franchissent
+                                    # le plancher (bug snapshot identifié par Regigigas sur S2a).
+                                    ctx.clan_human_pop[e.clan_id] = _vpop - 1
+                                if _hungry:
+                                    entity.hunger = max(0, entity.hunger - 25)   # repas de survie
+                                events.append({"type": "clan_fight",
+                                               "attacker_clan": entity.clan_id,
+                                               "victim_clan":   e.clan_id,
+                                               "x": entity.ix, "y": entity.iy})
                     return True
+        # S2c — Marche de guerre : le scan ci-dessus n'a engagé personne (aucun ennemi du
+        # clan-cible en vision). Un warrior en guerre pas affamé CONVERGE vers le feu du clan
+        # ciblé au lieu de vaquer → il finit par croiser l'ennemi (attaque à vue au prochain
+        # tick via le même scan). Sans ça la guerre n'éclate qu'au contact fortuit. Gated
+        # _WARBEH_ON + _JOBS_ON : JOBS_OFF (pas de warriors) et SOCIETY_OFF (pas de mode war,
+        # _at_war=False) → jamais déclenché → hash de ces switches inchangé.
+        if (_WARBEH_ON and _JOBS_ON and _at_war and not _hungry
+                and ec is not None and ec.war_target >= 0):
+            _wtgt = clans.get(ec.war_target)
+            if _wtgt is not None:
+                entity.state = State.HUNTING
+                _move_toward(entity, _wtgt.cx, _wtgt.cy, _eff_speed * 1.1, world)
+                return True
     # 3.0 Mange le pain au moulin (humains affamés, moulin adjacent avec du pain)
     if entity.spec.can_build and entity.clan_id is not None and entity.hunger > 35:
         clan_mills = _cb.get("mill", [])
@@ -2708,6 +2754,14 @@ def _beh_wander(entity, ctx):
         if clan:
             # Affamé/assoiffé → reste proche; reposé → explore loin
             wander_r = 18 if (entity.hunger > 55 or entity.thirst > 55) else 50
+            # S2c — Garde en paix : un warrior de clan EN PAIX reste en garnison près du feu
+            # (rayon WARBAND_GUARD_R) au lieu d'errer loin → visible comme garde, groupé et prêt
+            # à partir en guerre. En guerre, la marche de _beh_survival a déjà pris le relais (on
+            # n'arrive ici que si aucun ennemi n'est engagé, mais on garde tout de même l'ancre
+            # de paix distincte). Gated _WARBEH_ON/_JOBS_ON/_SOCIETY_ON → transparent aux switches.
+            if (_WARBEH_ON and _JOBS_ON and _SOCIETY_ON
+                    and entity.role == "warrior" and clan.mode == "peace"):
+                wander_r = min(wander_r, WARBAND_GUARD_R)
             for _ in range(8):
                 tx = clan.cx + random.uniform(-wander_r, wander_r)
                 ty = clan.cy + random.uniform(-wander_r, wander_r)
