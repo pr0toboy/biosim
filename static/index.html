@@ -3334,9 +3334,28 @@ canvas.addEventListener("mousemove", (ev) => {
       const cColor = cn ? cn.color : "#8892b0";
       let html = "";
       if (closestB.btype === "campfire") {
+        // Panneau clan (S2c) : gouvernement + répartition des métiers de la cité.
+        // Agrégation à la volée sur les entités du clan (P1 expose e.job si spécialiste).
+        const rc = {}; let vers = 0, tot = 0;
+        entities.forEach(e => {
+          if (e.t === "human" && e.clan === closestB.clan_id) {
+            tot++;
+            if (e.job) rc[e.job] = (rc[e.job] || 0) + 1; else vers++;
+          }
+        });
+        const modeIco = cn ? ({ war: "⚔️ Guerre", famine: "🍖 Famine", peace: "🕊️ Paix" }[cn.mode] || "🕊️ Paix") : "🕊️ Paix";
+        const warTgt = (cn && cn.mode === "war" && (cn.war_target ?? -1) >= 0) ? ` → clan ${cn.war_target + 1}` : "";
+        const jobsHtml = Object.keys(JOB_LABELS)
+          .filter(r => rc[r])
+          .map(r => `<div class="tt-row"><span>${JOB_LABELS[r]}</span><span>${rc[r]}</span></div>`)
+          .join("");
         html = `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
           <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>
-          <div class="tt-row"><span>🎓 Âge</span><span>${cn ? (cn.age_name ?? "Bois") : "Bois"}</span></div>`;
+          <div class="tt-row"><span>🎓 Âge</span><span>${cn ? (cn.age_name ?? "Bois") : "Bois"}</span></div>
+          <div class="tt-row"><span>Gouvernement</span><span>${modeIco}${warTgt}</span></div>
+          <div class="tt-row"><span>👥 Population</span><span>${tot}</span></div>
+          ${jobsHtml}
+          ${vers ? `<div class="tt-row"><span>· Polyvalents</span><span>${vers}</span></div>` : ""}`;
       } else if (closestB.btype === "house") {
         html = `<b style="color:${cColor}">🏠 Maison — ${cLabel}</b>
           <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>
