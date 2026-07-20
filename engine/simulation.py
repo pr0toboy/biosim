@@ -282,6 +282,57 @@ WARBAND_GUARD_R = 10                     # rayon d'errance d'un warrior en paix 
 # pointe un mort ou un membre ennemi) → gouvernance/UI incohérentes, et rien sur quoi bâtir la
 # politique P2. Kill-switch d'imputation POLITICS_OFF=1 → pas de succession → hash S2c restauré.
 _POLITICS_ON   = os.environ.get("POLITICS_OFF") != "1"
+
+# ── Politique P2 : personnalité du chef + relations inter-clans (chantier B) ───────────
+# Substrat géopolitique : deux clans qui se sont fait la guerre restent RIVAUX (et se re-ciblent),
+# deux clans qui commercent/voisinent deviennent ALLIÉS (et ne s'attaquent plus) ; le caractère du
+# chef (dérivé de son id, ères politiques via la succession P2.1) penche la balance. Seul branchement
+# moteur = le choix de cible de guerre. Kill-switch RELATIONS_OFF=1 → aucun delta/décay/influence/
+# wire → hash c08b6a14 (P2.1) EXACT. Gated _POLITICS_ON AUSSI (POLITICS_OFF → a85d306b inchangé).
+_RELATIONS_ON  = os.environ.get("RELATIONS_OFF") != "1"
+# P2 est le SOMMET de la pile d'imputation → gated par TOUS les étages inférieurs, sinon les
+# deltas événementiels (raids de survie sous SOCIETY_OFF, fights I1 sous JOBS_OFF) feraient
+# dériver les baselines 4ccfdd60/5f244402 que la spec exige inchangés. RELATIONS_OFF isole P2.
+_POL_ON        = _SOCIETY_ON and _JOBS_ON and _POLITICS_ON and _RELATIONS_ON
+REL_MIN, REL_MAX = -100, 100
+REL_ALLY, REL_RIVAL = 40, -40         # seuils allié/rival (PLAN §10)
+REL_ALLY_OFF, REL_RIVAL_OFF = 35, -35 # hystérésis : on CESSE d'être allié <35 / rival >-35
+REL_NEIGHBOR_DIST = 40                 # voisinage pacifique : +1/éval si feux plus proches que ça
+_KNUTH = 2654435761                    # mixage entier de Knuth (personnalité dérivée de chief_id)
+WAR_TEMPER_STEP = 48 * TIME_SCALE      # temper ±2 → cooldown de paix ∓96×TS (~±20 % fréq. guerre)
+# Deltas événementiels (aux points d'émission existants, O(1) chacun) :
+REL_D_WAR, REL_D_FIGHT, REL_D_DEFECT, REL_D_TRADE = -60, -2, -5, 2
+
+def _chief_personality(chief_id):
+    """(temper, diplo) dérivés de chief_id — zéro état, zéro RNG, stable inter-process/save.
+    temper ∈ −2..+2 (belliqueux+/pacifique−) ; diplo ∈ −1..+1 (rancunier−/conciliant+)."""
+    h = (chief_id * _KNUTH) % (2**32)
+    return (h % 5) - 2, ((h >> 8) % 3) - 1
+
+def _rel_key(a, b):
+    return (a, b) if a < b else (b, a)
+
+def _rel_apply(relations, ally_state, rival_state, a, b, delta, events):
+    """Applique `delta` à la relation (a,b), clampé [REL_MIN,REL_MAX], symétrique (clé triée).
+    Gère les franchissements d'hystérésis : émet clan_allies/clan_rivals à l'ENTRÉE dans l'état
+    (≥REL_ALLY / ≤REL_RIVAL), sortie silencieuse (<REL_ALLY_OFF / >REL_RIVAL_OFF). Une relation
+    retombée à 0 est retirée (= neutre, save minimal). Appelant responsable du gate _POL_ON."""
+    if a == b or a is None or b is None:
+        return
+    k = _rel_key(a, b)
+    new = max(REL_MIN, min(REL_MAX, relations.get(k, 0) + delta))
+    if new == 0:
+        relations.pop(k, None)
+    else:
+        relations[k] = new
+    if k not in ally_state and new >= REL_ALLY:
+        ally_state.add(k); events.append({"type": "clan_allies", "a": k[0], "b": k[1]})
+    elif k in ally_state and new < REL_ALLY_OFF:
+        ally_state.discard(k)
+    if k not in rival_state and new <= REL_RIVAL:
+        rival_state.add(k); events.append({"type": "clan_rivals", "a": k[0], "b": k[1]})
+    elif k in rival_state and new > REL_RIVAL_OFF:
+        rival_state.discard(k)
 def _role_ok(role, section):
     if not _JOBS_ON:
         return True                      # kill-switch : aucune restriction de métier
@@ -2819,6 +2870,12 @@ class Simulation:
         self._chronicle_seen: set = set()    # jalons "première fois" déjà actés
         self._prev_species: set = set()      # espèces vivantes au tick précédent
         self.clans: list[Clan] = []
+        # Relations inter-clans (P2b) : clé = paire d'ids TRIÉE (a<b), valeur ∈ [-100,+100],
+        # symétrique ; absence = neutre. _ally_state/_rival_state = états booléens dérivés
+        # (hystérésis), recalculés au load — pas sérialisés (dérivés de la valeur).
+        self.relations: dict = {}
+        self._ally_state: set = set()
+        self._rival_state: set = set()
         self.buildings: list[Building] = []
         self._next_building_id = 0
         self.raining: bool = False
@@ -2897,6 +2954,7 @@ class Simulation:
                     break
 
         self.clans = []
+        self.relations = {}; self._ally_state = set(); self._rival_state = set()  # P2 : monde neuf = sans histoire
         for cid, (cx, cy) in enumerate(clan_positions):
             # ── Chef : mâle, placé sur le campfire ──────────────────────────
             chief = spawn(EntityType.HUMAN,
@@ -3302,6 +3360,7 @@ class Simulation:
 
         # Log événements
         # Chroniques (bloc K) : distille les jalons du tick dans les annales
+        self._update_relations(tick_events)   # P2b : deltas de relation issus des events du tick
         self._update_chronicle(tick_events)
 
         self.events_log.extend(tick_events)
@@ -3340,7 +3399,7 @@ class Simulation:
             "entities":     [e.to_dict() for e in self.entities],
             "events":       tick_events,
             "stats":        stats,
-            "clans":        [c.to_dict() for c in self.clans],
+            "clans":        self._clans_wire(),
             "tree_changes":  tree_changes,
             "rock_changes":  rock_changes,
             "biome_changes": biome_changes,
@@ -3446,13 +3505,47 @@ class Simulation:
                     c.chief_id = cand[c.id][1]
                     tick_events.append({"type": "clan_new_chief",
                                         "clan_id": c.id, "chief_id": c.chief_id})
+        # P2b — décay + friction + voisinage (piggyback du scan `due`). Chaque paire au plus
+        # UNE fois par appel (dédup `_seen`). Gated _POL_ON : sous RELATIONS_OFF/POLITICS_OFF,
+        # zéro écriture → relations vides → décisions inchangées → hash empilé exact.
+        if _POL_ON:
+            rel, ally, rival = self.relations, self._ally_state, self._rival_state
+            diplo_of = {c.id: _chief_personality(c.chief_id)[1] for c in self.clans}
+            _seen = set()
+            for c in due:
+                for o in self.clans:
+                    if o.id == c.id:
+                        continue
+                    k = _rel_key(c.id, o.id)
+                    if k in _seen:
+                        continue
+                    _seen.add(k)
+                    v = rel.get(k, 0)
+                    if v > 0:                                   # fade vers 0 (les liens s'estompent)
+                        _rel_apply(rel, ally, rival, c.id, o.id, -1, tick_events)
+                    elif v < 0 and (diplo_of[c.id] >= 0 or diplo_of[o.id] >= 0):
+                        _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # réconciliation (2 rancuniers = jamais)
+                    _at_war = ((c.mode == "war" and c.war_target == o.id) or
+                               (o.mode == "war" and o.war_target == c.id))
+                    if (not _at_war and k not in rival
+                            and _dist(c.cx, c.cy, o.cx, o.cy) < REL_NEIGHBOR_DIST):
+                        _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # voisinage calme
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
             bread = sum(getattr(b, "bread", 0) for b in clan_bldg.get(c.id, {}).get("mill", []))
             rivals = [o for o in self.clans if o.id != c.id and pop.get(o.id, 0) >= 1]
-            pick = lambda: max(rivals, key=lambda o: (pop.get(o.id, 0), -o.id)).id  # rival + peuplé, tie-break id
+            # Cible de guerre : SANS P2, rival le + peuplé (tie-break id). AVEC P2 (P2b) : jamais
+            # un ALLIÉ, puis la relation la plus BASSE (le + rival, tie-break id min).
+            if not _POL_ON:
+                war_tgt = max(rivals, key=lambda o: (pop.get(o.id, 0), -o.id)).id if rivals else -1
+            else:
+                _cands = [o for o in rivals if _rel_key(c.id, o.id) not in self._ally_state]
+                war_tgt = (min(_cands, key=lambda o: (self.relations.get(_rel_key(c.id, o.id), 0), o.id)).id
+                           if _cands else -1)
+            temper = _chief_personality(c.chief_id)[0] if _POL_ON else 0   # P2a : belliqueux → guerre + tôt
             old = c.mode
+            old_wt = c.war_target
             if avg_h >= FAMINE_HUNGER or (bread == 0 and avg_h >= 40):
                 new_mode, target = "famine", -1                # survie : prime sur tout
             elif c.mode == "war":
@@ -3461,16 +3554,20 @@ class Simulation:
                 if c.mode_ticks >= WAR_MAX_TICKS or not rivals:
                     new_mode, target = "peace", -1
                 elif c.war_target < 0 or pop.get(c.war_target, 0) == 0:
-                    new_mode, target = "war", pick()
+                    new_mode, target = ("war", war_tgt) if war_tgt >= 0 else ("peace", -1)
                 else:
                     new_mode, target = "war", c.war_target
-            elif c.mode_ticks < PEACE_MIN_TICKS:
-                new_mode, target = "peace", -1                 # cooldown : pas de nouvelle guerre
+            elif c.mode_ticks < PEACE_MIN_TICKS - temper * WAR_TEMPER_STEP:
+                new_mode, target = "peace", -1                 # cooldown (décalé par le temper du chef)
             elif p >= WAR_MIN_POP and rivals:
-                new_mode, target = "war", pick()               # nouvelle guerre après le cooldown
+                new_mode, target = ("war", war_tgt) if war_tgt >= 0 else ("peace", -1)  # que si une cible non-alliée existe
             else:
                 new_mode, target = "peace", -1
             c.war_target = target
+            # P2b : déclaration/retarget vers un NOUVEL ennemi → -60 sur la paire (ils deviennent rivaux).
+            if _POL_ON and new_mode == "war" and target >= 0 and target != old_wt:
+                _rel_apply(self.relations, self._ally_state, self._rival_state,
+                           c.id, target, REL_D_WAR, tick_events)
             if new_mode != old:
                 c.mode = new_mode
                 c.mode_ticks = 0
@@ -3689,6 +3786,45 @@ class Simulation:
                        "church": "son premier sanctuaire"}
     CHRONICLE_MAX = 600   # cap mémoire : le monde tourne à l'infini, pas ses annales
 
+    def _update_relations(self, tick_events: list[dict]):
+        """P2b — applique les deltas de relation issus des ÉVÉNEMENTS de CE tick (scan unique,
+        style _update_chronicle). La déclaration de guerre (-60), le décay et le voisinage sont
+        gérés dans _update_society. Émet clan_allies/clan_rivals (dans tick_events, avant les
+        chroniques). RELATIONS_OFF / POLITICS_OFF → no-op (hash inchangé)."""
+        if not _POL_ON or not self.clans:
+            return
+        rel, ally, rival = self.relations, self._ally_state, self._rival_state
+        for ev in list(tick_events):          # snapshot : _rel_apply append dans tick_events
+            t = ev.get("type")
+            if t == "clan_fight":
+                _rel_apply(rel, ally, rival, ev["attacker_clan"], ev["victim_clan"], REL_D_FIGHT, tick_events)
+            elif t == "clan_defect":
+                _rel_apply(rel, ally, rival, ev["from_clan"], ev["to_clan"], REL_D_DEFECT, tick_events)
+            elif t == "trade_exchange":
+                _rel_apply(rel, ally, rival, ev["clan_id"], ev["dest_clan_id"], REL_D_TRADE, tick_events)
+
+    def _clans_wire(self):
+        """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
+        n'apparaît que si non vide → RELATIONS_OFF/étages-off = payload pré-P2 exact).
+        chief_trait dérivé du chief_id (temper) ; allies/rivals dérivés des états d'hystérésis."""
+        out = []
+        for c in self.clans:
+            d = c.to_dict()
+            if _POL_ON:
+                temper, _ = _chief_personality(c.chief_id)
+                if temper != 0:
+                    d["chief_trait"] = "warlike" if temper > 0 else "dovish"
+                allies = sorted(p[0] if p[1] == c.id else p[1]
+                                for p in self._ally_state if c.id in p)
+                rivals = sorted(p[0] if p[1] == c.id else p[1]
+                                for p in self._rival_state if c.id in p)
+                if allies:
+                    d["allies"] = allies
+                if rivals:
+                    d["rivals"] = rivals
+            out.append(d)
+        return out
+
     def _update_chronicle(self, tick_events: list[dict]):
         """Distille les tick_events du tick en JALONS d'annales (première maison/
         forge d'un clan, âges franchis, clans éteints, espèces disparues…).
@@ -3706,6 +3842,12 @@ class Simulation:
                 add({"t": t, "kind": "extinct", "msg":
                      f"Le clan {ev['clan_id'] + 1} s'éteint"
                      + (f" — {r} ruine{'s' if r > 1 else ''} demeure{'nt' if r > 1 else ''}" if r else "")})
+            elif et == "clan_allies":   # P2b : franchissement du seuil d'alliance (hystérésis anti-spam)
+                add({"t": t, "kind": "ally", "msg":
+                     f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} scellent une alliance"})
+            elif et == "clan_rivals":
+                add({"t": t, "kind": "rival", "msg":
+                     f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} deviennent rivaux"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)
@@ -3830,7 +3972,7 @@ class Simulation:
             "stats":     self._compute_stats(),
             "history":   self.stats_history[-100:],
             "events":    self.events_log[-50:],
-            "clans":     [c.to_dict() for c in self.clans],
+            "clans":     self._clans_wire(),
             "buildings": [b.to_dict() for b in self.buildings],
         }
 
@@ -3861,6 +4003,9 @@ class Simulation:
             # dump JSON (snapshot déchiré, viole le replay byte-à-byte).
             "chronicle": [dict(c) for c in self.chronicle],
             "chronicle_seen": [list(k) for k in self._chronicle_seen],
+            # Relations inter-clans (P2b) : liste [a,b,v] triée → save déterministe. Les états
+            # allié/rival dérivés ne sont PAS sauvés (recalculés au load depuis la valeur).
+            "relations": [[a, b, v] for (a, b), v in sorted(self.relations.items())],
         }
 
     def load_state(self, d: dict):
@@ -3899,6 +4044,10 @@ class Simulation:
             chronicle       = [dict(c) for c in d.get("chronicle", [])]   # copie (symétrie I5)
             chronicle_seen  = {tuple(k) for k in d.get("chronicle_seen", [])}
             prev_species    = {e.etype.value for e in entities if e.alive}
+            # Relations P2b : absent d'un vieux save → dict vide (tout neutre, pas de migration).
+            relations       = {(int(a), int(b)): int(v) for a, b, v in d.get("relations", [])}
+            ally_state      = {k for k, v in relations.items() if v >= REL_ALLY}   # dérivés recalculés
+            rival_state     = {k for k, v in relations.items() if v <= REL_RIVAL}
             # États RNG : construire PUIS les valider par un DRY-RUN sur des générateurs
             # JETABLES (gate F2). setstate/set_state rejettent une longueur/version invalide que
             # la simple construction du tuple ne détecte pas ; sans ce dry-run, l'échec surviendrait
@@ -3932,6 +4081,9 @@ class Simulation:
         self.chronicle = chronicle
         self._chronicle_seen = chronicle_seen
         self._prev_species = prev_species
+        self.relations = relations
+        self._ally_state = ally_state
+        self._rival_state = rival_state
         # World.from_state a re-seedé random/np dans __init__ → on restaure les RNG
         # en DERNIER, sinon la reprise repartirait sur le flux de la génération initiale.
         random.setstate(py_rng_state)

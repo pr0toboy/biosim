@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "5c14d2d046de82490ab9bfc86b2bbe9d53d15b7bd7ad4aba752460070fd0c11c"  # P1 MÉTIERS 2026-07-18 (ex-5f244402 ; rôles + warrior-only + guards de section). INCHANGÉ par S2c (comportements guerriers) : à l'Âge Bois 500t les clans sont trop petits (quota warrior pop*10//100 = 0) → marche/garde jamais déclenchées. Imputation actuelle : JOBS_OFF=1 → 5f244402 exact ; WARBEH_OFF=1 → ce même hash (S2c off) ; SOCIETY_OFF=1 → 4ccfdd60 (société off mais métiers P1 encore actifs ; l'ancienne note b5e5902d datait d'avant P1, stale). pop 821.
+GOLDEN = "9bfcf6cf086da32d762a505b36704eee826c482e6aa29b31489300def382bad4"  # regold P2 POLITIQUE 2026-07-20 (ex-5c14d2d0 ; relations inter-clans : une guerre déclarée en 500t re-cible via la relation (min) au lieu de la pop max + -60 → rival + wire rivals/chief_trait). pop 821 INCHANGÉE (P2 change les LABELS géopolitiques, pas l'écologie au BASE). Imputation : RELATIONS_OFF=1 → 5c14d2d0 (P2 off, = P2.1) ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60 ; POLITICS_OFF → 5c14d2d0.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "c08b6a14a732c83af97b0f527464c6bf8e35d09f0566e052008dcf68e9399007"  # regold P2.1 SUCCESSION DU CHEF 2026-07-20 (ex-a85d306b ; à la mort/défection du chef, le clan promeut son doyen). Imputation POLITICS_OFF=1 → a85d306b exact (golden S2c). pop 1155. — Historique S2c (2026-07-19) : a85d306b = comportements guerriers + plancher WAR_MIN_CLAN_POP=3 (WARBEH_OFF → 1b9e2e7f P1) ; étape sans plancher db65dd4b écartée (collapse 4/6 → 1 clan @18000t).
+GOLDEN_CIV = "c294ac4b31aa8065e44aa71d381de286b8957ecb9fc3363b74a3bdfaf471ee6e"  # regold P2 POLITIQUE 2026-07-20 (ex-c08b6a14 ; personnalité du chef + relations inter-clans : guerres re-ciblées par rancune, alliés jamais ciblés, wire chief_trait/allies/rivals). Imputation RELATIONS_OFF=1 → c08b6a14 exact (P2.1) ; POLITICS_OFF → a85d306b (S2c) ; JOBS_OFF/SOCIETY_OFF/WARBEH inchangés. pop 1155 → 1196. — Historique : c08b6a14 = P2.1 succession ; a85d306b = S2c warriors+plancher.
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "cb0f4b53e2ea9d01bef6f9a5812762b63222f65fdb5049e93f1cc5cdabdc9103"  # P1 MÉTIERS 2026-07-18 (ex-70372807 ; rôles/warrior-only). INCHANGÉ par S2c : 500t au gabarit 220x160 n'atteignent pas le régime warrior/guerre (comme BASE). pop 787.
+GOLDEN_PROD = "e51f0ad07e712b92e935fbfd1f2ed779e345e64667d3215a86d8c693ea8624c6"  # regold P2 POLITIQUE 2026-07-20 (ex-cb0f4b53 ; comme BASE, une guerre déclarée en 500t re-cible par relation + wire). Imputation RELATIONS_OFF=1 → cb0f4b53 exact. pop 787 inchangée (labels géopolitiques). — INCHANGÉ par S2c/P2.1 avant P2.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):
