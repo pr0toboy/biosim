@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "9bfcf6cf086da32d762a505b36704eee826c482e6aa29b31489300def382bad4"  # regold P2 POLITIQUE 2026-07-20 (ex-5c14d2d0 ; relations inter-clans : une guerre déclarée en 500t re-cible via la relation (min) au lieu de la pop max + -60 → rival + wire rivals/chief_trait). pop 821 INCHANGÉE (P2 change les LABELS géopolitiques, pas l'écologie au BASE). Imputation : RELATIONS_OFF=1 → 5c14d2d0 (P2 off, = P2.1) ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60 ; POLITICS_OFF → 5c14d2d0.
+GOLDEN = "73fd2b2567242daa8dffa63c24f6185eaceb47ffdd5d7177db65b25ad3dd4c90"  # regold P2 CALIBRATION ALLIANCES 2026-07-20 (ex-9bfcf6cf ; REL_NEIGHBOR_DIST 40→80, voisinage/décay EXCLUSIFS, bonus voisinage +2 REL_D_NEIGHBOR — reco Regigigas pour que les alliances se forment). pop 821 inchangée. Imputation : RELATIONS_OFF=1 → 5c14d2d0 (= P2.1) ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60 ; POLITICS_OFF → 5c14d2d0. — Historique P2 : 9bfcf6cf = relations pré-calibration.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "c294ac4b31aa8065e44aa71d381de286b8957ecb9fc3363b74a3bdfaf471ee6e"  # regold P2 POLITIQUE 2026-07-20 (ex-c08b6a14 ; personnalité du chef + relations inter-clans : guerres re-ciblées par rancune, alliés jamais ciblés, wire chief_trait/allies/rivals). Imputation RELATIONS_OFF=1 → c08b6a14 exact (P2.1) ; POLITICS_OFF → a85d306b (S2c) ; JOBS_OFF/SOCIETY_OFF/WARBEH inchangés. pop 1155 → 1196. — Historique : c08b6a14 = P2.1 succession ; a85d306b = S2c warriors+plancher.
+GOLDEN_CIV = "acb48bcb343d910a320f64fc79e9d000fbc71ca4d6f5c8ff1ea9ecf25b3287fb"  # regold P2 CALIBRATION ALLIANCES 2026-07-20 (ex-c294ac4b ; REL_NEIGHBOR_DIST 80, voisinage/décay exclusifs, bonus +2 → alliances atteignables). Imputation RELATIONS_OFF=1 → c08b6a14 (P2.1) ; POLITICS_OFF → a85d306b (S2c). pop 1201. — Historique : c294ac4b = P2 pré-calibration ; c08b6a14 = P2.1 ; a85d306b = S2c.
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort

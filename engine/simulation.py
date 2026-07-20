@@ -297,11 +297,15 @@ _POL_ON        = _SOCIETY_ON and _JOBS_ON and _POLITICS_ON and _RELATIONS_ON
 REL_MIN, REL_MAX = -100, 100
 REL_ALLY, REL_RIVAL = 40, -40         # seuils allié/rival (PLAN §10)
 REL_ALLY_OFF, REL_RIVAL_OFF = 35, -35 # hystérésis : on CESSE d'être allié <35 / rival >-35
-REL_NEIGHBOR_DIST = 40                 # voisinage pacifique : +1/éval si feux plus proches que ça
+REL_NEIGHBOR_DIST = 80                 # voisinage pacifique : bonus/éval si feux plus proches que ça
+                                       # (80 : sur 220×160 les feux sont espacés 32-125 tuiles ; à 40
+                                       #  quasi aucune paire ne qualifiait → alliances inatteignables)
 _KNUTH = 2654435761                    # mixage entier de Knuth (personnalité dérivée de chief_id)
 WAR_TEMPER_STEP = 48 * TIME_SCALE      # temper ±2 → cooldown de paix ∓96×TS (~±20 % fréq. guerre)
 # Deltas événementiels (aux points d'émission existants, O(1) chacun) :
 REL_D_WAR, REL_D_FIGHT, REL_D_DEFECT, REL_D_TRADE = -60, -2, -5, 2
+REL_D_NEIGHBOR = 2                     # bonus voisinage (EXCLUSIF du décay) : +1 mettrait 14400t à
+                                       # atteindre +40 (une paire évaluée 2×/MODE_PERIOD) ; +2 → ~7200t
 
 def _chief_personality(chief_id):
     """(temper, diplo) dérivés de chief_id — zéro état, zéro RNG, stable inter-process/save.
@@ -3521,15 +3525,20 @@ class Simulation:
                         continue
                     _seen.add(k)
                     v = rel.get(k, 0)
-                    if v > 0:                                   # fade vers 0 (les liens s'estompent)
-                        _rel_apply(rel, ally, rival, c.id, o.id, -1, tick_events)
-                    elif v < 0 and (diplo_of[c.id] >= 0 or diplo_of[o.id] >= 0):
-                        _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # réconciliation (2 rancuniers = jamais)
                     _at_war = ((c.mode == "war" and c.war_target == o.id) or
                                (o.mode == "war" and o.war_target == c.id))
-                    if (not _at_war and k not in rival
-                            and _dist(c.cx, c.cy, o.cx, o.cy) < REL_NEIGHBOR_DIST):
-                        _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # voisinage calme
+                    _neighbor = (not _at_war and k not in rival
+                                 and _dist(c.cx, c.cy, o.cx, o.cy) < REL_NEIGHBOR_DIST)
+                    # EXCLUSIFS (reco Regigigas) : un contact pacifique entretenu CONSTRUIT (+2) ;
+                    # sinon les liens s'estompent (positif→0) ou les rancunes se réconcilient
+                    # (négatif→0 si au moins un chef conciliant). Cumuler décay+voisinage donnait
+                    # net 0 sur une paire positive → alliance inatteignable (T5 Regigigas).
+                    if _neighbor:
+                        _rel_apply(rel, ally, rival, c.id, o.id, REL_D_NEIGHBOR, tick_events)
+                    elif v > 0:
+                        _rel_apply(rel, ally, rival, c.id, o.id, -1, tick_events)
+                    elif v < 0 and (diplo_of[c.id] >= 0 or diplo_of[o.id] >= 0):
+                        _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # 2 rancuniers = jamais
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
