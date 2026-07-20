@@ -59,6 +59,7 @@ class Clan:
     mode_ticks: int = 0    # ticks écoulés dans le mode courant (hystérésis)
     war_kills_for: int = 0     # P3 : kills infligés à la cible depuis la déclaration (issue de guerre)
     war_kills_against: int = 0 # P3 : pertes subies de la cible depuis la déclaration
+    tension: int = 0           # P4 : pression interne 0-100 (coup d'État ≥70, scission ≥90)
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -318,6 +319,35 @@ REL_D_NEIGHBOR = 2                     # bonus voisinage (EXCLUSIF du décay) : 
 _WAR2_ON       = _POL_ON and os.environ.get("WAR2_OFF") != "1"
 TRIBUTE_PCT    = 20                    # % de chaque ressource stockée prélevé au perdant (div. entière)
 REL_D_MARRIAGE = 10                    # un mariage CIMENTE l'alliance (+10 sur la paire, clampé)
+
+# ── Vie interne : tension, coups d'État, scissions (P4, chantier D + S2b) ──────────────
+# P3 CONSOLIDE (conquêtes en cascade → 1 clan). P4 FRAGMENTE par la pression interne : une TENSION
+# causale 0-100 par clan (famine/guerre/surpopulation/tribut la nourrissent, la paix prospère
+# l'apaise) déclenche à l'éval `due` un COUP D'ÉTAT (le pouvoir change) ou une SCISSION (le clan
+# éclate en un clan neuf). Cerise : les sécessionnistes = les + éloignés du feu = les conquis P3
+# (qui vivent près de leur ancien feu) → re-scission le long des anciennes frontières, gratuit.
+# Kill-switch UNREST_OFF au sommet de la pile → hashes P3 (6159136c…) exacts.
+_UNREST_ON      = _WAR2_ON and os.environ.get("UNREST_OFF") != "1"
+TENSION_SPLIT   = 90    # ≥ → SCISSION (pop ≥ REBEL_MIN_POP, clans < MAX_CLANS)
+TENSION_COUP    = 70    # ≥ (et < SPLIT) → COUP D'ÉTAT (le + jeune adulte renverse le chef)
+REBEL_MIN_POP   = 12    # pop mini d'un clan pour pouvoir se scinder
+MAX_CLANS       = 8     # plafond de clans vivants (pas de scission au-delà — PLAN §10)
+OVERPOP_TENSION_MAX = 20  # tension d'overpop = min(ce cap, pop − cap logement) : un clan gavé
+                          # de conquis (pop ≫ cap) bout vite, un clan juste plein monte à peine
+REL_D_REBELLION = -50  # rancune fondatrice : la née est rivale de la mère d'entrée
+# Tension ÉVÉNEMENTIELLE (spec §1 + fix calibration) : le tribut PAYÉ humilie le perdant ; et un
+# empire qui s'ÉTEND (assimile des défecteurs, absorbe des vaincus) se déstabilise politiquement —
+# c'est la seule force qui monte la tension d'un méga-clan CONFORTABLEMENT logé (il a hérité des
+# maisons des conquis via P3 → jamais en surpop → mesuré : sans ça, seed 7 pique à 35, 0 scission).
+TRIBUTE_TENSION  = 15  # tribut payé → +15 au perdant (spec §1)
+DEFECT_TENSION   = 2   # assimiler un défecteur ennemi → +2 (over-extension continue)
+CONQUEST_TENSION = 8   # absorber un clan vaincu → +8 (acte politique d'annexion)
+# Surextension STRUCTURELLE (spec §1 amendée, reco Regigigas) : pression PERSISTANTE du span-of-
+# control, +max(0,(pop−SPAN)//10)/éval (cap OVEREXTEND_MAX). Les chocs événementiels ci-dessus
+# s'estompent (contentement −2) ; la surextension garantit qu'un MONOCLAN unifié continue à monter
+# en tension jusqu'à la scission → pas d'état stable monoclan à tension nulle (le cycle des empires).
+OVEREXTEND_SPAN = 30   # pop à partir de laquelle le span-of-control devient ingouvernable
+OVEREXTEND_MAX  = 10   # cap du delta structurel par éval
 
 def _chief_personality(chief_id):
     """(temper, diplo) dérivés de chief_id — zéro état, zéro RNG, stable inter-process/save.
@@ -2892,6 +2922,7 @@ class Simulation:
         self.relations: dict = {}
         self._ally_state: set = set()
         self._rival_state: set = set()
+        self._next_clan_id: int = N_CLANS   # P4 : id monotone des clans nés (scission/essaimage)
         self.buildings: list[Building] = []
         self._next_building_id = 0
         self.raining: bool = False
@@ -2971,6 +3002,7 @@ class Simulation:
 
         self.clans = []
         self.relations = {}; self._ally_state = set(); self._rival_state = set()  # P2 : monde neuf = sans histoire
+        self._next_clan_id = N_CLANS   # P4 : les 4 clans initiaux occupent 0..N_CLANS-1
         for cid, (cx, cy) in enumerate(clan_positions):
             # ── Chef : mâle, placé sur le campfire ──────────────────────────
             chief = spawn(EntityType.HUMAN,
@@ -3556,11 +3588,36 @@ class Simulation:
                         _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # 2 rancuniers = jamais
         absorptions = []   # P3 : (vainqueur, perdant) conquêtes à appliquer APRÈS la boucle
         tributes = []      # P3 : (vainqueur, perdant) tributs (idem, buildings mutés hors boucle)
+        rebellions = []    # P4 : ids de clans-mères qui se scindent (fondation différée)
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
             bread = sum(getattr(b, "bread", 0) for b in clan_bldg.get(c.id, {}).get("mill", []))
             rivals = [o for o in self.clans if o.id != c.id and pop.get(o.id, 0) >= 1]
+            # ── P4 : vie interne (tension causale + soupapes), gated _UNREST_ON ─────────
+            # La tension monte avec la misère (famine/guerre/surpop/temper), baisse en paix
+            # prospère. À l'éval due : SCISSION ≥90 (différée), sinon COUP ≥70 (inline, change
+            # le chef → nouvelle ère AVANT la décision de mode ci-dessous). Ordre spec : split>coup.
+            if _UNREST_ON:
+                _houses = clan_bldg.get(c.id, {}).get("house", [])
+                cap = (sum(BUILDING_SPECS["house"].pop_bonus * b.level for b in _houses)
+                       + AGE_POP_BONUS * c.age)
+                dt = 0
+                if c.mode == "famine": dt += 8
+                elif c.mode == "war":  dt += 3
+                if p > cap:            dt += min(OVERPOP_TENSION_MAX, p - cap)  # overpop SCALÉ (boucle P3↔P4)
+                dt += min(OVEREXTEND_MAX, max(0, (p - OVEREXTEND_SPAN) // 10))  # surextension PERSISTANTE (span-of-control)
+                _tp = _chief_personality(c.chief_id)[0]
+                dt += (1 if _tp > 0 else -1 if _tp < 0 else 0)                  # temper du chef
+                if c.mode == "peace" and p <= cap: dt -= 2                      # prospérité calme → apaisement
+                c.tension = max(0, min(100, c.tension + dt))
+                if c.tension >= TENSION_SPLIT and p >= REBEL_MIN_POP and len(self.clans) < MAX_CLANS:
+                    rebellions.append(c.id)          # fondation différée (mute self.clans hors boucle)
+                elif c.tension >= TENSION_COUP and len(self.clans) > 1:
+                    # Un HÉGÉMON (monoclan) ne fait PAS de coup : sans rival politique, sa seule issue
+                    # est la FRAGMENTATION → sa tension grimpe jusqu'à la scission (le cycle des empires).
+                    # En multi-clan, le coup reste la soupape (churn politique) qui préempte la scission.
+                    self._coup(c, tick_events)       # inline : renverse le chef, tension −40
             # Cible de guerre : SANS P2, rival le + peuplé (tie-break id). AVEC P2 (P2b) : jamais
             # un ALLIÉ, puis la relation la plus BASSE (le + rival, tie-break id min).
             if not _POL_ON:
@@ -3643,6 +3700,9 @@ class Simulation:
             for x_id, y_id in tributes:
                 if any(cc.id == x_id for cc in self.clans) and any(cc.id == y_id for cc in self.clans):
                     self._tribute(x_id, y_id, clan_bldg, tick_events)
+        if _UNREST_ON:   # P4 : scissions (fondation d'un clan neuf → mute self.clans)
+            for mid in rebellions:
+                self._rebel_split(mid, tick_events)
 
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
         """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
@@ -3879,8 +3939,17 @@ class Simulation:
                         cv.war_kills_against += 1     # X encaisse de sa cible
             elif t == "clan_defect":
                 _rel_apply(rel, ally, rival, ev["from_clan"], ev["to_clan"], REL_D_DEFECT, tick_events)
+                if _UNREST_ON:   # P4 : assimiler un défecteur ennemi déstabilise l'assimilateur
+                    ct = by_id.get(ev["to_clan"])
+                    if ct is not None: ct.tension = min(100, ct.tension + DEFECT_TENSION)
             elif t == "trade_exchange":
                 _rel_apply(rel, ally, rival, ev["clan_id"], ev["dest_clan_id"], REL_D_TRADE, tick_events)
+            elif t == "clan_tribute" and _UNREST_ON:   # P4 §1 : l'humiliation du tribut payé
+                cf = by_id.get(ev["from_clan"])
+                if cf is not None: cf.tension = min(100, cf.tension + TRIBUTE_TENSION)
+            elif t == "clan_absorbed" and _UNREST_ON:  # P4 fix : l'annexion sur-étend le vainqueur
+                cb = by_id.get(ev["by"])
+                if cb is not None: cb.tension = min(100, cb.tension + CONQUEST_TENSION)
         # P3c mariages — un franchissement d'alliance (event clan_allies) est SCELLÉ par un mariage :
         # le clan le + peuplé de la paire donne son + jeune adulte non-chef à l'autre, +10 sur la paire.
         # Zéro état nouveau (déclenché par l'event P2), spam-proof par l'hystérésis de _rel_apply.
@@ -3988,6 +4057,62 @@ class Simulation:
                                 "wood": moved.get("wood", 0), "stone": moved.get("stone", 0),
                                 "iron": moved.get("iron", 0), "bread": moved.get("bread", 0)})
 
+    def _coup(self, clan, tick_events):
+        """P4 §2.2 — coup d'État : le plus JEUNE adulte non-chef renverse le chef (contraste avec
+        la succession-doyen P2.1 : la légitimité promeut l'ancien, la colère porte un jeune loup).
+        Nouvelle ère politique (personnalité P2a du nouveau chef). tension −40. ≥1 challenger requis."""
+        adult = SPECS[EntityType.HUMAN].max_age * 0.20
+        challengers = [e for e in self.entities
+                       if e.alive and e.etype == EntityType.HUMAN and e.clan_id == clan.id
+                       and e.id != clan.chief_id and e.age > adult]
+        if not challengers:
+            return
+        young = min(challengers, key=lambda e: (e.age, e.id))
+        clan.chief_id = young.id
+        clan.tension = max(0, clan.tension - 40)
+        tick_events.append({"type": "clan_coup", "clan_id": clan.id, "chief_id": young.id})
+
+    def _found_clan(self, leader, members, cx, cy):
+        """P4 §3 — fonde un clan neuf à (cx,cy) : `leader` = chef, `members` (entités) le rejoignent.
+        Compteur d'id MONOTONE, couleur id%4, campfire posé. AUCUN RNG (position fournie) → le flux
+        `random` global reste byte-identique. Retourne le Clan neuf (âge Bois, tension 0)."""
+        nid = self._next_clan_id
+        self._next_clan_id += 1
+        nc = Clan(id=nid, cx=float(cx), cy=float(cy),
+                  color=CLAN_COLORS[nid % len(CLAN_COLORS)], chief_id=leader.id)
+        self.clans.append(nc)
+        for e in members:
+            e.clan_id = nid                       # gardent leur rôle jusqu'au prochain _update_jobs
+        self.buildings.append(Building(id=self._next_building_id, clan_id=nid,
+                                       x=int(cx), y=int(cy), btype="campfire"))
+        self._next_building_id += 1
+        return nc
+
+    def _rebel_split(self, mother_id, tick_events):
+        """P4 §2.1 — scission : les K=pop//3 membres les PLUS ÉLOIGNÉS du feu de la mère font
+        sécession → clan neuf mené par le plus éloigné. Rancune fondatrice (rel mère/née = −50,
+        rival). Re-vérifie les conditions (l'état a pu changer depuis la décision différée)."""
+        mother = next((c for c in self.clans if c.id == mother_id), None)
+        if mother is None or len(self.clans) >= MAX_CLANS:
+            return
+        members = [e for e in self.entities if e.alive and e.etype == EntityType.HUMAN
+                   and e.clan_id == mother_id]
+        if len(members) < REBEL_MIN_POP:
+            return
+        K = len(members) // 3
+        if K < 1:
+            return
+        # tri stable : les plus éloignés du feu d'abord (−dist², tie-break id) → rebelles = tête
+        members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
+        rebels = members[:K]
+        leader = rebels[0]
+        nc = self._found_clan(leader, rebels, leader.x, leader.y)
+        mother.tension = max(0, mother.tension - 60)   # la mère respire par le départ
+        _rel_apply(self.relations, self._ally_state, self._rival_state,
+                   mother_id, nc.id, REL_D_REBELLION, tick_events)   # née rivale d'entrée
+        tick_events.append({"type": "clan_rebellion", "clan_id": mother_id,
+                            "new_clan": nc.id, "members": K, "chief_id": leader.id})
+
     def _clans_wire(self):
         """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
         n'apparaît que si non vide → RELATIONS_OFF/étages-off = payload pré-P2 exact).
@@ -4007,6 +4132,8 @@ class Simulation:
                     d["allies"] = allies
                 if rivals:
                     d["rivals"] = rivals
+            if _UNREST_ON:   # P4 : jauge de tension (discipline golden : clé présente seulement sous ON)
+                d["tension"] = c.tension
             out.append(d)
         return out
 
@@ -4045,6 +4172,12 @@ class Simulation:
             elif et == "clan_war_aid":    # P3b
                 add({"t": t, "kind": "war", "msg":
                      f"Le clan {ev['clan_id'] + 1} entre en guerre aux côtés de son allié le clan {ev['ally'] + 1}"})
+            elif et == "clan_rebellion":  # P4 scission
+                add({"t": t, "kind": "rebellion", "msg":
+                     f"Le clan {ev['clan_id'] + 1} éclate : {ev['members']} rebelles fondent le clan {ev['new_clan'] + 1}"})
+            elif et == "clan_coup":       # P4 coup d'État
+                add({"t": t, "kind": "coup", "msg":
+                     f"Un coup d'État renverse le chef du clan {ev['clan_id'] + 1}"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)
@@ -4203,6 +4336,7 @@ class Simulation:
             # Relations inter-clans (P2b) : liste [a,b,v] triée → save déterministe. Les états
             # allié/rival dérivés ne sont PAS sauvés (recalculés au load depuis la valeur).
             "relations": [[a, b, v] for (a, b), v in sorted(self.relations.items())],
+            "next_clan_id": self._next_clan_id,   # P4 : compteur monotone (asdict n'atteint pas les attrs Simulation)
         }
 
     def load_state(self, d: dict):
@@ -4245,6 +4379,9 @@ class Simulation:
             relations       = {(int(a), int(b)): int(v) for a, b, v in d.get("relations", [])}
             ally_state      = {k for k, v in relations.items() if v >= REL_ALLY}   # dérivés recalculés
             rival_state     = {k for k, v in relations.items() if v <= REL_RIVAL}
+            # P4 : compteur d'id de clans. Vieux save (absent) → max(ids)+1 pour rester monotone.
+            next_clan_id    = d.get("next_clan_id",
+                                    (max((c.id for c in clans), default=N_CLANS - 1) + 1))
             # États RNG : construire PUIS les valider par un DRY-RUN sur des générateurs
             # JETABLES (gate F2). setstate/set_state rejettent une longueur/version invalide que
             # la simple construction du tuple ne détecte pas ; sans ce dry-run, l'échec surviendrait
@@ -4281,6 +4418,7 @@ class Simulation:
         self.relations = relations
         self._ally_state = ally_state
         self._rival_state = rival_state
+        self._next_clan_id = next_clan_id
         # World.from_state a re-seedé random/np dans __init__ → on restaure les RNG
         # en DERNIER, sinon la reprise repartirait sur le flux de la génération initiale.
         random.setstate(py_rng_state)

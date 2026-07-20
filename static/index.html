@@ -3148,6 +3148,13 @@ function addEvent(ev) {
   } else if (ev.type === "clan_war_aid") {     // P3b aide d'allié
     div.textContent = `🤝⚔️ Clan ${ev.clan_id + 1} entre en guerre aux côtés du Clan ${ev.ally + 1}`;
     div.style.color = "#fcd34d";
+  } else if (ev.type === "clan_rebellion") {   // P4 scission
+    div.textContent = `🔥 Clan ${ev.clan_id + 1} éclate — ${ev.members} rebelles fondent le Clan ${ev.new_clan + 1}`;
+    div.style.borderColor = clans.find(c => c.id === ev.new_clan)?.color || "#ef4444";
+    div.style.color = "#fca5a5";
+  } else if (ev.type === "clan_coup") {        // P4 coup d'État
+    div.textContent = `⚡ Coup d'État — nouveau chef au Clan ${ev.clan_id + 1}`;
+    div.style.color = "#fca5a5";
   } else {
     div.textContent = JSON.stringify(ev);
   }
@@ -3370,6 +3377,9 @@ canvas.addEventListener("mousemove", (ev) => {
           .join("");
         // P2 politique : caractère du chef + alliances/rivalités (numéros de clan affichés +1)
         const traitTxt = cn && cn.chief_trait ? (cn.chief_trait === "warlike" ? "⚔️ Belliqueux" : "🕊️ Pacifique") : "";
+        // P4 : jauge de tension interne (😌 calme / 😠 tendu / 🔥 au bord de la scission)
+        const tension = cn && cn.tension != null ? cn.tension : null;
+        const tensIco = tension == null ? "" : tension >= 70 ? "🔥" : tension >= 40 ? "😠" : "😌";
         const allyTxt = cn && cn.allies && cn.allies.length ? cn.allies.map(i => i + 1).join(", ") : "";
         const rivalTxt = cn && cn.rivals && cn.rivals.length ? cn.rivals.map(i => i + 1).join(", ") : "";
         html = `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
@@ -3377,6 +3387,7 @@ canvas.addEventListener("mousemove", (ev) => {
           <div class="tt-row"><span>🎓 Âge</span><span>${cn ? (cn.age_name ?? "Bois") : "Bois"}</span></div>
           <div class="tt-row"><span>Gouvernement</span><span>${modeIco}${warTgt}</span></div>
           ${traitTxt ? `<div class="tt-row"><span>Chef</span><span>${traitTxt}</span></div>` : ""}
+          ${tension != null ? `<div class="tt-row"><span>Tension</span><span>${tensIco} ${tension}/100</span></div>` : ""}
           ${allyTxt ? `<div class="tt-row"><span>🤝 Alliés</span><span>clan ${allyTxt}</span></div>` : ""}
           ${rivalTxt ? `<div class="tt-row"><span>⚔ Rivaux</span><span>clan ${rivalTxt}</span></div>` : ""}
           <div class="tt-row"><span>👥 Population</span><span>${tot}</span></div>

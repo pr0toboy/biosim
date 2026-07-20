@@ -1493,6 +1493,100 @@ def test_p3_purge_e8_and_save_counters():
     print("  test_p3_purge_e8_and_save_counters OK (purge E8 + compteurs/relations round-trip)")
 
 
+def _adult_age(frac=0.5):
+    return SPECS[EntityType.HUMAN].max_age * frac
+
+
+def test_p4_coup():
+    """P4 §2.2 : le + jeune adulte non-chef renverse le chef, tension −40 ; requiert un challenger."""
+    from engine.simulation import Clan
+    w = World(width=60, height=45, seed=7); sim = Simulation(w)
+    lx, ly = _land_tile(w)
+    chief = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); chief.age = _adult_age(0.6)
+    young = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); young.age = _adult_age(0.25)
+    old   = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); old.age = _adult_age(0.8)
+    for e in (chief, young, old): e.clan_id = 0
+    sim.entities = [chief, young, old]
+    c = Clan(id=0, cx=float(lx), cy=float(ly), color="#f00", chief_id=chief.id); c.tension = 75
+    sim.clans = [c]
+    ev = []
+    sim._coup(c, ev)
+    assert c.chief_id == young.id and c.tension == 35, (c.chief_id, c.tension)
+    assert [e for e in ev if e["type"] == "clan_coup"] == [{"type": "clan_coup", "clan_id": 0, "chief_id": young.id}]
+    # sans challenger adulte non-chef → rien
+    c2 = Clan(id=1, cx=float(lx), cy=float(ly), color="#00f", chief_id=chief.id); c2.tension = 80
+    baby = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); baby.age = _adult_age(0.05); baby.clan_id = 1
+    sim.entities = [chief, baby]; chief.clan_id = 1
+    sim.clans = [c2]
+    ev2 = []
+    sim._coup(c2, ev2)
+    assert c2.chief_id == chief.id and c2.tension == 80 and not ev2, "0 adulte non-chef → pas de coup"
+    print("  test_p4_coup OK (jeune loup 75→35 + event ; sans challenger → rien)")
+
+
+def test_p4_rebel_split():
+    """P4 §2.1 : K=pop//3 les + éloignés du feu font sécession, leader=chef, rel −50 rival, tension −60."""
+    from engine.simulation import Clan, N_CLANS, CLAN_COLORS, REL_D_REBELLION
+    w = World(width=120, height=90, seed=7); sim = Simulation(w)
+    cx, cy = 20.0, 20.0
+    ents = []
+    for i in range(8):
+        e = spawn(EntityType.HUMAN, int(cx) + (i % 2), int(cy) + (i // 2), Sex.MALE)
+        e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e)
+    far = []
+    for i in range(4):
+        e = spawn(EntityType.HUMAN, int(cx) + 20 + i * 5, int(cy) + 20, Sex.MALE)
+        e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e); far.append(e)
+    sim.entities = ents
+    mother = Clan(id=0, cx=cx, cy=cy, color="#f00", chief_id=ents[0].id); mother.tension = 95
+    sim.clans = [mother]; sim._next_clan_id = N_CLANS
+    ev = []
+    sim._rebel_split(0, ev)
+    nc = next(c for c in sim.clans if c.id == N_CLANS)
+    seceded = [e for e in ents if e.clan_id == nc.id]
+    assert len(seceded) == 4 and set(seceded) == set(far), "K=4 = les 4 plus éloignés"
+    assert nc.chief_id == far[-1].id and nc.color == CLAN_COLORS[N_CLANS % 4]
+    assert sim.relations.get((0, nc.id)) == REL_D_REBELLION and (0, nc.id) in sim._rival_state
+    assert mother.tension == 35
+    assert any(b.btype == "campfire" and b.clan_id == nc.id for b in sim.buildings)
+    r = [e for e in ev if e["type"] == "clan_rebellion"]
+    assert r == [{"type": "clan_rebellion", "clan_id": 0, "new_clan": nc.id, "members": 4, "chief_id": far[-1].id}]
+    print("  test_p4_rebel_split OK (K=4 éloignés, leader chef, rel −50 rival, tension −60, feu, event)")
+
+
+def test_p4_found_clan_deterministic():
+    """P4 §3 : _found_clan sans RNG (2 fondations → mêmes id/couleur/position/compteur)."""
+    from engine.simulation import Clan, N_CLANS, CLAN_COLORS
+    outs = []
+    for _ in range(2):
+        sim = Simulation(World(width=60, height=45, seed=7))
+        lx, ly = _land_tile(sim.world)
+        leader = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); leader.clan_id = 0
+        m2 = spawn(EntityType.HUMAN, lx, ly, Sex.MALE); m2.clan_id = 0
+        sim.entities = [leader, m2]
+        sim.clans = [Clan(id=0, cx=0.0, cy=0.0, color="#f00", chief_id=leader.id)]
+        sim._next_clan_id = N_CLANS
+        nc = sim._found_clan(leader, [leader, m2], 5, 7)
+        outs.append((nc.id, nc.color, nc.cx, nc.cy, sim._next_clan_id))
+    assert outs[0] == outs[1] == (N_CLANS, CLAN_COLORS[N_CLANS % 4], 5.0, 7.0, N_CLANS + 1), outs
+    print("  test_p4_found_clan_deterministic OK (id/couleur/position stables, compteur ++)")
+
+
+def test_p4_save_load_tension_counter():
+    """P4 §8 : tension + _next_clan_id round-trip ; vieux save → tension 0 + compteur reconstruit."""
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    sim.clans[0].tension = 66; sim._next_clan_id = 11
+    sim2 = Simulation(World(width=60, height=45, seed=7))
+    sim2.load_state(sim.save_state())
+    assert sim2.clans[0].tension == 66 and sim2._next_clan_id == 11
+    st = sim.save_state(); del st["next_clan_id"]
+    for c in st["clans"]: c.pop("tension", None)
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st)
+    assert sim3.clans[0].tension == 0
+    assert sim3._next_clan_id == max(c.id for c in sim3.clans) + 1
+    print("  test_p4_save_load_tension_counter OK (round-trip + vieux save reconstruit)")
+
+
 if __name__ == "__main__":
     # Tests unitaires rapides (comportement) + le golden BASE : toujours joués.
     FAST = (test_deposit_no_crash_when_houses_full,
@@ -1521,6 +1615,10 @@ if __name__ == "__main__":
             test_p3_tribute_and_surplus_lost,
             test_p3_conquest_absorption,
             test_p3_purge_e8_and_save_counters,
+            test_p4_coup,
+            test_p4_rebel_split,
+            test_p4_found_clan_deterministic,
+            test_p4_save_load_tension_counter,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

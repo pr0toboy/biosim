@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "6159136cc76d0079537b6eb86dc408a238888c3d1e5c753637d002d94b6cdf66"  # regold P3 GUERRE 2.0 2026-07-20 (ex-73fd2b25 ; issues de guerre : conquête/tribut/paix blanche + riposte + aide d'allié + mariages). pop 821 inchangée. Imputation : WAR2_OFF=1 → 73fd2b25 (P2) ; RELATIONS_OFF → 5c14d2d0 ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60. — Historique : 73fd2b25 = P2 calibration ; 9bfcf6cf = P2 pré-calibration.
+GOLDEN = "ae52bd38c505c4aa9f720f6c3b6b2283109e9a297500a1f46b84058dc37ea432"  # regold P4 VIE INTERNE 2026-07-20 (ex-6159136c ; tension/coups/scissions + wire tension:0). pop 821 inchangée : à l'Âge Bois 500t la machinerie P4 (tension causale, soupapes) est PRÉSENTE mais jamais déclenchée (clans trop petits, pas de monoclan) → seul le wire tension change le hash. Imputation : UNREST_OFF=1 → 6159136c (P3) ; WAR2_OFF → 73fd2b25 ; RELATIONS_OFF → 5c14d2d0 ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "c7f1a86086b06ef85fcb6123ae08ef72a9d7bb7bc9869797485e89d1161d41e1"  # regold P3 GUERRE 2.0 2026-07-20 (ex-acb48bcb ; conquêtes/tributs + mariages transfèrent des membres → démographie change). Imputation WAR2_OFF=1 → acb48bcb (P2) ; RELATIONS_OFF → c08b6a14 (P2.1) ; POLITICS_OFF → a85d306b (S2c). pop 1201 → 1175. — Historique : acb48bcb = P2 calibration ; c08b6a14 = P2.1 ; a85d306b = S2c.
+GOLDEN_CIV = "bb8f6bcf3e92c8d97e20f3ec40dc0dd13b0f8715047cb5f6c494762bfe6d8fb4"  # regold P4 VIE INTERNE 2026-07-20 (ex-c7f1a860 ; tension causale + soupapes : à l'Âge Acier multi-clans un monoclan se forme → hégémon-sans-coup → scissions, la démographie cycle). Imputation UNREST_OFF=1 → c7f1a860 (P3) ; WAR2_OFF → acb48bcb (P2) ; RELATIONS_OFF → c08b6a14. pop 1175. — Historique : c7f1a860 = P3 ; acb48bcb = P2 ; a85d306b = S2c.
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "5ffb9432c51941559de9c852f9a3de959850c3206430d26120537209477381f4"  # regold P3 GUERRE 2.0 2026-07-20 (ex-e51f0ad0 ; issues de guerre au gabarit prod). pop 787 inchangée. Imputation WAR2_OFF=1 → e51f0ad0 (P2) ; RELATIONS_OFF → cb0f4b53. — Historique : e51f0ad0 = P2 (calibration hash-neutre au PROD) ; cb0f4b53 = P1.
+GOLDEN_PROD = "a714cfaa6a867eb559d1618f0883e8671e0f0c4cb348b6ac5677fa083a4fef7f"  # regold P4 VIE INTERNE 2026-07-20 (ex-5ffb9432 ; tension causale au gabarit prod ; à 500t pas de monoclan → hégémon-sans-coup inerte, seules les sources de tension + wire changent). pop 787 inchangée. Imputation UNREST_OFF=1 → 5ffb9432 (P3) ; WAR2_OFF → e51f0ad0 (P2). — Historique : 5ffb9432 = P3 ; e51f0ad0 = P2.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):
