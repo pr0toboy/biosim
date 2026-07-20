@@ -50,7 +50,7 @@ CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "a85d306bfa4c3e90e7641c9d96dff03da8f8a8e0dd8c26522d0c5a37bf104f77"  # regold S2c COMPORTEMENTS GUERRIERS 2026-07-19 (ex-1b9e2e7f ; marche de guerre + garde en paix + PLANCHER anti-anéantissement WAR_MIN_CLAN_POP=3, actifs à l'Âge Acier multi-clans forte pop). Imputation WARBEH_OFF=1 → 1b9e2e7f exact (retour au golden P1). pop 1172 → 1155. (Étape intermédiaire sans plancher = db65dd4b, écartée : collapse 4/6 seeds → 1 clan à 18000t.)
+GOLDEN_CIV = "c08b6a14a732c83af97b0f527464c6bf8e35d09f0566e052008dcf68e9399007"  # regold P2.1 SUCCESSION DU CHEF 2026-07-20 (ex-a85d306b ; à la mort/défection du chef, le clan promeut son doyen). Imputation POLITICS_OFF=1 → a85d306b exact (golden S2c). pop 1155. — Historique S2c (2026-07-19) : a85d306b = comportements guerriers + plancher WAR_MIN_CLAN_POP=3 (WARBEH_OFF → 1b9e2e7f P1) ; étape sans plancher db65dd4b écartée (collapse 4/6 → 1 clan @18000t).
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort

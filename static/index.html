@@ -2874,6 +2874,8 @@ const SILENT_EVENTS = new Set([
   "clan_defect",
   // assignation des métiers (P1) : périodique → pas de spam (le tooltip montre les rôles)
   "clan_jobs",
+  // succession du chef (P2) : la couronne 👑 se déplace sur la carte → pas de spam feed
+  "clan_new_chief",
 ]);
 
 function addEvent(ev) {

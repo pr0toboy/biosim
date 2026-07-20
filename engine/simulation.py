@@ -274,6 +274,14 @@ _ROLE_SECTIONS = {
 # inchangés (pas de warriors / pas de mode war → jamais déclenché).
 _WARBEH_ON     = os.environ.get("WARBEH_OFF") != "1"
 WARBAND_GUARD_R = 10                     # rayon d'errance d'un warrior en paix (garnison au feu)
+
+# ── Politique (P2) ────────────────────────────────────────────────────────────────────
+# Succession du chef : si `chief_id` pointe une entité morte OU qui a changé de clan (chef
+# défecté via S2a), le clan promeut un nouveau chef = son membre le plus ÂGÉ (loi du plus fort,
+# tie-break id min), 100 % déterministe. Sans ça, un clan reste « sans chef valide » (chief_id
+# pointe un mort ou un membre ennemi) → gouvernance/UI incohérentes, et rien sur quoi bâtir la
+# politique P2. Kill-switch d'imputation POLITICS_OFF=1 → pas de succession → hash S2c restauré.
+_POLITICS_ON   = os.environ.get("POLITICS_OFF") != "1"
 def _role_ok(role, section):
     if not _JOBS_ON:
         return True                      # kill-switch : aucune restriction de métier
@@ -3412,12 +3420,32 @@ class Simulation:
         if not due:
             return
         # Métriques par clan : population humaine, faim moyenne, stock de pain (un seul scan).
+        # P2 succession : dans le MÊME scan, on repère (a) les clans dont le chief_id pointe
+        # encore un membre vivant du clan (`chief_ok`) et (b) le candidat successeur = membre le
+        # plus ÂGÉ, tie-break id min (`cand`). Zéro coût de scan supplémentaire.
         pop: dict = {}
         hsum: dict = {}
+        chief_of = {c.id: c.chief_id for c in self.clans}
+        chief_ok: set = set()
+        cand: dict = {}                          # clan_id -> (age, id) du successeur
         for e in self.entities:
             if e.alive and e.etype == EntityType.HUMAN and e.clan_id is not None:
                 pop[e.clan_id] = pop.get(e.clan_id, 0) + 1
                 hsum[e.clan_id] = hsum.get(e.clan_id, 0.0) + e.hunger
+                if e.id == chief_of.get(e.clan_id):
+                    chief_ok.add(e.clan_id)      # chef en vie ET dans son propre clan
+                cur = cand.get(e.clan_id)
+                if cur is None or (e.age, -e.id) > (cur[0], -cur[1]):
+                    cand[e.clan_id] = (e.age, e.id)
+        # P2 succession : un clan dont le chef n'est plus un membre valide (mort ou défecté) promeut
+        # son doyen. Gated _POLITICS_ON (POLITICS_OFF → aucun changement → hash S2c). Sur toute la
+        # flotte de clans (pas seulement `due`) → un clan orphelin retrouve un chef dès ce scan.
+        if _POLITICS_ON:
+            for c in self.clans:
+                if c.id not in chief_ok and c.id in cand:
+                    c.chief_id = cand[c.id][1]
+                    tick_events.append({"type": "clan_new_chief",
+                                        "clan_id": c.id, "chief_id": c.chief_id})
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
