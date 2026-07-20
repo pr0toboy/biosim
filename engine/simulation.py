@@ -57,6 +57,8 @@ class Clan:
     mode: str = "peace"    # gouvernement (société) : "peace" | "war" | "famine"
     war_target: int = -1   # clan_id ciblé en guerre (-1 = aucun ; int → asdict/JSON stable)
     mode_ticks: int = 0    # ticks écoulés dans le mode courant (hystérésis)
+    war_kills_for: int = 0     # P3 : kills infligés à la cible depuis la déclaration (issue de guerre)
+    war_kills_against: int = 0 # P3 : pertes subies de la cible depuis la déclaration
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -306,6 +308,16 @@ WAR_TEMPER_STEP = 48 * TIME_SCALE      # temper ±2 → cooldown de paix ∓96×
 REL_D_WAR, REL_D_FIGHT, REL_D_DEFECT, REL_D_TRADE = -60, -2, -5, 2
 REL_D_NEIGHBOR = 2                     # bonus voisinage (EXCLUSIF du décay) : +1 mettrait 14400t à
                                        # atteindre +40 (une paire évaluée 2×/MODE_PERIOD) ; +2 → ~7200t
+
+# ── Guerre 2.0 : issues de guerre, tribut, conquête, aide d'allié, mariages (P3, chantier C) ──
+# Une guerre a enfin des CONSÉQUENCES (avant : timeout → paix, rien). Jugée chez son déclarant :
+# conquête-absorption si la cible touche le plancher S2c, sinon tribut 20 % au timeout si le
+# déclarant a plus tué que perdu, sinon paix blanche. + aide d'allié, mariages sur alliance.
+# Consomme l'existant (relations P2, plancher S2c, warrior-only P1, ruines E8). Kill-switch
+# WAR2_OFF au SOMMET de la pile (_WAR2_ON ⊂ _POL_ON) : off → hashes P2 (73fd2b25…) exacts.
+_WAR2_ON       = _POL_ON and os.environ.get("WAR2_OFF") != "1"
+TRIBUTE_PCT    = 20                    # % de chaque ressource stockée prélevé au perdant (div. entière)
+REL_D_MARRIAGE = 10                    # un mariage CIMENTE l'alliance (+10 sur la paire, clampé)
 
 def _chief_personality(chief_id):
     """(temper, diplo) dérivés de chief_id — zéro état, zéro RNG, stable inter-process/save.
@@ -3325,6 +3337,9 @@ class Simulation:
                                     "y": int(c.cy) if c else 0,
                                     "ruins": ruins_per_clan.get(cid, 0)})
             self.clans = [c for c in self.clans if c.id not in dead_clan_ids]
+            if _WAR2_ON:   # P3 fix : purger les clés relations d'un clan éteint (bug depuis P2 :
+                for cid in dead_clan_ids:   # elles restaient gelées à vie dans le save)
+                    self._purge_clan_relations(cid)
             if _SOCIETY_ON:   # société (D1) : la guerre s'arrête quand la cible s'éteint
                 for c in self.clans:
                     if c.war_target in dead_clan_ids:
@@ -3539,6 +3554,8 @@ class Simulation:
                         _rel_apply(rel, ally, rival, c.id, o.id, -1, tick_events)
                     elif v < 0 and (diplo_of[c.id] >= 0 or diplo_of[o.id] >= 0):
                         _rel_apply(rel, ally, rival, c.id, o.id, +1, tick_events)   # 2 rancuniers = jamais
+        absorptions = []   # P3 : (vainqueur, perdant) conquêtes à appliquer APRÈS la boucle
+        tributes = []      # P3 : (vainqueur, perdant) tributs (idem, buildings mutés hors boucle)
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
@@ -3553,23 +3570,53 @@ class Simulation:
                 war_tgt = (min(_cands, key=lambda o: (self.relations.get(_rel_key(c.id, o.id), 0), o.id)).id
                            if _cands else -1)
             temper = _chief_personality(c.chief_id)[0] if _POL_ON else 0   # P2a : belliqueux → guerre + tôt
+            # P3 : riposte (être attaqué annule le cooldown) + aide d'allié (rejoindre la guerre
+            # subie par un allié). Calculés une fois par clan due, gated _WAR2_ON (sinon inertes).
+            _attacked = False
+            aid_tgt = -1; aid_ally = -1
+            if _WAR2_ON and c.mode != "war":
+                for o in self.clans:
+                    if o.mode != "war" or o.war_target < 0 or o.id == c.id:
+                        continue
+                    if o.war_target == c.id:
+                        _attacked = True                       # o m'agresse → riposte
+                    a_id = o.war_target                        # A = clan attaqué par o
+                    if (a_id != c.id and _rel_key(c.id, a_id) in self._ally_state
+                            and _rel_key(c.id, o.id) not in self._ally_state):
+                        # A est mon allié, o (l'agresseur) n'est pas mon allié → candidat à l'aide
+                        _r = self.relations.get(_rel_key(c.id, o.id), 0)
+                        if aid_tgt < 0 or (_r, o.id) < (self.relations.get(_rel_key(c.id, aid_tgt), 0), aid_tgt):
+                            aid_tgt, aid_ally = o.id, a_id
             old = c.mode
             old_wt = c.war_target
+            _is_aid = False
             if avg_h >= FAMINE_HUNGER or (bread == 0 and avg_h >= 40):
                 new_mode, target = "famine", -1                # survie : prime sur tout
             elif c.mode == "war":
-                # Guerre en cours : dure jusqu'à WAR_MAX_TICKS puis retombe en paix ; se recible
-                # si l'ennemi a disparu (D1 : plus de guerre passive sur un clan éteint).
-                if c.mode_ticks >= WAR_MAX_TICKS or not rivals:
+                _wt = c.war_target
+                _wtpop = pop.get(_wt, 0) if _wt >= 0 else 0
+                # P3a — CONQUÊTE : la cible touche le plancher S2c → victoire totale immédiate
+                # (le plancher bloque de toute façon les kills ; avant, la guerre traînait au timeout).
+                if _WAR2_ON and _wt >= 0 and 0 < _wtpop <= WAR_MIN_CLAN_POP:
+                    absorptions.append((c.id, _wt))
+                    new_mode, target = "peace", -1
+                elif c.mode_ticks >= WAR_MAX_TICKS or not rivals:
+                    # TIMEOUT : victoire de X (→ tribut) si + de kills infligés que subis, sinon paix blanche.
+                    if (_WAR2_ON and _wt >= 0 and _wtpop > 0
+                            and c.war_kills_for > c.war_kills_against):
+                        tributes.append((c.id, _wt))
                     new_mode, target = "peace", -1
                 elif c.war_target < 0 or pop.get(c.war_target, 0) == 0:
                     new_mode, target = ("war", war_tgt) if war_tgt >= 0 else ("peace", -1)
                 else:
                     new_mode, target = "war", c.war_target
-            elif c.mode_ticks < PEACE_MIN_TICKS - temper * WAR_TEMPER_STEP:
-                new_mode, target = "peace", -1                 # cooldown (décalé par le temper du chef)
+            elif (c.mode_ticks < PEACE_MIN_TICKS - temper * WAR_TEMPER_STEP
+                  and not _attacked and aid_tgt < 0):
+                new_mode, target = "peace", -1                 # cooldown (sauf riposte/aide P3)
+            elif _WAR2_ON and aid_tgt >= 0 and p >= WAR_MIN_POP:
+                new_mode, target, _is_aid = "war", aid_tgt, True   # P3b — entrée en guerre aux côtés d'un allié
             elif p >= WAR_MIN_POP and rivals:
-                new_mode, target = ("war", war_tgt) if war_tgt >= 0 else ("peace", -1)  # que si une cible non-alliée existe
+                new_mode, target = ("war", war_tgt) if war_tgt >= 0 else ("peace", -1)
             else:
                 new_mode, target = "peace", -1
             c.war_target = target
@@ -3577,10 +3624,25 @@ class Simulation:
             if _POL_ON and new_mode == "war" and target >= 0 and target != old_wt:
                 _rel_apply(self.relations, self._ally_state, self._rival_state,
                            c.id, target, REL_D_WAR, tick_events)
+                if _WAR2_ON:   # P3 : nouvelle déclaration → compteurs d'issue remis à zéro
+                    c.war_kills_for = 0
+                    c.war_kills_against = 0
+                if _is_aid:
+                    tick_events.append({"type": "clan_war_aid", "clan_id": c.id,
+                                        "ally": aid_ally, "target": target})
             if new_mode != old:
                 c.mode = new_mode
                 c.mode_ticks = 0
                 tick_events.append({"type": "clan_mode", "clan_id": c.id, "mode": new_mode})
+        # P3 — application différée (mutations de self.clans / buildings hors de la boucle de décision).
+        # Absorptions d'ABORD (retirent des clans) puis tributs (skip si un clan a disparu entre-temps).
+        if _WAR2_ON:
+            for x_id, y_id in absorptions:
+                if any(cc.id == x_id for cc in self.clans) and any(cc.id == y_id for cc in self.clans):
+                    self._absorb_clan(x_id, y_id, tick_events)
+            for x_id, y_id in tributes:
+                if any(cc.id == x_id for cc in self.clans) and any(cc.id == y_id for cc in self.clans):
+                    self._tribute(x_id, y_id, clan_bldg, tick_events)
 
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
         """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
@@ -3803,14 +3865,128 @@ class Simulation:
         if not _POL_ON or not self.clans:
             return
         rel, ally, rival = self.relations, self._ally_state, self._rival_state
+        by_id = {c.id: c for c in self.clans} if _WAR2_ON else None   # P3 : compteurs de kills
         for ev in list(tick_events):          # snapshot : _rel_apply append dans tick_events
             t = ev.get("type")
             if t == "clan_fight":
-                _rel_apply(rel, ally, rival, ev["attacker_clan"], ev["victim_clan"], REL_D_FIGHT, tick_events)
+                a, v = ev["attacker_clan"], ev["victim_clan"]
+                _rel_apply(rel, ally, rival, a, v, REL_D_FIGHT, tick_events)
+                if _WAR2_ON:   # compteurs portés par le DÉCLARANT (issue de guerre P3a)
+                    ca = by_id.get(a); cv = by_id.get(v)
+                    if ca is not None and ca.war_target == v:
+                        ca.war_kills_for += 1        # X frappe sa cible
+                    if cv is not None and cv.war_target == a:
+                        cv.war_kills_against += 1     # X encaisse de sa cible
             elif t == "clan_defect":
                 _rel_apply(rel, ally, rival, ev["from_clan"], ev["to_clan"], REL_D_DEFECT, tick_events)
             elif t == "trade_exchange":
                 _rel_apply(rel, ally, rival, ev["clan_id"], ev["dest_clan_id"], REL_D_TRADE, tick_events)
+        # P3c mariages — un franchissement d'alliance (event clan_allies) est SCELLÉ par un mariage :
+        # le clan le + peuplé de la paire donne son + jeune adulte non-chef à l'autre, +10 sur la paire.
+        # Zéro état nouveau (déclenché par l'event P2), spam-proof par l'hystérésis de _rel_apply.
+        if _WAR2_ON:
+            weddings = [ev for ev in list(tick_events) if ev.get("type") == "clan_allies"]
+            if weddings:
+                mpop = {}
+                for e in self.entities:
+                    if e.alive and e.etype == EntityType.HUMAN and e.clan_id is not None:
+                        mpop[e.clan_id] = mpop.get(e.clan_id, 0) + 1
+                chiefs = {c.chief_id for c in self.clans}
+                clans_by_id = {c.id: c for c in self.clans}
+                adult = SPECS[EntityType.HUMAN].max_age * 0.20
+                for ev in weddings:
+                    a, b = ev["a"], ev["b"]
+                    if a not in clans_by_id or b not in clans_by_id:
+                        continue
+                    donor, recv = (a, b) if (mpop.get(a, 0), -a) >= (mpop.get(b, 0), -b) else (b, a)
+                    if mpop.get(donor, 0) <= WAR_MIN_POP:
+                        continue                       # donneur trop petit → alliance sans mariage
+                    cand = None
+                    for e in self.entities:            # + jeune adulte non-chef (tie-break id min)
+                        if (e.alive and e.etype == EntityType.HUMAN and e.clan_id == donor
+                                and e.id not in chiefs and e.age > adult):
+                            if cand is None or (e.age, e.id) < (cand.age, cand.id):
+                                cand = e
+                    if cand is None:
+                        continue
+                    cand.clan_id = recv                # le/la marié(e) rejoint son nouveau feu
+                    _rel_apply(rel, ally, rival, a, b, REL_D_MARRIAGE, tick_events)
+                    tick_events.append({"type": "clan_marriage", "from_clan": donor,
+                                        "to_clan": recv, "entity_id": cand.id})
+
+    def _purge_clan_relations(self, cid):
+        """P3 : retire toute trace du clan `cid` des relations + états dérivés (conquête §3 OU
+        extinction naturelle E8 — même bug de clés gelées depuis P2). Gated _WAR2_ON aux appels."""
+        self.relations   = {k: v for k, v in self.relations.items() if cid not in k}
+        self._ally_state  = {k for k in self._ally_state  if cid not in k}
+        self._rival_state = {k for k in self._rival_state if cid not in k}
+
+    def _absorb_clan(self, x_id, y_id, tick_events):
+        """P3a conquête — le clan Y (tombé au plancher) est ABSORBÉ par X (victoire totale).
+        Membres (chef inclus) + bâtiments durables → X (butin intégral, colonie émergente) ;
+        feu de camp & chantiers de Y effacés (rien n'est mort → pas de ruine E8) ; Y retiré ;
+        relations purgées ; guerre passive des tiers sur Y remise à paix (chemin extinction)."""
+        n = 0
+        for e in self.entities:
+            if e.alive and e.etype == EntityType.HUMAN and e.clan_id == y_id:
+                e.clan_id = x_id; n += 1          # le prochain _update_jobs les re-répartit
+        kept = []
+        for b in self.buildings:
+            if b.clan_id != y_id:
+                kept.append(b); continue
+            if b.btype == "campfire" or b.btype.startswith("site_"):
+                continue                          # un clan = un feu ; chantiers inachevés perdus
+            b.clan_id = x_id; kept.append(b)      # maisons/moulins/forges/marchés → X
+        self.buildings = kept
+        self.clans = [c for c in self.clans if c.id != y_id]
+        for c in self.clans:                      # tiers en guerre sur Y → paix (comme extinction D1)
+            if c.war_target == y_id:
+                c.mode = "peace"; c.war_target = -1; c.mode_ticks = 0
+                tick_events.append({"type": "clan_mode", "clan_id": c.id, "mode": "peace"})
+        self._purge_clan_relations(y_id)
+        tick_events.append({"type": "clan_absorbed", "clan_id": y_id, "by": x_id, "members": n})
+
+    def _tribute(self, x_id, y_id, clan_bldg, tick_events):
+        """P3 tribut — le perdant Y verse TRIBUTE_PCT % de chaque ressource stockée au vainqueur X.
+        Pool = somme par ressource ; prélèvement/crédit triés par id ; caps respectés ; surplus
+        perdu (pillage gaspillé) ; division ENTIÈRE (zéro float). Event si transfert > 0."""
+        yb = clan_bldg.get(y_id, {}); xb = clan_bldg.get(x_id, {})
+        # (ressource, sources Y [(btype, attr)], cibles X [(btype, attr, cap|None)])
+        RES = [
+            ("wood",  [("house", "wood"), ("market", "wood")],
+                      [("house", "wood", MAX_WOOD_PER_HOUSE), ("market", "wood", MARKET_MAX_STOCK)]),
+            ("stone", [("house", "stone"), ("market", "stone")],
+                      [("house", "stone", None), ("market", "stone", MARKET_MAX_STOCK)]),
+            ("iron",  [("forge", "iron"), ("market", "iron")],
+                      [("forge", "iron", FORGE_MAX_IRON), ("market", "iron", MARKET_MAX_STOCK)]),
+            ("bread", [("mill", "bread")], [("mill", "bread", MILL_MAX_BREAD)]),
+        ]
+        moved = {}
+        for res, sources, targets in RES:
+            src = [(b, attr) for bt, attr in sources for b in yb.get(bt, [])]
+            pool = sum(getattr(b, attr) for b, attr in src)
+            want = pool * TRIBUTE_PCT // 100
+            got = 0
+            for b, attr in sorted(src, key=lambda ba: ba[0].id):
+                t = min(getattr(b, attr), want - got)
+                setattr(b, attr, getattr(b, attr) - t); got += t
+                if got >= want:
+                    break
+            rem = got                                     # crédit chez X (caps ; surplus perdu)
+            tgt = [(b, attr, cap) for bt, attr, cap in targets for b in xb.get(bt, [])]
+            for b, attr, cap in sorted(tgt, key=lambda t: t[0].id):
+                room = rem if cap is None else min(rem, cap - getattr(b, attr))
+                if room <= 0:
+                    continue
+                setattr(b, attr, getattr(b, attr) + room); rem -= room
+                if rem <= 0:
+                    break
+            if got > 0:
+                moved[res] = got
+        if moved:
+            tick_events.append({"type": "clan_tribute", "from_clan": y_id, "to_clan": x_id,
+                                "wood": moved.get("wood", 0), "stone": moved.get("stone", 0),
+                                "iron": moved.get("iron", 0), "bread": moved.get("bread", 0)})
 
     def _clans_wire(self):
         """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
@@ -3857,6 +4033,18 @@ class Simulation:
             elif et == "clan_rivals":
                 add({"t": t, "kind": "rival", "msg":
                      f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} deviennent rivaux"})
+            elif et == "clan_absorbed":   # P3a
+                add({"t": t, "kind": "war", "msg":
+                     f"Le clan {ev['by'] + 1} conquiert le clan {ev['clan_id'] + 1} et absorbe ses {ev['members']} survivants"})
+            elif et == "clan_tribute":    # P3
+                add({"t": t, "kind": "war", "msg":
+                     f"Vaincu, le clan {ev['from_clan'] + 1} paie tribut au clan {ev['to_clan'] + 1}"})
+            elif et == "clan_marriage":   # P3c
+                add({"t": t, "kind": "ally", "msg":
+                     f"Un mariage unit le clan {ev['from_clan'] + 1} et le clan {ev['to_clan'] + 1}"})
+            elif et == "clan_war_aid":    # P3b
+                add({"t": t, "kind": "war", "msg":
+                     f"Le clan {ev['clan_id'] + 1} entre en guerre aux côtés de son allié le clan {ev['ally'] + 1}"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)

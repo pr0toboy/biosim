@@ -3133,6 +3133,21 @@ function addEvent(ev) {
     div.textContent = `🗡 ${nameA} a tué un membre du ${nameV}`;
     div.style.borderColor = ca?.color || "#f97316";
     div.style.color = "#fcd34d";
+  } else if (ev.type === "clan_absorbed") {   // P3a conquête
+    div.textContent = `👑 Clan ${ev.by + 1} conquiert le Clan ${ev.clan_id + 1} (${ev.members} absorbés)`;
+    div.style.borderColor = clans.find(c => c.id === ev.by)?.color || "#f59e0b";
+    div.style.color = "#fcd34d";
+  } else if (ev.type === "clan_tribute") {     // P3 tribut
+    const parts = [["🪵", ev.wood], ["🪨", ev.stone], ["⛓", ev.iron], ["🍞", ev.bread]]
+      .filter(([, q]) => q > 0).map(([i, q]) => `${i}${q}`).join(" ");
+    div.textContent = `💰 Clan ${ev.from_clan + 1} paie tribut au Clan ${ev.to_clan + 1} — ${parts}`;
+    div.style.color = "#fcd34d";
+  } else if (ev.type === "clan_marriage") {    // P3c mariage
+    div.textContent = `💍 Mariage : Clan ${ev.from_clan + 1} ⇄ Clan ${ev.to_clan + 1}`;
+    div.style.color = "#f9a8d4";
+  } else if (ev.type === "clan_war_aid") {     // P3b aide d'allié
+    div.textContent = `🤝⚔️ Clan ${ev.clan_id + 1} entre en guerre aux côtés du Clan ${ev.ally + 1}`;
+    div.style.color = "#fcd34d";
   } else {
     div.textContent = JSON.stringify(ev);
   }

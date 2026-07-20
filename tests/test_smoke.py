@@ -1402,6 +1402,97 @@ def test_save_load_roundtrip_and_resume(ticks: int = 200, resume: int = 120, see
           f"(round-trip {len(a0['entities'])} entités + {resume} ticks rejoués identiques)")
 
 
+def _land_tile(world):
+    for y in range(world.height):
+        for x in range(world.width):
+            if world.is_walkable(x, y, False):
+                return x, y
+    raise RuntimeError("no land")
+
+
+def test_p3_tribute_and_surplus_lost():
+    """P3 §2 : le perdant verse 20% entier de chaque ressource (caps respectés, surplus perdu)."""
+    from engine.simulation import Clan, FORGE_MAX_IRON
+    w = World(width=60, height=45, seed=7); sim = Simulation(w)
+    lx, ly = _land_tile(w)
+    xh = Building(id=1, clan_id=0, x=lx, y=ly, btype="house")
+    xf = Building(id=2, clan_id=0, x=lx, y=ly, btype="forge")
+    xm = Building(id=3, clan_id=0, x=lx, y=ly, btype="mill")
+    yh = Building(id=4, clan_id=1, x=lx, y=ly, btype="house", wood=100, stone=50)
+    yf = Building(id=5, clan_id=1, x=lx, y=ly, btype="forge", iron=20)
+    ym = Building(id=6, clan_id=1, x=lx, y=ly, btype="mill", bread=5)
+    sim.buildings = [xh, xf, xm, yh, yf, ym]
+    cb = {0: {"house": [xh], "forge": [xf], "mill": [xm]},
+          1: {"house": [yh], "forge": [yf], "mill": [ym]}}
+    ev = []
+    sim._tribute(0, 1, cb, ev)
+    assert (yh.wood, yh.stone, yf.iron, ym.bread) == (80, 40, 16, 4)
+    assert (xh.wood, xh.stone, xf.iron, xm.bread) == (20, 10, 4, 1)
+    t = [e for e in ev if e["type"] == "clan_tribute"]
+    assert t and t[0] == {"type": "clan_tribute", "from_clan": 1, "to_clan": 0,
+                          "wood": 20, "stone": 10, "iron": 4, "bread": 1}, t
+    # surplus perdu : forge X déjà quasi-pleine → seul ce qui rentre est crédité, event=prélevé
+    xf2 = Building(id=7, clan_id=0, x=lx, y=ly, btype="forge", iron=FORGE_MAX_IRON - 1)
+    yf2 = Building(id=8, clan_id=1, x=lx, y=ly, btype="forge", iron=20)
+    sim.buildings = [xf2, yf2]
+    ev2 = []
+    sim._tribute(0, 1, {0: {"forge": [xf2]}, 1: {"forge": [yf2]}}, ev2)
+    assert yf2.iron == 16 and xf2.iron == FORGE_MAX_IRON  # 3 perdus
+    assert [e for e in ev2 if e["type"] == "clan_tribute"][0]["iron"] == 4
+    print("  test_p3_tribute_and_surplus_lost OK (20% entier, caps, surplus perdu, event=prélevé)")
+
+
+def test_p3_conquest_absorption():
+    """P3 §3 : conquête — membres+bâtiments durables → X, feu+chantiers effacés, Y retiré, purge."""
+    from engine.simulation import Clan
+    w = World(width=60, height=45, seed=7); sim = Simulation(w)
+    lx, ly = _land_tile(w)
+    xs = [spawn(EntityType.HUMAN, lx, ly, Sex.MALE) for _ in range(5)]
+    ys = [spawn(EntityType.HUMAN, lx, ly, Sex.MALE) for _ in range(3)]
+    for e in xs: e.clan_id = 0
+    for e in ys: e.clan_id = 1
+    sim.entities = xs + ys
+    xh = Building(id=1, clan_id=0, x=lx, y=ly, btype="house")
+    yh = Building(id=2, clan_id=1, x=lx, y=ly, btype="house")
+    yfire = Building(id=3, clan_id=1, x=lx, y=ly, btype="campfire")
+    ysite = Building(id=4, clan_id=1, x=lx, y=ly, btype="site_mill")
+    sim.buildings = [xh, yh, yfire, ysite]
+    sim.clans = [Clan(id=0, cx=float(lx), cy=float(ly), color="#f00", chief_id=xs[0].id),
+                 Clan(id=1, cx=float(lx), cy=float(ly), color="#00f", chief_id=ys[0].id)]
+    sim.relations = {(0, 1): -50}; sim._rival_state = {(0, 1)}; sim._ally_state = set()
+    ev = []
+    sim._absorb_clan(0, 1, ev)
+    assert all(e.clan_id == 0 for e in ys), "membres de Y → X"
+    assert yh.clan_id == 0 and yh in sim.buildings, "maison de Y → X"
+    assert yfire not in sim.buildings and ysite not in sim.buildings, "feu+chantier effacés"
+    assert not any(c.id == 1 for c in sim.clans), "clan Y retiré"
+    assert sim.relations == {} and sim._rival_state == set(), "relations de Y purgées"
+    a = [e for e in ev if e["type"] == "clan_absorbed"]
+    assert a and a[0] == {"type": "clan_absorbed", "clan_id": 1, "by": 0, "members": 3}, a
+    print("  test_p3_conquest_absorption OK (membres+maison→X, feu/chantier effacés, Y retiré, purge)")
+
+
+def test_p3_purge_e8_and_save_counters():
+    """P3 fix E8 : purge des clés relations d'un clan mort ; save/load des compteurs de guerre."""
+    from engine.simulation import Clan
+    w = World(width=60, height=45, seed=7); sim = Simulation(w)
+    sim.relations = {(0, 1): -50, (1, 2): 30, (0, 2): 45}
+    sim._ally_state = {(0, 2)}; sim._rival_state = {(0, 1)}
+    sim._purge_clan_relations(1)
+    assert sim.relations == {(0, 2): 45}, sim.relations
+    assert sim._ally_state == {(0, 2)} and sim._rival_state == set()
+    # save/load compteurs + relations
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.populate()
+    sim2.clans[0].war_kills_for = 7; sim2.clans[0].war_kills_against = 3
+    sim2.relations = {(0, 1): -55}
+    sim3 = Simulation(World(width=60, height=45, seed=7))
+    sim3.load_state(sim2.save_state())
+    c0 = next(c for c in sim3.clans if c.id == 0)
+    assert (c0.war_kills_for, c0.war_kills_against) == (7, 3), (c0.war_kills_for, c0.war_kills_against)
+    assert sim3.relations.get((0, 1)) == -55
+    print("  test_p3_purge_e8_and_save_counters OK (purge E8 + compteurs/relations round-trip)")
+
+
 if __name__ == "__main__":
     # Tests unitaires rapides (comportement) + le golden BASE : toujours joués.
     FAST = (test_deposit_no_crash_when_houses_full,
@@ -1427,6 +1518,9 @@ if __name__ == "__main__":
             test_c2_dest_ruined_gold_recredit_and_replay,
             test_k_chronicle_records_and_persists,
             test_e8_dead_clan_leaves_ruins_then_fade,
+            test_p3_tribute_and_surplus_lost,
+            test_p3_conquest_absorption,
+            test_p3_purge_e8_and_save_counters,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

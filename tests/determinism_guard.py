@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "73fd2b2567242daa8dffa63c24f6185eaceb47ffdd5d7177db65b25ad3dd4c90"  # regold P2 CALIBRATION ALLIANCES 2026-07-20 (ex-9bfcf6cf ; REL_NEIGHBOR_DIST 40→80, voisinage/décay EXCLUSIFS, bonus voisinage +2 REL_D_NEIGHBOR — reco Regigigas pour que les alliances se forment). pop 821 inchangée. Imputation : RELATIONS_OFF=1 → 5c14d2d0 (= P2.1) ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60 ; POLITICS_OFF → 5c14d2d0. — Historique P2 : 9bfcf6cf = relations pré-calibration.
+GOLDEN = "6159136cc76d0079537b6eb86dc408a238888c3d1e5c753637d002d94b6cdf66"  # regold P3 GUERRE 2.0 2026-07-20 (ex-73fd2b25 ; issues de guerre : conquête/tribut/paix blanche + riposte + aide d'allié + mariages). pop 821 inchangée. Imputation : WAR2_OFF=1 → 73fd2b25 (P2) ; RELATIONS_OFF → 5c14d2d0 ; JOBS_OFF → 5f244402 ; SOCIETY_OFF → 4ccfdd60. — Historique : 73fd2b25 = P2 calibration ; 9bfcf6cf = P2 pré-calibration.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "acb48bcb343d910a320f64fc79e9d000fbc71ca4d6f5c8ff1ea9ecf25b3287fb"  # regold P2 CALIBRATION ALLIANCES 2026-07-20 (ex-c294ac4b ; REL_NEIGHBOR_DIST 80, voisinage/décay exclusifs, bonus +2 → alliances atteignables). Imputation RELATIONS_OFF=1 → c08b6a14 (P2.1) ; POLITICS_OFF → a85d306b (S2c). pop 1201. — Historique : c294ac4b = P2 pré-calibration ; c08b6a14 = P2.1 ; a85d306b = S2c.
+GOLDEN_CIV = "c7f1a86086b06ef85fcb6123ae08ef72a9d7bb7bc9869797485e89d1161d41e1"  # regold P3 GUERRE 2.0 2026-07-20 (ex-acb48bcb ; conquêtes/tributs + mariages transfèrent des membres → démographie change). Imputation WAR2_OFF=1 → acb48bcb (P2) ; RELATIONS_OFF → c08b6a14 (P2.1) ; POLITICS_OFF → a85d306b (S2c). pop 1201 → 1175. — Historique : acb48bcb = P2 calibration ; c08b6a14 = P2.1 ; a85d306b = S2c.
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "e51f0ad07e712b92e935fbfd1f2ed779e345e64667d3215a86d8c693ea8624c6"  # regold P2 POLITIQUE 2026-07-20 (ex-cb0f4b53 ; comme BASE, une guerre déclarée en 500t re-cible par relation + wire). Imputation RELATIONS_OFF=1 → cb0f4b53 exact. pop 787 inchangée (labels géopolitiques). — INCHANGÉ par S2c/P2.1 avant P2.
+GOLDEN_PROD = "5ffb9432c51941559de9c852f9a3de959850c3206430d26120537209477381f4"  # regold P3 GUERRE 2.0 2026-07-20 (ex-e51f0ad0 ; issues de guerre au gabarit prod). pop 787 inchangée. Imputation WAR2_OFF=1 → e51f0ad0 (P2) ; RELATIONS_OFF → cb0f4b53. — Historique : e51f0ad0 = P2 (calibration hash-neutre au PROD) ; cb0f4b53 = P1.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):
