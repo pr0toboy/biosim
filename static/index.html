@@ -455,6 +455,21 @@ const CLAN_FARMER_SPRITES = [
   { img: new Image(), src: "/static/MiniWorldSprites/Characters/Workers/PurpleWorker/FarmerPurple.png", size: 16 },
   { img: new Image(), src: "/static/MiniWorldSprites/Characters/Workers/RedWorker/FarmerRed.png",       size: 16 },
 ];
+// Sprites par MÉTIER (P1) — planches originales V9 (Ninja Adventure, CC0, recolorées par clan par
+// Regigigas), un corps reconnaissable par métier × 4 clans. Layout uniforme 80×64 : rows down0/up1/
+// left2/right3, col 0 = idle, cols 1-4 = marche → JOB_ANIM (idle en col 0). Le rendu bascule sur ces
+// planches selon e.job ; versatile/inconnu → fermier V9 (fallback), puis fermier du pack si absent.
+const JOB_ANIM = { cols: [1, 2, 3, 4], rows: { down: 0, up: 1, left: 2, right: 3 }, idle: { c: 0, r: 0 } };
+const _CLAN_FILE = ["Cyan", "Lime", "Purple", "Red"];   // ordre index clan ((id-1)%4+4)%4
+const _JOB_FILE = { warrior: "Warrior", farmer: "Farmer", woodcutter: "Woodcutter", miner: "Miner",
+                    builder: "Builder", merchant: "Merchant", priest: "Priest", scout: "Scout" };
+const CLAN_ROLE_SPRITES = {};
+for (const [role, file] of Object.entries(_JOB_FILE)) {
+  CLAN_ROLE_SPRITES[role] = _CLAN_FILE.map(clan => ({
+    img: new Image(), src: `/static/MiniWorldSprites/Characters/Jobs/${file}${clan}.png`,
+    size: 16, anim: JOB_ANIM,
+  }));
+}
 // Huttes COLORÉES PAR CLAN (nº22 « différences » / « maisons ») : strip 5×1 par clan → villages
 // visuellement distincts. Mêmes indices de clan que les fermiers (1→Cyan…4→Red).
 const CLAN_HUT_SPRITES = [
@@ -488,6 +503,7 @@ function loadAllSprites() {
     ...Object.values(TREE_SPRITES),
     CLIFF_SPRITE, CLIFF_HIGH_SPRITE, GRAVEL_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     ...CLAN_FARMER_SPRITES, ...CLAN_HUT_SPRITES,   // fermiers + huttes colorés par clan (nº22)
+    ...Object.values(CLAN_ROLE_SPRITES).flat(),     // sprites par métier V9 (8 rôles × 4 clans)
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
     // sans src, il écraserait le src déjà posé (WHEAT/MILL) ou vide (WELL) par undefined.
     { img: WHEAT_IMG, src: WHEAT_IMG.src }, { img: MILL_IMG, src: MILL_IMG.src }, WELL_SPRITE,
@@ -1721,7 +1737,7 @@ function entityFrame(e, sp, isChief) {
       dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
     return [col, FISH_ROWS[dir]];
   }
-  const anim = !isChief && ENTITY_ANIM[e.t];
+  const anim = !isChief && (sp.anim || ENTITY_ANIM[e.t]);   // sp.anim = layout des planches métier V9
   if (!anim) return [sp.col, sp.row];
   const p = prevPos[e.id];
   const dx = p ? e.x - p.x : 0, dy = p ? e.y - p.y : 0;
@@ -2373,10 +2389,13 @@ function drawAll() {
     const kneel = e.s === "praying" ? Math.max(1, T * 0.08) : 0;   // posture (C1)
     const isChief = e.t === "human" && clans.some(c => c.chief_id === e.id);
     let sp = ENTITY_SPRITES[isChief ? "human_chief" : e.t];
-    // Fermier coloré par clan (nº22) : villageois non-chef → planche de son clan (même layout
-    // que FarmerTemplate → ENTITY_ANIM["human"] inchangé). Fallback template si pas encore chargé.
+    // Villageois non-chef coloré par clan : sprite selon le MÉTIER (P1, planches V9) si e.job est
+    // défini, sinon fermier V9 (versatile/fallback). Le sprite porte son anim (JOB_ANIM idle col0).
     if (!isChief && e.t === "human" && e.clan != null) {
-      const cs = CLAN_FARMER_SPRITES[((e.clan - 1) % 4 + 4) % 4];
+      const ci = ((e.clan - 1) % 4 + 4) % 4;
+      const roleSet = (e.job && CLAN_ROLE_SPRITES[e.job]) || CLAN_ROLE_SPRITES.farmer;
+      let cs = roleSet[ci];
+      if (!(cs && cs.img.complete && cs.img.naturalWidth > 0)) cs = CLAN_FARMER_SPRITES[ci];  // fallback pack
       if (cs && cs.img.complete && cs.img.naturalWidth > 0) sp = cs;
     }
     if (sp && sp.img.complete && sp.img.naturalWidth > 0) {
