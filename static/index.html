@@ -673,19 +673,26 @@ window.addEventListener("resize", resizeCanvas);
 // wss:// obligatoire quand la page est servie en HTTPS (ex. via tailscale serve) :
 // un navigateur bloque un ws:// non sécurisé depuis une page https (mixed content).
 const _wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-const ws = new WebSocket(`${_wsProto}//${location.host}/ws`);
-ws.onopen  = () => setStatus("Connecté", true);
-ws.onclose = () => setStatus("Déconnecté", false);
-ws.onerror = () => setStatus("Erreur WS", false);
-
-ws.onmessage = (ev) => {
-  const msg = JSON.parse(ev.data);
-  if (msg.type === "init") {
-    handleInit(msg.data);
-  } else if (msg.type === "tick") {
-    handleTick(msg.data);
-  }
-};
+let ws = null;
+let _wsRetryMs = 1000;
+function connectWS() {
+  ws = new WebSocket(`${_wsProto}//${location.host}/ws`);
+  ws.onopen  = () => { setStatus("Connecté", true); _wsRetryMs = 1000; };
+  // Reconnexion automatique (audit #4) : le serveur peut redémarrer (os._exit(1) → systemd relance)
+  // → sans ça, le viewer restait figé sur « Déconnecté » jusqu'à un F5 manuel. Backoff plafonné 10 s.
+  ws.onclose = () => {
+    setStatus("Déconnecté — reconnexion…", false);
+    setTimeout(connectWS, _wsRetryMs);
+    _wsRetryMs = Math.min(_wsRetryMs * 2, 10000);
+  };
+  ws.onerror = () => setStatus("Erreur WS", false);
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "init") handleInit(msg.data);
+    else if (msg.type === "tick") handleTick(msg.data);
+  };
+}
+connectWS();
 
 function setStatus(text, ok) {
   document.getElementById("statusbar").textContent = text;
@@ -2895,6 +2902,8 @@ const SILENT_EVENTS = new Set([
   "clan_jobs",
   // succession du chef (P2) : la couronne 👑 se déplace sur la carte → pas de spam feed
   "clan_new_chief",
+  // caravane avortée (D1) : la mission se re-crédite proprement, pas un événement à narrer (audit #4)
+  "trade_aborted",
   // relations inter-clans (P2b) : franchissements allié/rival → chroniques K, pas le feed
   "clan_allies", "clan_rivals",
 ]);
@@ -3625,8 +3634,10 @@ canvas.addEventListener("touchend", (ev) => {
 
   // Tap simple → tooltip 2 secondes
   const rect = canvas.getBoundingClientRect();
-  const mx = (ev.changedTouches[0].clientX - rect.left  - offX) / scale;
-  const my = (ev.changedTouches[0].clientY - rect.top   - offY) / scale;
+  // /TILE_SIZE manquait (audit #4) → coords en pixels au lieu de tuiles : le tooltip mobile visait
+  // toujours à côté. Même formule que le handler souris (mousemove).
+  const mx = (ev.changedTouches[0].clientX - rect.left  - offX) / scale / TILE_SIZE;
+  const my = (ev.changedTouches[0].clientY - rect.top   - offY) / scale / TILE_SIZE;
   let closest = null, closestD = 2.0;
   entities.forEach(e => {
     const d = Math.hypot(e.x + 0.5 - mx, e.y + 0.5 - my);

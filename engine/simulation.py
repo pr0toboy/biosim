@@ -3105,7 +3105,10 @@ class Simulation:
             ((b.clan_id, b.y, b.x) for b in self.buildings
              if b.clan_id is not None and b.clan_id >= 0),
             key=lambda t: (t[0], t[1], t[2]))
-        owner = np.full((H, W), -1, dtype=np.int8)
+        # int16 (audit #2) : les clan_id sont un compteur MONOTONE non borné (chaque scission/
+        # essaimage l'incrémente) → en int8, np.int8(cid) déborde dès le clan id 128 (OverflowError
+        # NumPy≥2 → crash du step). Certain sur run long. int16 borne à 32767, largement au-delà.
+        owner = np.full((H, W), -1, dtype=np.int16)
         if not anchors:
             return owner
         best = np.full((H, W), np.inf, dtype=np.float32)
@@ -3115,7 +3118,7 @@ class Simulation:
             d = (xs - ax) ** 2 + (ys - ay) ** 2
             closer = d < best
             best = np.where(closer, d, best)
-            owner = np.where(closer, np.int8(cid), owner)
+            owner = np.where(closer, np.int16(cid), owner)
         owner[best > TERRITORY_MAX_DIST ** 2] = -1   # au-delà du rayon d'influence
         owner[~w._walkable] = -1                       # l'eau n'est possédée par personne
         return owner
@@ -4435,6 +4438,11 @@ class Simulation:
             # Relations inter-clans (P2b) : liste [a,b,v] triée → save déterministe. Les états
             # allié/rival dérivés ne sont PAS sauvés (recalculés au load depuis la valeur).
             "relations": [[a, b, v] for (a, b), v in sorted(self.relations.items())],
+            # États allié/rival (P2b) : SÉRIALISÉS (audit #1). L'hystérésis a un seuil d'ENTRÉE
+            # (±40) ≠ seuil de SORTIE (±35) → une paire dans [35,40) est encore alliée en run
+            # continu ; les recalculer au seuil dur au load la déclasserait → divergence.
+            "ally_state":  sorted([a, b] for (a, b) in self._ally_state),
+            "rival_state": sorted([a, b] for (a, b) in self._rival_state),
             "next_clan_id": self._next_clan_id,   # P4 : compteur monotone (asdict n'atteint pas les attrs Simulation)
         }
 
@@ -4476,8 +4484,15 @@ class Simulation:
             prev_species    = {e.etype.value for e in entities if e.alive}
             # Relations P2b : absent d'un vieux save → dict vide (tout neutre, pas de migration).
             relations       = {(int(a), int(b)): int(v) for a, b, v in d.get("relations", [])}
-            ally_state      = {k for k, v in relations.items() if v >= REL_ALLY}   # dérivés recalculés
-            rival_state     = {k for k, v in relations.items() if v <= REL_RIVAL}
+            # États allié/rival (audit #1) : restaurés depuis le save (préserve l'hystérésis
+            # 40/35). Vieux save (absent) → fallback recalcul au seuil dur (best-effort, une
+            # paire dans la fenêtre d'hystérésis peut y perdre son statut, mais rien de mieux).
+            if "ally_state" in d:
+                ally_state  = {(int(a), int(b)) for a, b in d["ally_state"]}
+                rival_state = {(int(a), int(b)) for a, b in d.get("rival_state", [])}
+            else:
+                ally_state  = {k for k, v in relations.items() if v >= REL_ALLY}
+                rival_state = {k for k, v in relations.items() if v <= REL_RIVAL}
             # P4 : compteur d'id de clans. Vieux save (absent) → max(ids)+1 pour rester monotone.
             next_clan_id    = d.get("next_clan_id",
                                     (max((c.id for c in clans), default=N_CLANS - 1) + 1))

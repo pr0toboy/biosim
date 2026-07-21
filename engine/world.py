@@ -145,7 +145,10 @@ class World:
     def __init__(self, width: int = 80, height: int = 60, seed: int = None):
         self.width = width
         self.height = height
-        self.seed = seed or random.randint(0, 999999)
+        # `seed or …` traiterait seed=0 comme absent (audit #3) → from_state({seed:0}) régénérerait
+        # un monde ALÉATOIRE, dont les masques immuables (walkable/eau/forêt) ne correspondraient plus
+        # aux grilles chargées = corruption silencieuse. Seul None = « pas de graine ».
+        self.seed = seed if seed is not None else random.randint(0, 999999)
         random.seed(self.seed)
         np.random.seed(self.seed)
 

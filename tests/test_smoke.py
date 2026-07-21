@@ -1572,6 +1572,25 @@ def test_p4_found_clan_deterministic():
     print("  test_p4_found_clan_deterministic OK (id/couleur/position stables, compteur ++)")
 
 
+def test_audit_ally_hysteresis_survives_save_load():
+    """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
+    Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
+    seuil dur au load la déclasserait → guerre/aide/mariages divergents. Fix : sets sérialisés."""
+    from engine.simulation import Clan
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    sim.relations[(0, 1)] = 37; sim._ally_state = {(0, 1)}   # alliée à 40 puis decay → 37 (fenêtre)
+    sim.relations[(1, 2)] = -37; sim._rival_state = {(1, 2)}
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    assert (0, 1) in sim2._ally_state, "alliance en fenêtre [35,40) perdue au load"
+    assert (1, 2) in sim2._rival_state, "rivalité en fenêtre perdue au load"
+    assert sim2.relations.get((0, 1)) == 37
+    # vieux save (sans les sets) → fallback recalcul au seuil dur (best-effort, documenté)
+    st_old = sim.save_state(); del st_old["ally_state"]; del st_old["rival_state"]
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st_old)
+    assert (0, 1) not in sim3._ally_state, "vieux save → fallback recalcul au seuil"
+    print("  test_audit_ally_hysteresis_survives_save_load OK (hystérésis sérialisée ; fallback vieux save)")
+
+
 def test_p41_swarm_recolonizes_ruin():
     """P4.1 essaimage : un clan prospère à l'étroit envoie K=pop//4 colons fonder une colonie SUR
     la ruine la plus proche (consommée), alliée +50 SANS event clan_allies (pas de mariage auto)."""
@@ -1655,6 +1674,7 @@ if __name__ == "__main__":
             test_p4_found_clan_deterministic,
             test_p41_swarm_recolonizes_ruin,
             test_p4_save_load_tension_counter,
+            test_audit_ally_hysteresis_survives_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
