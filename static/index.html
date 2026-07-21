@@ -3155,6 +3155,10 @@ function addEvent(ev) {
   } else if (ev.type === "clan_coup") {        // P4 coup d'État
     div.textContent = `⚡ Coup d'État — nouveau chef au Clan ${ev.clan_id + 1}`;
     div.style.color = "#fca5a5";
+  } else if (ev.type === "clan_swarm") {       // P4.1 essaimage
+    div.textContent = `🌱 Clan ${ev.clan_id + 1} essaime — colonie${ev.on_ruin ? " sur des ruines" : ""} (Clan ${ev.new_clan + 1})`;
+    div.style.borderColor = clans.find(c => c.id === ev.new_clan)?.color || "#86efac";
+    div.style.color = "#86efac";
   } else {
     div.textContent = JSON.stringify(ev);
   }

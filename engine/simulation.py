@@ -348,6 +348,14 @@ CONQUEST_TENSION = 8   # absorber un clan vaincu → +8 (acte politique d'annexi
 # en tension jusqu'à la scission → pas d'état stable monoclan à tension nulle (le cycle des empires).
 OVEREXTEND_SPAN = 30   # pop à partir de laquelle le span-of-control devient ingouvernable
 OVEREXTEND_MAX  = 10   # cap du delta structurel par éval
+# Essaimage pacifique (P4.1) : le pendant POSITIF de la scission — un clan prospère (tension basse)
+# mais à l'étroit (surpop) envoie une colonie, de préférence RECOLONISER la ruine la plus proche
+# (referme la boucle E8 : les gravats revivent). Colonie ALLIÉE de la mère d'entrée. Kill-switch
+# SWARM_OFF (sous-bloc de P4) → hashes P4 (ae52bd38…) exacts ; _UNREST_ON coupe aussi l'essaimage.
+_SWARM_ON       = _UNREST_ON and os.environ.get("SWARM_OFF") != "1"
+SWARM_TENSION_MAX = 30   # tension < → clan serein (condition d'essaimage, pas de scission/coup)
+SWARM_MIN_POP     = 20   # pop mini pour essaimer (au-delà de REBEL_MIN_POP : la prospérité déborde)
+REL_D_COLONY      = 50   # colonie alliée d'entrée (POSÉE direct, sans event → pas de mariage auto)
 
 def _chief_personality(chief_id):
     """(temper, diplo) dérivés de chief_id — zéro état, zéro RNG, stable inter-process/save.
@@ -3589,6 +3597,7 @@ class Simulation:
         absorptions = []   # P3 : (vainqueur, perdant) conquêtes à appliquer APRÈS la boucle
         tributes = []      # P3 : (vainqueur, perdant) tributs (idem, buildings mutés hors boucle)
         rebellions = []    # P4 : ids de clans-mères qui se scindent (fondation différée)
+        colonies = []      # P4.1 : ids de clans-mères qui essaiment (fondation différée)
         for c in due:
             p = pop.get(c.id, 0)
             avg_h = (hsum.get(c.id, 0.0) / p) if p else 0.0
@@ -3618,6 +3627,9 @@ class Simulation:
                     # est la FRAGMENTATION → sa tension grimpe jusqu'à la scission (le cycle des empires).
                     # En multi-clan, le coup reste la soupape (churn politique) qui préempte la scission.
                     self._coup(c, tick_events)       # inline : renverse le chef, tension −40
+                elif (_SWARM_ON and c.tension < SWARM_TENSION_MAX and p >= SWARM_MIN_POP
+                      and p > cap and len(self.clans) < MAX_CLANS):
+                    colonies.append(c.id)            # P4.1 essaimage pacifique (fondation différée)
             # Cible de guerre : SANS P2, rival le + peuplé (tie-break id). AVEC P2 (P2b) : jamais
             # un ALLIÉ, puis la relation la plus BASSE (le + rival, tie-break id min).
             if not _POL_ON:
@@ -3703,6 +3715,8 @@ class Simulation:
         if _UNREST_ON:   # P4 : scissions (fondation d'un clan neuf → mute self.clans)
             for mid in rebellions:
                 self._rebel_split(mid, tick_events)
+            for mid in colonies:   # P4.1 : essaimages (idem, différés)
+                self._swarm_split(mid, tick_events)
 
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
         """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
@@ -4113,6 +4127,43 @@ class Simulation:
         tick_events.append({"type": "clan_rebellion", "clan_id": mother_id,
                             "new_clan": nc.id, "members": K, "chief_id": leader.id})
 
+    def _swarm_split(self, mother_id, tick_events):
+        """P4.1 essaimage — un clan prospère et à l'étroit envoie K=pop//4 colons (les + éloignés du
+        feu, leader = le + éloigné) fonder une COLONIE, de préférence SUR la ruine la plus proche du
+        feu-mère (consommée → recolonisation E8), sinon à la position du leader. Colonie ALLIÉE de la
+        mère (+50 POSÉ direct, sans event clan_allies → pas de mariage auto). Re-vérifie les conditions."""
+        mother = next((c for c in self.clans if c.id == mother_id), None)
+        if mother is None or len(self.clans) >= MAX_CLANS:
+            return
+        members = [e for e in self.entities if e.alive and e.etype == EntityType.HUMAN
+                   and e.clan_id == mother_id]
+        if len(members) < SWARM_MIN_POP:
+            return
+        K = len(members) // 4
+        if K < 1:
+            return
+        members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
+        colonists = members[:K]
+        leader = colonists[0]
+        # Recolonisation : la ruine la plus proche du feu-mère (tie-break id bâtiment) si elle existe.
+        ruins = [b for b in self.buildings if b.btype == "ruin"]
+        on_ruin = False
+        if ruins:
+            ruin = min(ruins, key=lambda b: ((b.x - mother.cx) ** 2 + (b.y - mother.cy) ** 2, b.id))
+            fx, fy = ruin.x, ruin.y
+            self.buildings.remove(ruin)   # consommée → le feu de la colonie prend sa place
+            on_ruin = True
+        else:
+            fx, fy = leader.x, leader.y
+        nc = self._found_clan(leader, colonists, fx, fy)
+        # Alliance d'entrée POSÉE directement (pas de _rel_apply → pas d'event clan_allies → pas de
+        # mariage auto ; le mariage P3 scelle les FRANCHISSEMENTS, ici la fondation POSE l'état).
+        k = _rel_key(mother_id, nc.id)
+        self.relations[k] = min(REL_MAX, self.relations.get(k, 0) + REL_D_COLONY)
+        self._ally_state.add(k)
+        tick_events.append({"type": "clan_swarm", "clan_id": mother_id, "new_clan": nc.id,
+                            "members": K, "x": int(fx), "y": int(fy), "on_ruin": on_ruin})
+
     def _clans_wire(self):
         """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
         n'apparaît que si non vide → RELATIONS_OFF/étages-off = payload pré-P2 exact).
@@ -4178,6 +4229,10 @@ class Simulation:
             elif et == "clan_coup":       # P4 coup d'État
                 add({"t": t, "kind": "coup", "msg":
                      f"Un coup d'État renverse le chef du clan {ev['clan_id'] + 1}"})
+            elif et == "clan_swarm":      # P4.1 essaimage
+                _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
+                add({"t": t, "kind": "swarm", "msg":
+                     f"Le clan {ev['clan_id'] + 1} essaime : une colonie s'installe {_w} (clan {ev['new_clan'] + 1})"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
                 key = ("first_build", ev.get("clan_id"), btype)

@@ -1572,6 +1572,41 @@ def test_p4_found_clan_deterministic():
     print("  test_p4_found_clan_deterministic OK (id/couleur/position stables, compteur ++)")
 
 
+def test_p41_swarm_recolonizes_ruin():
+    """P4.1 essaimage : un clan prospère à l'étroit envoie K=pop//4 colons fonder une colonie SUR
+    la ruine la plus proche (consommée), alliée +50 SANS event clan_allies (pas de mariage auto)."""
+    from engine.simulation import Clan, N_CLANS, REL_D_COLONY, REL_ALLY
+    w = World(width=120, height=90, seed=7); sim = Simulation(w)
+    cx, cy = 20.0, 20.0
+    ents = []
+    for i in range(24):   # pop 24 → K = 24//4 = 6 colons ; les 6 plus éloignés partent
+        far = i >= 18
+        e = spawn(EntityType.HUMAN, int(cx) + (20 if far else (i % 3)), int(cy) + (i // 3), Sex.MALE)
+        e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e)
+    sim.entities = ents
+    mother = Clan(id=0, cx=cx, cy=cy, color="#f00", chief_id=ents[0].id); mother.tension = 10
+    sim.clans = [mother]; sim._next_clan_id = N_CLANS
+    ruin = Building(id=99, clan_id=-1, x=int(cx) + 25, y=int(cy), btype="ruin", ruin_ticks=1000)
+    other = Building(id=98, clan_id=-1, x=int(cx) + 60, y=int(cy) + 40, btype="ruin", ruin_ticks=1000)
+    sim.buildings = [ruin, other]
+    ev = []
+    sim._swarm_split(0, ev)
+    nc = next(c for c in sim.clans if c.id == N_CLANS)
+    colonists = [e for e in ents if e.clan_id == nc.id]
+    assert len(colonists) == 6, f"K=pop//4=6 colons: {len(colonists)}"
+    # colonie sur la ruine la plus proche (ruin, pas other) → ruine consommée, feu à sa place
+    assert ruin not in sim.buildings, "la ruine la plus proche devrait être consommée"
+    assert other in sim.buildings, "la ruine lointaine reste"
+    assert any(b.btype == "campfire" and b.clan_id == nc.id and (b.x, b.y) == (ruin.x, ruin.y)
+               for b in sim.buildings), "feu de la colonie sur l'emplacement de la ruine"
+    # alliée +50, dans _ally_state, SANS event clan_allies (donc pas de mariage)
+    assert sim.relations.get((0, nc.id)) == REL_D_COLONY and (0, nc.id) in sim._ally_state
+    assert not [e for e in ev if e["type"] == "clan_allies"], "pas d'event clan_allies (pas de mariage auto)"
+    s = [e for e in ev if e["type"] == "clan_swarm"]
+    assert s and s[0]["on_ruin"] is True and s[0]["members"] == 6 and s[0]["new_clan"] == nc.id, s
+    print("  test_p41_swarm_recolonizes_ruin OK (6 colons, ruine consommée, allié +50 sans mariage)")
+
+
 def test_p4_save_load_tension_counter():
     """P4 §8 : tension + _next_clan_id round-trip ; vieux save → tension 0 + compteur reconstruit."""
     sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
@@ -1618,6 +1653,7 @@ if __name__ == "__main__":
             test_p4_coup,
             test_p4_rebel_split,
             test_p4_found_clan_deterministic,
+            test_p41_swarm_recolonizes_ruin,
             test_p4_save_load_tension_counter,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
