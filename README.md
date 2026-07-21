@@ -10,10 +10,11 @@ Simulateur de vie style WorldBox, observable en temps réel via navigateur. Aucu
 
 - Monde procédural (fBm + domain warping), 7 types de terrain : eau, rivière, prairie, forêt, désert, montagne, + terre battue (*dirt* = herbe surpâturée, état dérivé)
 - 9 espèces animales avec traits héréditaires et mutations
-- 4 clans humains avec bâtiments, outils, agriculture et pêche
+- **Civilisation humaine profonde** (empilée bloc par bloc, cf. section *Civilisation*) : clans, **métiers**, **âges technologiques** (Bois → Pierre → Fer → Acier), fer/forge, **économie** (marchés, caravanes, loi de l'offre), **religion** (sanctuaires, pèlerinages, or), **société** (gouvernements, guerres périodiques), **politique** (personnalité des chefs, alliances/rivalités, mariages), **guerre 2.0** (conquête, tribut, absorption), **vie interne** (tension, coups d'État, scissions, essaimage) — un **cycle des empires** émergent
 - Saisons, météo dynamique (pluie, orages, canicules, incendies de forêt)
-- Interface web temps réel : zoom/pan, tooltip, graphes de population, log d'événements
-- Monitoring système (CPU, RAM, température)
+- **Chroniques** (annales narratives) + calendrier (années, saisons)
+- Interface web temps réel : zoom/pan, tooltip, graphes de population, log d'événements, panneau clan
+- Persistance (save/load sans perte, reprise exacte du flux aléatoire), monitoring système (CPU, RAM, température)
 
 ---
 
@@ -132,20 +133,53 @@ biosim/
 
 ---
 
-## Clans humains
+## Civilisation
 
-4 clans (rouge, bleu, vert, violet), chacun centré sur un feu de camp.
+Les clans humains (4 au départ : rouge, bleu, vert, violet, chacun centré sur un feu de camp) portent une simulation de civilisation approfondie, empilée **bloc par bloc**. Chaque bloc est déterministe et gardé par un kill-switch d'imputation (voir *Déterminisme & tests*).
 
-### Bâtiments disponibles
+### Bâtiments
 
-| Bâtiment    | Coût (bois/pierre) | Effet                         |
-|-------------|--------------------|-------------------------------|
-| Feu de camp | — (initial)        | Centre du territoire, chaleur |
-| Maison      | 15 bois            | +3 pop max par maison (max 12/clan) |
-| Champ de blé | —                 | Production alimentaire        |
-| Moulin      | 12 bois + 8 pierre | Transforme blé → pain (65 nourriture) |
-| Entrepôt    | 10 bois + 4 pierre | Stockage ressources           |
-| Puit        | 8 bois + 6 pierre  | Source d'eau sans se déplacer |
+| Bâtiment    | Coût (bois/pierre)  | Effet                         |
+|-------------|---------------------|-------------------------------|
+| Feu de camp | — (initial)         | Centre du territoire, chaleur |
+| Maison      | 15 bois             | +3 pop max par maison (×2 au niveau 2) |
+| Champ de blé | —                  | Production alimentaire        |
+| Moulin      | 12 bois + 8 pierre  | Transforme blé → pain (bâti près de l'eau) |
+| Puit        | 8 bois + 6 pierre   | Source d'eau sans se déplacer |
+| Forge       | 14 bois + 12 pierre | Âge du Fer : forge les outils en fer (1/clan) |
+| Marché      | bois                | Échange inter-clan (caravanes, troc puis loi de l'offre) |
+| Sanctuaire  | bois                | Religion : pèlerinages, bénédictions, trésor d'or |
+
+### Âges technologiques
+
+Chaque clan accumule de la **science** (bâtiments durables + population) et franchit 4 âges : **Bois → Pierre → Fer → Acier** (seuils 0 / 700 / 2500 / 6000). Un âge avancé = plus grande cité (cap de pop) et débloque des systèmes (fer à l'Âge du Fer, etc.).
+
+### Métiers
+
+À une certaine taille, un clan répartit sa population en **métiers** (déterministe, par quotas) : `farmer`, `woodcutter`, `miner`, `builder`, `warrior`, `merchant`, `priest`, `scout` (le chef reste polyvalent). Chaque métier biaise le comportement (le bûcheron coupe plus vite, le guerrier est le seul agresseur en guerre, etc.). Visible au survol d'un feu de camp (compteurs).
+
+### Économie & religion
+
+- **Marchés & caravanes** : un clan riche en bois mais pauvre en pierre envoie une caravane troquer chez un clan thésauriseur. Puis **loi de l'offre** (D2) : les cours (pierre, fer) bougent par paliers.
+- **Sanctuaires** : les fidèles font des **pèlerinages**, offrent du bois/or, reçoivent une bénédiction ; l'or circule et dore le sanctuaire.
+
+### Société, politique & guerre
+
+- **Gouvernements** : le chef choisit un mode PAIX / GUERRE / FAMINE ; les guerres sont **périodiques** (un événement, pas un état permanent).
+- **Politique (mémoire géopolitique)** : chaque chef a une **personnalité** dérivée de son identité (belliqueux ↔ pacifique, change à chaque succession → *ères* politiques) ; les clans gardent une **relation** −100..+100 (la guerre creuse la rancune, le commerce/voisinage rapproche) → **alliances** et **rivalités**, scellées par des **mariages** inter-clans.
+- **Guerre 2.0** : une guerre a des **issues** — **conquête** (absorption : membres et bâtiments du perdant passent au vainqueur), **tribut** (20 % des ressources) ou paix blanche ; **riposte**, **aide d'un allié**. Un chef mort ou défecté est remplacé par succession.
+
+### Vie interne — le cycle des empires
+
+Chaque clan porte une **tension** interne (0-100) nourrie par la misère (famine, guerre qui traîne, surpopulation, humiliation du tribut, surextension d'un empire trop grand) et apaisée par la paix prospère. Trois soupapes :
+
+- **Coup d'État** (tension ≥ 70) : le plus jeune adulte renverse le chef.
+- **Scission** (tension ≥ 90) : un groupe fait sécession et **fonde un clan indépendant**. Un empire hégémonique (dernier clan debout) finit toujours par éclater → le monde se **re-diversifie** tout seul.
+- **Essaimage** (clan prospère mais à l'étroit) : une colonie part s'installer, de préférence **sur les ruines** d'un clan éteint (recolonisation) ; colonie alliée de la mère.
+
+Résultat : conquête → domination → révolte → fragmentation → nouvelles guerres, **à l'infini**. Les sécessionnistes étant les plus éloignés du feu (= les peuples fraîchement conquis), les empires se re-fragmentent le long des anciennes frontières.
+
+*Pour l'historique détaillé des blocs (S2c, P1, D1/D2, C1/C2, A1, B, K, P2, P3, P4/P4.1) : `NEXT-STEPS.md` côté agent.*
 
 ### Outils
 
@@ -155,6 +189,7 @@ biosim/
 | Hache pierre | 5 pierre       | +5 bois/coup (total 7/coup)        |
 | Pioche bois  | 8 bois         | Permet de miner la pierre          |
 | Pioche pierre | 5 pierre      | +1 pierre/coup (total 2/coup)      |
+| Hache/pioche fer | forge + fer | Âge du Fer : outils plus rapides (upgrade des outils pierre) |
 | Faucille     | 5 pierre       | +25 nourriture à la récolte        |
 | Arrosoir     | 6 bois         | Accélère ×2 la croissance du blé   |
 | Canne à pêche | 4 bois        | Permet de pêcher                   |
@@ -217,6 +252,16 @@ biosim/
 - Cap de population : `MAX_PER_SPECIES = 200` par espèce (9 espèces → ~1800 entités max théorique). **Pas de cap global** à 5000.
 - Monde 220×160, NumPy vectorisé (regen nourriture/fertilité/arbres/roches/feu).
 - `psutil` est **optionnel** (monitoring CPU/RAM de `/api/sysinfo`) ; sans lui, ces champs valent `null`.
+
+---
+
+## Déterminisme & tests
+
+La simulation est **100 % déterministe** (même graine → même déroulé, byte-à-byte), invariant essentiel puisque le monde doit tourner à l'infini sans crash ni dérive.
+
+- **Filet de tests** (sans pytest) : `python3 tests/test_smoke.py` — tests unitaires de comportement (conquête, tribut, scission, coup, essaimage, économie, religion…), endurance, save/load, et les **goldens de déterminisme**.
+- **Guard de déterminisme** : `tests/determinism_guard.py` rejoue un run seedé et compare le hash SHA256 de toute la séquence à un *golden* versionné, sur 3 gabarits (BASE Âge Bois, CIV Âge Acier, PROD 220×160). Un refactor « sans changer le comportement » doit laisser le hash intact ; un changement volontaire le **regolde**.
+- **Kill-switches d'imputation** : chaque bloc de civilisation s'éteint par une variable d'environnement (`SOCIETY_OFF`, `JOBS_OFF`, `WARBEH_OFF`, `POLITICS_OFF`, `RELATIONS_OFF`, `WAR2_OFF`, `UNREST_OFF`, `SWARM_OFF`…) qui restaure **exactement** le hash d'avant le bloc — preuve que chaque bloc est isolé et n'a pas de fuite.
 
 ---
 
