@@ -3202,6 +3202,9 @@ function addEvent(ev) {
   } else if (ev.type === "feast_start") {      // P5 E2 fête des moissons
     div.textContent = `🌾 Clan ${ev.clan_id + 1} célèbre la fête des moissons (${ev.fields ?? 0} champs mûrs)`;
     div.style.color = "#fbbf24";
+  } else if (ev.type === "monument_built") {   // P5 E3 monument de prestige
+    div.textContent = `🗿 Clan ${ev.clan_id + 1} érige un monument à ${ev.dedication || "sa gloire"}`;
+    div.style.color = "#d6d3d1";
   } else {
     div.textContent = JSON.stringify(ev);
   }

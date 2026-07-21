@@ -64,6 +64,7 @@ class Clan:
     cult_converted: bool = False  # P5 : verrou de conversion (1× irréversible ; ré-armé par un schisme)
     feast_ticks: int = 0       # P5 E2 : ticks de fête restants (>0 = fête en cours ; convergence + natalité×2)
     feast_year: int = -1       # P5 E2 : dernière année où une fête a eu lieu (verrou 1×/an)
+    last_deed: str = "sa fondation"  # P5 E3 : dernier jalon majeur (dédicace d'un futur monument)
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -105,6 +106,7 @@ class Building:
     rate_iron: int = 0      # market : cours affiché fer/lot (D2)
     wants_stone: int = 0    # market : 1 si le clan cherche de la pierre (D2)
     wants_iron: int = 0     # market : 1 si le clan cherche du fer (D2)
+    dedication: str = ""    # monument (P5 E3) : jalon commémoré, fixé à la pose (asdict ; hors wire)
 
     def to_dict(self):
         d = {"id": self.id, "clan_id": self.clan_id,
@@ -634,6 +636,16 @@ FEAST_FIELDS_MIN = 4           # champs de blé mûrs (stage 4) requis pour déc
 FEAST_TICKS      = 60 * TIME_SCALE   # durée de la fête → suit TIME_SCALE
 FEAST_RADIUS     = 8           # rayon de convergence des membres autour du feu pendant la fête
 FEAST_BIRTH_MULT = 2.0         # multiplicateur du cap de population pendant la fête (natalité facilitée)
+# Monuments (E3) : à l'Âge Acier (age ≥ CHURCH_AGE), un clan érige UN monument de PRESTIGE (gloire du
+# culte) — 20 pierre du POOL + 4 or du TRÉSOR d'église (comme l'offrande C2). À l'achèvement : tension
+# one-shot −MONUMENT_TENSION (fierté apaisante). Ruine ×MULT (vestige durable = cible de recolonisation
+# P4.1 gratuite). Porte une DÉDICACE (dernier jalon du clan, figée à la pose). Gated _MONUMENT_ON →
+# MONUMENT_OFF = zéro planner/tirage → E2 hash exact. (MONUMENT_SCIENCE droppé : la science ne sert
+# qu'aux âges et le monument exige déjà l'âge max → bonus mort ; 5e âge en réserve P6, cf. spec §10.)
+MONUMENT_STONE     = 20        # pierre du pool clan pour le chantier
+MONUMENT_GOLD      = 4         # or prélevé au trésor d'église (Building.gold) à la pose
+MONUMENT_TENSION   = 10        # apaisement one-shot de la tension à l'achèvement (clampé ≥ 0)
+MONUMENT_RUIN_MULT = 4         # ruin_ticks ×MULT pour une ruine de monument (vestige durable)
 
 @dataclass
 class Cult:
@@ -2228,6 +2240,19 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         if _spend_pool_stone(clan_houses_t, bspec_t.stone_cost):
                             dw.wood -= bspec_t.wood_cost
                             can_build_t = True
+                elif btype_t == "monument":  # P5 E3 : 20 pierre du POOL + 4 or du TRÉSOR d'église
+                    clan_churches_t = _cb.get("church", [])
+                    if (sum(h.stone for h in clan_houses_t) >= bspec_t.stone_cost
+                            and sum(ch.gold for ch in clan_churches_t) >= MONUMENT_GOLD):
+                        if _spend_pool_stone(clan_houses_t, bspec_t.stone_cost):
+                            _need_gold = MONUMENT_GOLD   # prélève l'or au trésor (comme l'offrande C2)
+                            for ch in clan_churches_t:
+                                _take = min(ch.gold, _need_gold)
+                                ch.gold -= _take
+                                _need_gold -= _take
+                                if _need_gold == 0:
+                                    break
+                            can_build_t = True
                 elif btype_t == "forge":   # bloc B : bois d'une maison + pierre du POOL clan
                     dw = max(clan_houses_t, key=lambda b: b.wood) if clan_houses_t else None
                     if (dw and dw.wood >= bspec_t.wood_cost
@@ -2244,10 +2269,14 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                     can_build_t = True  # pas de coût en ressources
             if can_build_t:
                 entity.building_type = btype_t
-                events.append({"type": "start_site", "btype": btype_t,
-                               "x": bx_t, "y": by_t,
-                               "clan_id": entity.clan_id,
-                               "work_needed": bspec_t.build_time})
+                _ss = {"type": "start_site", "btype": btype_t,
+                       "x": bx_t, "y": by_t,
+                       "clan_id": entity.clan_id,
+                       "work_needed": bspec_t.build_time}
+                if btype_t == "monument":   # P5 E3 : dédicace figée à la POSE = dernier jalon du clan
+                    _cl = clans.get(entity.clan_id) if clans else None
+                    _ss["dedication"] = _cl.last_deed if _cl else ""
+                events.append(_ss)
             entity._build_target_type = None
             entity._build_target_x    = None
             entity._build_target_y    = None
@@ -2542,6 +2571,48 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                         entity.target_x = float(cx2); entity.target_y = float(cy2)
                         _move_toward(entity, entity.target_x, entity.target_y,
                                      _eff_speed, world)
+                        return True
+    # 4.30b MONUMENT (P5 E3) : clan de l'Âge ACIER avec une église (donc un trésor d'or), ≥2 maisons,
+    # PAS de monument vivant. Coût 20 pierre POOL + 4 or trésor, déduits à la pose (4.24). Priorité
+    # APRÈS l'église. Gated _MONUMENT_ON → MONUMENT_OFF = zéro planner/tirage → hash E2 exact.
+    if (_MONUMENT_ON and entity.spec.can_build
+            and entity.clan_id is not None
+            and entity.building_type is None
+            and entity._build_target_type is None
+            and entity.hunger < 65
+            and clans):
+        _clan_mo = clans.get(entity.clan_id)
+        if _clan_mo is not None and _clan_mo.age >= CHURCH_AGE:   # Acier (= âge des églises/or)
+            bspec_mo = BUILDING_SPECS["monument"]
+            clan_mos      = _cb.get("monument", [])       # monuments VIVANTS (une ruine a btype "ruin")
+            clan_sites_mo = _cb.get("site_monument", [])
+            clan_houses   = _cb.get("house", [])
+            clan_churches = _cb.get("church", [])
+            if (len(clan_houses) >= 2 and not clan_sites_mo
+                    and len(clan_mos) < bspec_mo.max_per_clan
+                    and sum(h.stone for h in clan_houses) >= bspec_mo.stone_cost
+                    and sum(ch.gold for ch in clan_churches) >= MONUMENT_GOLD):
+                already_planned_mo = (
+                    any(ev.get("type") == "start_site" and ev.get("btype") == "monument"
+                        and ev.get("clan_id") == entity.clan_id for ev in events)
+                    or any(e._build_target_type == "monument" and e.clan_id == entity.clan_id
+                           for e in all_entities if e.alive and e is not entity))
+                if not already_planned_mo:
+                    for _ in range(30):
+                        angle = random.uniform(0, 2 * math.pi)
+                        dist  = random.uniform(bspec_mo.min_from_fire, bspec_mo.max_from_fire)
+                        cx2 = int(_clan_mo.cx + math.cos(angle) * dist)
+                        cy2 = int(_clan_mo.cy + math.sin(angle) * dist)
+                        if not world.is_valid(cx2, cy2) or not world.is_walkable(cx2, cy2):
+                            continue
+                        if any(_dist(cx2, cy2, b.x, b.y) < bspec_mo.min_dist
+                               for b in (buildings or []) if b.btype == "monument"):
+                            continue
+                        entity._build_target_type = "monument"
+                        entity._build_target_x = float(cx2); entity._build_target_y = float(cy2)
+                        entity.state = State.BUILDING
+                        entity.target_x = float(cx2); entity.target_y = float(cy2)
+                        _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
                         return True
     # 4.3a Récolte : champ mûr (priorité élevée : affamé OU adjacent à un champ mûr)
     if _role_ok(entity.role, "farm") and entity.spec.can_build and entity.clan_id is not None:
@@ -3350,7 +3421,8 @@ class Simulation:
                         clan_id=ev["clan_id"],
                         x=ev["x"], y=ev["y"],
                         btype=f"site_{btype}",
-                        work_needed=ev["work_needed"]
+                        work_needed=ev["work_needed"],
+                        dedication=ev.get("dedication", ""),   # P5 E3 : porté au chantier monument
                     )
                     self._next_building_id += 1
                     new_this_tick.append(site)
@@ -3365,6 +3437,12 @@ class Simulation:
                 tick_events.append({"type": f"build_{real_btype}",
                                     "clan_id": b.clan_id,
                                     "x": b.x, "y": b.y})
+                if _MONUMENT_ON and real_btype == "monument":   # P5 E3 : la gloire APAISE le clan (one-shot)
+                    _cm = clans_dict.get(b.clan_id)
+                    if _cm is not None:
+                        _cm.tension = max(0, _cm.tension - MONUMENT_TENSION)
+                    tick_events.append({"type": "monument_built", "clan_id": b.clan_id,
+                                        "dedication": b.dedication})
 
         # Drain des étals de marché (D1) : les imports réintègrent les maisons
         if self.tick_count % MARKET_DRAIN_PERIOD == 0:
@@ -3486,11 +3564,12 @@ class Simulation:
             for b in self.buildings:
                 if b.clan_id not in dead_clan_ids:
                     kept.append(b)
-                elif b.btype in ("house", "mill", "well", "forge", "market", "church"):
+                elif b.btype in ("house", "mill", "well", "forge", "market", "church", "monument"):
                     ruins_per_clan[b.clan_id] = ruins_per_clan.get(b.clan_id, 0) + 1
+                    _was_monument = b.btype == "monument"   # P5 E3 : un monument hante le paysage ×MULT
                     b.btype = "ruin"
                     b.clan_id = -1            # orphelin : ne matche plus aucun clan vivant
-                    b.ruin_ticks = RUIN_LIFETIME
+                    b.ruin_ticks = RUIN_LIFETIME * (MONUMENT_RUIN_MULT if _was_monument else 1)
                     kept.append(b)
                 # feu de camp + site_* d'un clan mort → pas de ruine (effacés)
             self.buildings = kept
@@ -3949,6 +4028,7 @@ class Simulation:
                 new_cult = self._found_cult(c.id, self.tick_count)
                 c.cult_id = new_cult
                 c.cult_converted = False   # une foi neuve peut re-converger plus tard
+                c.last_deed = f"la fondation de sa foi, {self.cults[new_cult].name}"  # P5 E3 jalon
                 for o in self.clans:       # rancune avec chaque ancien co-cultiste
                     if o.id != c.id and o.cult_id == old_cult:
                         _rel_apply(self.relations, self._ally_state, self._rival_state,
@@ -4260,6 +4340,9 @@ class Simulation:
             b.clan_id = x_id; kept.append(b)      # maisons/moulins/forges/marchés → X
         self.buildings = kept
         self.clans = [c for c in self.clans if c.id != y_id]
+        _winner = next((c for c in self.clans if c.id == x_id), None)
+        if _winner is not None:   # P5 E3 : la conquête = jalon commémoré (dédicace d'un futur monument)
+            _winner.last_deed = f"sa victoire sur le clan {y_id + 1}"
         for c in self.clans:                      # tiers en guerre sur Y → paix (comme extinction D1)
             if c.war_target == y_id:
                 c.mode = "peace"; c.war_target = -1; c.mode_ticks = 0
@@ -4493,6 +4576,10 @@ class Simulation:
                 add({"t": t, "kind": "feast", "msg":
                      f"Le clan {ev['clan_id'] + 1} célèbre la fête des moissons "
                      f"({ev.get('fields', 0)} champs mûrs)"})
+            elif et == "monument_built":  # P5 E3 : monument de prestige
+                _ded = ev.get("dedication") or "sa gloire"
+                add({"t": t, "kind": "monument", "msg":
+                     f"Le clan {ev['clan_id'] + 1} érige un monument à {_ded}"})
             elif et == "clan_swarm":      # P4.1 essaimage
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
                 add({"t": t, "kind": "swarm", "msg":

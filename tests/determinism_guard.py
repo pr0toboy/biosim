@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "6f34810457686d7e9d5e377cb0b2fb2695dccfb83156c5e1c1e85cd697aa38b5"  # regold P5 E1 CULTES 2026-07-21 (ex-0e39bd4e ; wire nom du culte au BASE, pas de conversion/schisme à l'Âge Bois → pop 849 inchangée). Imputation CULTURE_OFF=1 → 0e39bd4e (HEAD pré-P5) EXACT ; CULTS_OFF idem. P5 E2 FÊTE : INCHANGÉ (3000t < 1er automne 3600t → fête dormante) ; FEAST_OFF idem.
+GOLDEN = "6f34810457686d7e9d5e377cb0b2fb2695dccfb83156c5e1c1e85cd697aa38b5"  # regold P5 E1 CULTES 2026-07-21 (ex-0e39bd4e ; wire nom du culte au BASE, pas de conversion/schisme à l'Âge Bois → pop 849 inchangée). Imputation CULTURE_OFF=1 → 0e39bd4e (HEAD pré-P5) EXACT ; CULTS_OFF idem. P5 E2 FÊTE : INCHANGÉ (3000t < 1er automne 3600t → fête dormante) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (Âge Bois, pas d'Acier ni d'église → aucun monument) ; MONUMENT_OFF idem.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "e993593ee77e4442c23b9d7ac080080dbf84db09ff107f8015bd15c3da12af94"  # regold P5 E2 FÊTE 2026-07-21 (ex-333ab386 E1 ; une fête des moissons FIRE dans la fenêtre d'automne 3600-5400 du CIV → E2 est le SEUL bloc P5 exercé par le guard, couverture déterministe acquise). Imputation FEAST_OFF → 333ab386 (E1) EXACT ; CULTURE_OFF/CULTS_OFF → 4b0c9df8 EXACT.
+GOLDEN_CIV = "114dd53371df5325614a60fc2c6551d98f58f5698b4c27447c41c0f155ca9860"  # regold P5 E3 MONUMENTS 2026-07-21 (ex-e993593e E2 ; les clans CIV Acier bâtissent des monuments → E2+E3 exercés par le guard). Imputation MONUMENT_OFF → e993593e (E2) EXACT ; FEAST_OFF → 333ab386 (E1) ; CULTURE_OFF → 4b0c9df8 (pré-P5).
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "3d70b0474c82042ec3c6ed56f066313c5a63a65b998311e582a3aa150cdd0d96"  # regold P5 E1 CULTES 2026-07-21 (ex-d9294cd1). Imputation CULTURE_OFF → d9294cd1 EXACT. P5 E2 FÊTE : INCHANGÉ (3000t < automne 3600t) ; FEAST_OFF idem.
+GOLDEN_PROD = "3d70b0474c82042ec3c6ed56f066313c5a63a65b998311e582a3aa150cdd0d96"  # regold P5 E1 CULTES 2026-07-21 (ex-d9294cd1). Imputation CULTURE_OFF → d9294cd1 EXACT. P5 E2 FÊTE : INCHANGÉ (3000t < automne 3600t) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (pas d'Acier @3000t) ; MONUMENT_OFF idem.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):

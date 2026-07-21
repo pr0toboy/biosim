@@ -1701,6 +1701,62 @@ def test_p5_feast_save_load():
     print("  test_p5_feast_save_load OK (feast_ticks/feast_year round-trip + défauts vieux save)")
 
 
+def test_p5_monument_completion_and_ruin():
+    """P5 E3 : un chantier monument terminé → bâtiment `monument` + tension −MONUMENT_TENSION +
+    event monument_built{dedication} ; un monument d'un clan ÉTEINT → ruine durable ×MONUMENT_RUIN_MULT."""
+    from engine.simulation import (Building, MONUMENT_TENSION, MONUMENT_RUIN_MULT,
+                                    RUIN_LIFETIME)
+    from engine.entities import EntityType
+    # ── Complétion + effets ──
+    sim = Simulation(World(width=90, height=70, seed=7)); sim.populate()
+    c0 = sim.clans[0]; c0.tension = 80
+    sim.buildings.append(Building(id=9000, clan_id=c0.id, x=int(c0.cx) + 3, y=int(c0.cy),
+                                  btype="site_monument", work_done=999, work_needed=1,
+                                  dedication="sa victoire sur le clan 2"))
+    data = sim.step()
+    mon = next((b for b in sim.buildings if b.id == 9000), None)
+    assert mon is not None and mon.btype == "monument", "chantier promu en monument"
+    mb = [e for e in data["events"] if e["type"] == "monument_built"]
+    assert mb and mb[0]["dedication"] == "sa victoire sur le clan 2", "event + dédicace portée"
+    assert c0.tension < 80, "tension apaisée à l'achèvement (−MONUMENT_TENSION)"
+    # ── Ruine ×MULT d'un clan éteint ──
+    sim2 = Simulation(World(width=90, height=70, seed=7)); sim2.populate()
+    c = sim2.clans[0]
+    sim2.buildings.append(Building(id=9001, clan_id=c.id, x=int(c.cx) + 2, y=int(c.cy), btype="monument"))
+    for e in sim2.entities:                       # éteindre le clan (aucun humain vivant)
+        if e.clan_id == c.id and e.etype == EntityType.HUMAN:
+            e.alive = False
+    sim2.step()
+    ruin = next((b for b in sim2.buildings if b.id == 9001), None)
+    assert ruin is not None and ruin.btype == "ruin", "monument du clan mort → ruine"
+    assert ruin.ruin_ticks >= RUIN_LIFETIME * MONUMENT_RUIN_MULT - 1, "ruine de monument durable ×MULT"
+    assert ruin.ruin_ticks > RUIN_LIFETIME, "nettement plus durable qu'une ruine ordinaire (×1)"
+    print("  test_p5_monument_completion_and_ruin OK (promotion + tension + dédicace + ruine ×4)")
+
+
+def test_p5_monument_save_load():
+    """P5 E3 : Building.dedication + Clan.last_deed survivent au save/load ; vieux save → défauts."""
+    from engine.simulation import Building
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    sim.clans[0].last_deed = "sa victoire sur le clan 3"
+    sim.buildings.append(Building(id=9002, clan_id=sim.clans[0].id, x=5, y=5,
+                                  btype="monument", dedication="sa fondation"))
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    assert sim2.clans[0].last_deed == "sa victoire sur le clan 3", "last_deed restauré"
+    mon = next((b for b in sim2.buildings if b.id == 9002), None)
+    assert mon is not None and mon.dedication == "sa fondation", "dédicace restaurée"
+    # vieux save (sans dedication / last_deed) → défauts
+    st = sim.save_state()
+    for b in st["buildings"]:
+        b.pop("dedication", None)
+    for c in st["clans"]:
+        c.pop("last_deed", None)
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st)
+    assert sim3.clans[0].last_deed == "sa fondation", "vieux save → last_deed défaut"
+    assert all(b.dedication == "" for b in sim3.buildings), "vieux save → dedication défaut"
+    print("  test_p5_monument_save_load OK (dedication/last_deed round-trip + défauts vieux save)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1809,6 +1865,8 @@ if __name__ == "__main__":
             test_p5_guardian_and_save_load,
             test_p5_feast_trigger_and_bounds,
             test_p5_feast_save_load,
+            test_p5_monument_completion_and_ruin,
+            test_p5_monument_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

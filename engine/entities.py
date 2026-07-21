@@ -180,6 +180,13 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         min_dist=6, min_from_fire=3, max_from_fire=12,
         max_per_clan=1,
     ),
+    "monument": BuildingSpec(  # bloc P5 E3 : Âge d'ACIER (age >= 3), 1/clan. Gloire du culte :
+        btype="monument",      # 20 pierre du POOL + 4 or du TRÉSOR d'église (déduits au planner,
+        wood_cost=0, stone_cost=20,   # comme l'offrande C2). Aucun bois. Chantier substantiel.
+        build_time=100, pop_bonus=0,
+        min_dist=6, min_from_fire=4, max_from_fire=12,   # près du village, VISIBLE (place de la gloire)
+        max_per_clan=1,
+    ),
 }
 
 
