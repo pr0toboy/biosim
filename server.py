@@ -305,8 +305,10 @@ async def chronicle():
 
 @app.get("/api/territory")
 async def territory():
-    """Owner-grid du territoire (T1) : int8 H×W (clan_id possédant chaque tuile, -1 =
-    sauvage/eau) encodé b64. Découplé du flux de ticks (poll léger côté front, comme la
+    """Owner-grid du territoire (T1) : int16 H×W (clan_id possédant chaque tuile, -1 =
+    sauvage/eau) encodé b64 avec son dtype (le front décode selon dtype). int16 car les
+    clan_id sont un compteur monotone non borné qui déborderait l'int8 (audit #2).
+    Découplé du flux de ticks (poll léger côté front, comme la
     chronique) → n'entre pas dans le hash déterministe. Le front mappe les valeurs vers
     les couleurs via la liste `clans` qu'il reçoit déjà à chaque tick."""
     async with state_lock:

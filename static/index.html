@@ -831,7 +831,7 @@ async function refreshChronicle() {
 setInterval(refreshChronicle, 20000);
 
 // ── Territoire (T1) : owner-grid des clans, poll léger + canvas offscreen ──────
-// Le moteur sert /api/territory (int8 H×W b64, clan_id par tuile, -1 = sauvage). On le
+// Le moteur sert /api/territory (int16 H×W b64, clan_id par tuile, -1 = sauvage). On le
 // rasterise UNE fois par poll dans un canvas 1px/tuile ; drawAll le blitte mis à l'échelle
 // (pas 35k rectangles/frame). Le territoire bouge lentement → poll espacé suffit.
 let territoryCanvas = null;   // offscreen HTMLCanvasElement (résolution = tuiles)
@@ -1124,10 +1124,16 @@ async function refreshTerritory() {
     const d = await r.json();
     if (!d.available || !d.grid) return;
     const [H, W] = d.grid.shape;
-    // b64 → octets (int8 : 0..N = clan, 255 = -1 sauvage)
     const raw = atob(d.grid.b64);
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    // Décodage selon le dtype envoyé par le serveur (audit) : le territoire est passé en int16 —
+    // 2 octets/tuile LITTLE-ENDIAN, sauvage = -1 (0xFFFF) — depuis le fix d'overflow (clan_id non
+    // borné débordait l'int8 au clan 128). Compat int8 (1 octet, 255 = sauvage) conservée.
+    const i16 = (d.grid.dtype === "int16");
+    const readVal = i16
+      ? (i) => { const v = bytes[2 * i] | (bytes[2 * i + 1] << 8); return v === 0xFFFF ? -1 : v; }
+      : (i) => { const v = bytes[i]; return v === 255 ? -1 : v; };
     // Table clan_id → rgb depuis la liste `clans` reçue au tick (couleurs cohérentes)
     const rgb = {};
     clans.forEach(c => { rgb[c.id] = _hexToRgb(c.color); });
@@ -1136,8 +1142,8 @@ async function refreshTerritory() {
     const tctx = territoryCanvas.getContext("2d");
     const img = tctx.createImageData(W, H);
     for (let i = 0; i < W * H; i++) {
-      const v = bytes[i];
-      const c = (v !== 255) ? rgb[v] : null;   // 255 = sauvage → transparent
+      const v = readVal(i);
+      const c = (v >= 0) ? rgb[v] : null;   // -1 = sauvage → transparent
       if (c) {
         img.data[i * 4] = c.r; img.data[i * 4 + 1] = c.g;
         img.data[i * 4 + 2] = c.b; img.data[i * 4 + 3] = TERRITORY_ALPHA;
