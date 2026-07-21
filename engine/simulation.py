@@ -595,6 +595,49 @@ def _dist_hitbox(entity: Entity, target: Entity) -> float:
 
 STUCK_TICKS_RESET = 25   # ticks sans déplacement avant reset de la cible
 
+# Anti-empilement (espace personnel) : la répulsion historique ne tournait QUE dans _beh_wander →
+# les humains OCCUPÉS (agriculture, coupe, chantier…) s'entassaient jusqu'à ~12 sur une tuile (bug
+# visuel révélé par les sprites nets). Cette séparation POSITIONNELLE s'applique à TOUS les humains
+# chaque tick, à très courte portée (quasi-chevauchement seulement) : elle NUDGE la position sans
+# toucher la CIBLE de travail → le regroupement au travail (à distance 0.6+) est préservé.
+_SEPARATE_ON = os.environ.get("SEPARATE_OFF") != "1"   # kill-switch d'imputation → hash pré-fix exact
+SEPARATE_DIST = 0.75     # deux humains plus proches que ça se poussent (anti-chevauchement)
+SEPARATE_PUSH = 0.5      # amplitude du nudge : assez forte pour SORTIR de la tuile partagée
+                         # (0.35 était trop faible → ils restaient empilés ; 0.5 → max ~2/tuile)
+
+def _separate_human(entity: Entity, entity_grid, all_entities, world: "World"):
+    """Écarte `entity` (humain) de ses voisins humains en quasi-chevauchement. Répulsion SOMMÉE
+    (somme des directions inverses, pondérée par la proximité) : dé-tasse les amas sans casser le
+    regroupement au travail (la cible n'est jamais touchée). Nudge de POSITION seul, déterministe
+    (positions + tie-break id pour le cas superposé, zéro RNG)."""
+    scan = (_grid_neighbors(entity_grid, entity.ix, entity.iy, reach=1)
+            if entity_grid is not None else all_entities)
+    px = py = 0.0; n = 0
+    for other in scan:
+        if other is entity or not other.alive or other.etype != EntityType.HUMAN:
+            continue
+        dx = entity.x - other.x; dy = entity.y - other.y
+        d2 = dx * dx + dy * dy
+        if d2 < SEPARATE_DIST * SEPARATE_DIST:
+            if d2 < 1e-6:   # exactement superposés : direction déterministe par id (pas de RNG)
+                ang = (entity.id & 7) * 0.7853981633974483   # id%8 × π/4
+                px += math.cos(ang); py += math.sin(ang)
+            else:
+                # pondération par la proximité (1/d) : le voisin le plus proche pèse le plus →
+                # une paire serrée se sépare franchement, un amas symétrique ne s'annule pas tout à fait.
+                d = math.sqrt(d2); w = 1.0 / d
+                px += (dx / d) * w; py += (dy / d) * w
+            n += 1
+    if not n:
+        return
+    norm = math.sqrt(px * px + py * py)
+    if norm < 1e-6:
+        return
+    nx = max(0.0, min(world.width  - 0.01, entity.x + (px / norm) * SEPARATE_PUSH))
+    ny = max(0.0, min(world.height - 0.01, entity.y + (py / norm) * SEPARATE_PUSH))
+    if world.is_walkable(int(nx), int(ny)):
+        entity.x = nx; entity.y = ny
+
 def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "World"):
     """Déplace l'entité d'un pas vers (tx, ty), sans dépasser la vitesse max.
     Si le chemin direct est bloqué (eau), glisse le long de l'obstacle.
@@ -1404,14 +1447,15 @@ def _tick_entity(entity: Entity, ctx: "_TickCtx"):
     if not world.is_walkable(entity.ix, entity.iy, spec.aquatic):
         _teleport_to_nearest_walkable(entity, world)
 
-    # ── Sous-systèmes (ordre de priorité préservé) ──────────────────────
-    if _vitals(entity, ctx):
-        return
-    if _beh_survival(entity, ctx, _cb, _eff_speed):
-        return
-    if _beh_work(entity, ctx, _cb, _eff_speed):
-        return
-    _beh_wander(entity, ctx)
+    # ── Sous-systèmes (ordre de priorité préservé — le `or` court-circuite comme les early-return) ──
+    if not (_vitals(entity, ctx)
+            or _beh_survival(entity, ctx, _cb, _eff_speed)
+            or _beh_work(entity, ctx, _cb, _eff_speed)):
+        _beh_wander(entity, ctx)
+    # Anti-empilement : espace personnel appliqué à TOUS les humains vivants, quel que soit l'état
+    # (agriculture, coupe, chantier…) → plus de tas de 12 sur une tuile. Nudge de position seul.
+    if _SEPARATE_ON and entity.alive and entity.etype == EntityType.HUMAN:
+        _separate_human(entity, entity_grid, all_entities, world)
 
 
 def _vitals(entity, ctx):
