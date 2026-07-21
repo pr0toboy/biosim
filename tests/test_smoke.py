@@ -1637,6 +1637,70 @@ def test_p5_guardian_and_save_load():
     print("  test_p5_guardian_and_save_load OK (gardien dérivé, cults round-trip, vieux save refondé)")
 
 
+def test_p5_feast_trigger_and_bounds():
+    """P5 E2 : la fête se déclenche au 1er tick d'automne (clan en paix, ≥4 champs de blé MÛRS),
+    ne consomme RIEN, 1×/an ; guerre/famine l'interrompt ; <4 mûrs ou hors automne → rien ; déterministe."""
+    from engine.simulation import (Clan, Building, get_season, TICKS_PER_SEASON,
+                                    FEAST_TICKS, FEAST_FIELDS_MIN)
+    assert FEAST_FIELDS_MIN == 4
+    autumn = 2 * TICKS_PER_SEASON            # 1er tick d'automne (SEASON_NAMES index 2)
+    assert get_season(autumn) == "autumn" and get_season(autumn - 1) != "autumn"
+    year = autumn // (4 * TICKS_PER_SEASON)
+
+    def _fields(n_ripe, n_unripe=0):
+        bs = [Building(id=i, clan_id=0, x=i, y=0, btype="wheatfield", stage=4) for i in range(n_ripe)]
+        bs += [Building(id=100 + i, clan_id=0, x=i, y=1, btype="wheatfield", stage=2) for i in range(n_unripe)]
+        return {0: {"wheatfield": bs}}
+
+    sim = Simulation(World(width=90, height=70, seed=7))
+    sim.clans = [Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=0)]   # mode="peace" par défaut
+    sim.tick_count = autumn
+    cb = _fields(4, n_unripe=1)              # 4 mûrs (+1 vert) = seuil pile
+    ev = []; sim._update_feasts(cb, ev)
+    assert sim.clans[0].feast_ticks == FEAST_TICKS, "fête lancée pour FEAST_TICKS"
+    assert sim.clans[0].feast_year == year
+    fe = [e for e in ev if e["type"] == "feast_start"]
+    assert fe and fe[0].get("fields") == 4, "event feast_start avec le compte de champs mûrs"
+    # ne CONSOMME RIEN : les champs restent stage 4
+    assert all(f.stage == 4 for f in cb[0]["wheatfield"] if f.id < 100), "champs mûrs intacts (rien consommé)"
+    # 1×/an : re-appel au même tick → décompte seulement, PAS de 2e fête
+    ev2 = []; sim._update_feasts(cb, ev2)
+    assert not [e for e in ev2 if e["type"] == "feast_start"], "pas de 2e fête la même année"
+    assert sim.clans[0].feast_ticks == FEAST_TICKS - 1, "décompte d'1 tick"
+    # guerre interrompt la fête (feast_ticks → 0, silencieux)
+    sim.clans[0].mode = "war"
+    ev3 = []; sim._update_feasts(cb, ev3)
+    assert sim.clans[0].feast_ticks == 0 and not [e for e in ev3 if e["type"] == "feast_start"], "guerre interrompt (silence)"
+    # helper de déclenchement isolé
+    def _mk(n_ripe, tick):
+        s = Simulation(World(width=90, height=70, seed=7))
+        s.clans = [Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=0)]
+        s.tick_count = tick
+        e = []; s._update_feasts(_fields(n_ripe), e)
+        return s.clans[0].feast_ticks, s.clans[0].feast_year, [x["type"] for x in e]
+    assert _mk(3, autumn) == (0, -1, []), "3 mûrs < 4 → pas de fête"
+    # hors automne (printemps, tick 0) → rien même avec la moisson
+    assert _mk(9, 0) == (0, -1, []), "hors automne → pas de fête"
+    # déterminisme : 2 setups identiques → résultat identique
+    assert _mk(6, autumn) == _mk(6, autumn), "déclenchement déterministe"
+    print("  test_p5_feast_trigger_and_bounds OK (auto+paix+≥4 champs mûrs → fête 1×/an, rien consommé, guerre interrompt)")
+
+
+def test_p5_feast_save_load():
+    """P5 E2 : feast_ticks / feast_year survivent au save/load (via asdict / Clan(**c)) ; vieux save → défauts."""
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    sim.clans[0].feast_ticks = 200; sim.clans[0].feast_year = 3
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    assert sim2.clans[0].feast_ticks == 200 and sim2.clans[0].feast_year == 3, "fête restaurée au load"
+    # vieux save (sans feast_*) → défauts (0 / -1), pas de crash
+    st = sim.save_state()
+    for c in st["clans"]:
+        c.pop("feast_ticks", None); c.pop("feast_year", None)
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st)
+    assert sim3.clans[0].feast_ticks == 0 and sim3.clans[0].feast_year == -1, "vieux save → défauts"
+    print("  test_p5_feast_save_load OK (feast_ticks/feast_year round-trip + défauts vieux save)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1743,6 +1807,8 @@ if __name__ == "__main__":
             test_p5_cult_founding_and_names_deterministic,
             test_p5_conversion_and_schism,
             test_p5_guardian_and_save_load,
+            test_p5_feast_trigger_and_bounds,
+            test_p5_feast_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

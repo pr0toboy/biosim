@@ -3199,6 +3199,9 @@ function addEvent(ev) {
   } else if (ev.type === "cult_converted") {   // P5 E1 conversion
     div.textContent = `🙏 Clan ${ev.clan_id + 1} se convertit à ${ev.name}`;
     div.style.color = "#c4b5fd";
+  } else if (ev.type === "feast_start") {      // P5 E2 fête des moissons
+    div.textContent = `🌾 Clan ${ev.clan_id + 1} célèbre la fête des moissons (${ev.fields ?? 0} champs mûrs)`;
+    div.style.color = "#fbbf24";
   } else {
     div.textContent = JSON.stringify(ev);
   }

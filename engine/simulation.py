@@ -62,6 +62,8 @@ class Clan:
     tension: int = 0           # P4 : pression interne 0-100 (coup d'État ≥70, scission ≥90)
     cult_id: int = -1          # P5 : culte du clan (-1 = aucun avant fondation)
     cult_converted: bool = False  # P5 : verrou de conversion (1× irréversible ; ré-armé par un schisme)
+    feast_ticks: int = 0       # P5 E2 : ticks de fête restants (>0 = fête en cours ; convergence + natalité×2)
+    feast_year: int = -1       # P5 E2 : dernière année où une fête a eu lieu (verrou 1×/an)
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -620,6 +622,18 @@ _HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
 CULT_CONVERT_REL = 60   # rel ≥ ce seuil (+ pop stricte) → le petit clan se convertit au culte du gros
 HOLY_REL_PENALTY = -10  # guerre sainte (cultes ≠) : pénalité relationnelle à la déclaration
 HOLY_TENSION     = 2    # guerre sainte : tension additionnelle par éval en mode war (+3 → +5)
+# Fête des moissons (E2) : au 1er tick d'automne, un clan EN PAIX avec ≥ FEAST_FIELDS_MIN champs de
+# blé MÛRS (wheatfield stage 4 = la moisson sur pied) tient une fête (1×/an). Elle ne CONSOMME rien
+# (l'abondance est la porte, pas une dépense — calibration Regigigas : le trigger pain d'origine était
+# du contenu mort, moulins Fer+ tardifs + pain mangé dès cuisson → réserve jamais ≥6 ; les champs mûrs
+# s'accumulent dès le Bronze). Pendant FEAST_TICKS : les membres CONVERGENT vers le feu (rayon
+# FEAST_RADIUS) et la natalité est facilitée (le SEUIL — cap de pop — est ×FEAST_BIRTH_MULT).
+# Guerre/famine interrompt. Zéro RNG neuf : déclenchement/convergence 100 % déterministes ; seul un
+# SEUIL change (la natalité produit alors plus de naissances via les tirages de portée DÉJÀ existants).
+FEAST_FIELDS_MIN = 4           # champs de blé mûrs (stage 4) requis pour déclencher la fête
+FEAST_TICKS      = 60 * TIME_SCALE   # durée de la fête → suit TIME_SCALE
+FEAST_RADIUS     = 8           # rayon de convergence des membres autour du feu pendant la fête
+FEAST_BIRTH_MULT = 2.0         # multiplicateur du cap de population pendant la fête (natalité facilitée)
 
 @dataclass
 class Cult:
@@ -2095,6 +2109,10 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             _clan_age = clans.get(entity.clan_id) if clans else None
             if _clan_age is not None:
                 cap += AGE_POP_BONUS * _clan_age.age   # bonus d'âge (A1)
+                # P5 E2 — Fête des moissons : natalité facilitée (le SEUIL de cap est ×MULT).
+                # Ne touche QUE ce seuil comparé à un tirage existant ; gated _FEAST_ON → transparent.
+                if _FEAST_ON and _clan_age.feast_ticks > 0:
+                    cap = int(cap * FEAST_BIRTH_MULT)
             clan_pop = ctx.clan_human_pop.get(entity.clan_id, 0)   # perf P1 (mémo par-tick)
             if clan_pop >= cap:
                 repro_allowed = False
@@ -2966,6 +2984,11 @@ def _beh_wander(entity, ctx):
             if (_WARBEH_ON and _JOBS_ON and _SOCIETY_ON
                     and entity.role == "warrior" and clan.mode == "peace"):
                 wander_r = min(wander_r, WARBAND_GUARD_R)
+            # P5 E2 — Fête : pendant la fête, TOUS les membres du clan convergent vers le feu
+            # (rayon FEAST_RADIUS) pour danser autour. Réduit juste le rayon d'errance (zéro
+            # tirage neuf, la boucle random.uniform ci-dessous est inchangée). Gated _FEAST_ON.
+            if _FEAST_ON and clan.feast_ticks > 0:
+                wander_r = min(wander_r, FEAST_RADIUS)
             for _ in range(8):
                 tx = clan.cx + random.uniform(-wander_r, wander_r)
                 ty = clan.cy + random.uniform(-wander_r, wander_r)
@@ -3275,6 +3298,8 @@ class Simulation:
         self._update_society(clan_bldg, tick_events)
         # Métiers (P1) : assignation des rôles selon la pop (déterministe, déphasé *41).
         self._update_jobs(clan_bldg, tick_events)
+        # Fête des moissons (P5 E2) : déclenchement au 1er tick d'automne + décompte (déterministe).
+        self._update_feasts(clan_bldg, tick_events)
 
         # Liste des prédateurs actifs (pour _find_predator_nearby, évite O(n²))
         active_predators = [e for e in self.entities if e.alive and e.spec.is_predator]
@@ -3847,6 +3872,43 @@ class Simulation:
                     return c.id
         return min(members, key=lambda c: (-pop.get(c.id, 0), c.id)).id   # sinon le + peuplé
 
+    def _update_feasts(self, clan_bldg: dict, tick_events: list):
+        """P5 E2 — Fête des moissons. Appelée CHAQUE tick (décompte), 100 % déterministe (zéro RNG).
+
+        Décompte : tout clan en fête voit feast_ticks décroître ; guerre/famine l'INTERROMPT (→ 0).
+        Déclenchement : PENDANT l'automne (à la 1ère fenêtre paix + moisson mûre de la saison, 1×/an et
+        par clan via le verrou feast_year), chaque clan EN PAIX dont ≥ FEAST_FIELDS_MIN champs de blé
+        sont MÛRS (stage 4 = la moisson sur pied) lance une fête de FEAST_TICKS ticks. On teste toute la
+        saison (pas le seul tick de bascule) car les champs mûrs FLUCTUENT (moissonnés) et la paix est
+        intermittente : une seule chance/an raterait presque toujours la fenêtre. La fête ne CONSOMME
+        RIEN (les champs restent stage 4 — l'abondance est la porte ; la boucle des fermiers n'est pas
+        perturbée). Effets (convergence + natalité×seuil) portés par _beh_wander et la repro, gated
+        _FEAST_ON. FEAST_OFF → no-op → HEAD."""
+        if not _FEAST_ON or not self.clans:
+            return
+        tick = self.tick_count
+        # Décompte (chaque tick) : la fête s'éteint d'elle-même à 0, ou est brisée par la guerre/famine.
+        for c in self.clans:
+            if c.feast_ticks > 0:
+                if c.mode != "peace":
+                    c.feast_ticks = 0          # guerre/famine → fin immédiate et silencieuse
+                else:
+                    c.feast_ticks -= 1
+        # Déclenchement : à N'IMPORTE QUEL tick d'automne (1ère fenêtre paix+moisson ; verrou feast_year).
+        if get_season(tick) != "autumn":
+            return
+        year = tick // (4 * TICKS_PER_SEASON)
+        for c in self.clans:
+            if c.mode != "peace" or c.feast_year == year or c.feast_ticks > 0:
+                continue
+            fields = clan_bldg.get(c.id, {}).get("wheatfield", [])
+            ripe = sum(1 for f in fields if f.stage >= 4)   # moisson sur pied (stage 4 = mûr)
+            if ripe < FEAST_FIELDS_MIN:
+                continue
+            c.feast_ticks = FEAST_TICKS          # ne consomme RIEN : les champs restent mûrs
+            c.feast_year = year
+            tick_events.append({"type": "feast_start", "clan_id": c.id, "fields": ripe})
+
     def _update_cults(self, due, pop, tick_events):
         """P5 E1 — à l'éval due : CONVERSION (1× irréversible, verrou cult_converted) puis SCHISME
         (exclusif). Conversion : un clan converge vers le culte d'un ALLIÉ plus GROS (rel ≥ 60, pop
@@ -4375,6 +4437,8 @@ class Simulation:
                 d["tension"] = c.tension
             if _CULTS_ON and c.cult_id >= 0 and c.cult_id in self.cults:   # P5 : nom du culte du clan
                 d["cult"] = self.cults[c.cult_id].name
+            if _FEAST_ON and c.feast_ticks > 0:   # P5 E2 : fête en cours (fanions + danse au feu)
+                d["feast"] = True
             out.append(d)
         return out
 
@@ -4425,6 +4489,10 @@ class Simulation:
             elif et == "cult_converted":  # P5 E1 : conversion
                 add({"t": t, "kind": "cult", "msg":
                      f"Le clan {ev['clan_id'] + 1} se convertit à {ev['name']}"})
+            elif et == "feast_start":     # P5 E2 : fête des moissons
+                add({"t": t, "kind": "feast", "msg":
+                     f"Le clan {ev['clan_id'] + 1} célèbre la fête des moissons "
+                     f"({ev.get('fields', 0)} champs mûrs)"})
             elif et == "clan_swarm":      # P4.1 essaimage
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
                 add({"t": t, "kind": "swarm", "msg":
