@@ -1757,6 +1757,57 @@ def test_p5_monument_save_load():
     print("  test_p5_monument_save_load OK (dedication/last_deed round-trip + défauts vieux save)")
 
 
+def test_p5_hero_naming_and_wire():
+    """P5 E4 : nomination (helper + voie founder via _found_clan), noms déterministes, wire `hero`, idempotence."""
+    from engine.simulation import _name_hero, _hero_name
+    from engine.entities import spawn, EntityType
+    sim = Simulation(World(width=80, height=60, seed=42)); w = sim.world
+    e = spawn(EntityType.HUMAN, 10, 10); e.clan_id = 0
+    assert e.hero_name is None and "hero" not in e.to_dict(), "pas de nom → pas de clé wire"
+    ev = []; _name_hero(e, "kills", w, ev)
+    assert e.hero_name == _hero_name(w.seed, e.id, "kills"), "nom déterministe (voie kills)"
+    assert [x for x in ev if x["type"] == "hero_named" and x["via"] == "kills"], "event hero_named"
+    assert e.to_dict()["hero"] == e.hero_name, "wire `hero` présent une fois nommé"
+    ev2 = []; _name_hero(e, "builds", w, ev2)     # déjà nommé → idempotent
+    assert not ev2 and e.hero_name == _hero_name(w.seed, e.id, "kills"), "idempotent (déjà nommé)"
+    # voie FONDATEUR (vrai chemin _found_clan)
+    sim.populate()
+    leader = next(x for x in sim.entities if x.etype == EntityType.HUMAN and x.hero_name is None)
+    ev3 = []; sim._found_clan(leader, [leader], 20, 20, tick_events=ev3)
+    assert leader.hero_name is not None, "chef fondateur nommé"
+    assert [x for x in ev3 if x["type"] == "hero_named" and x["via"] == "founder"], "event founder"
+    print("  test_p5_hero_naming_and_wire OK (kills/builds/founder, déterministe, wire, idempotent)")
+
+
+def test_p5_hero_fallen_and_save_load():
+    """P5 E4 : mort d'un héros → hero_fallen + chronique annals ; save/load compteurs+nom ; vieux save→défauts."""
+    from engine.entities import EntityType
+    sim = Simulation(World(width=80, height=60, seed=42)); sim.populate()
+    hero = next(e for e in sim.entities if e.etype == EntityType.HUMAN)
+    hero.hero_name = "Kargh le Sanglant"; hero.war_kills = 7
+    hid = hero.id
+    hero.alive = False
+    data = sim.step()
+    hf = [e for e in data["events"] if e["type"] == "hero_fallen"]
+    assert hf and hf[0]["entity_id"] == hid and hf[0]["name"] == "Kargh le Sanglant", "event hero_fallen"
+    assert any(c.get("cat") == "annals" and "Kargh" in c["msg"] for c in sim.chronicle), "chronique cat=annals"
+    # save/load compteurs + nom
+    sim2 = Simulation(World(width=80, height=60, seed=42)); sim2.populate()
+    h2 = next(e for e in sim2.entities if e.etype == EntityType.HUMAN)
+    h2.war_kills = 4; h2.built_count = 9; h2.hero_name = "Doru le Bâtisseur"
+    sim3 = Simulation(World(width=80, height=60, seed=42)); sim3.load_state(sim2.save_state())
+    r = next(e for e in sim3.entities if e.id == h2.id)
+    assert r.war_kills == 4 and r.built_count == 9 and r.hero_name == "Doru le Bâtisseur", "compteurs+nom restaurés"
+    # vieux save (sans les champs) → défauts
+    st = sim2.save_state()
+    for e in st["entities"]:
+        e.pop("war_kills", None); e.pop("built_count", None); e.pop("hero_name", None)
+    sim4 = Simulation(World(width=80, height=60, seed=42)); sim4.load_state(st)
+    r4 = next(e for e in sim4.entities if e.id == h2.id)
+    assert r4.war_kills == 0 and r4.built_count == 0 and r4.hero_name is None, "vieux save → défauts 0/0/None"
+    print("  test_p5_hero_fallen_and_save_load OK (hero_fallen+annals, compteurs+nom round-trip, défauts)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1867,6 +1918,8 @@ if __name__ == "__main__":
             test_p5_feast_save_load,
             test_p5_monument_completion_and_ruin,
             test_p5_monument_save_load,
+            test_p5_hero_naming_and_wire,
+            test_p5_hero_fallen_and_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

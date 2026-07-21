@@ -349,6 +349,7 @@ class Entity:
         "trade_ticks", "trade_good", "trade_pay",
         "pray_ticks", "blessed_ticks", "pilgrim_phase", "pilgrim_dest_cid", "pilgrim_ticks",
         "gold", "cargo_gold", "pilgrim_pay",
+        "war_kills", "built_count", "hero_name",   # P5 E4 : héros & annales
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -406,6 +407,10 @@ class Entity:
         self.fishing_rod: Optional[str] = None   # None, "fishing_rod"
         self._stuck_ticks: int = 0               # ticks consécutifs sans déplacement
         self.chop_cooldown_left: int = 0
+        # Héros & annales (P5 E4) : compteurs de gloire + nom (posé au franchissement d'un seuil)
+        self.war_kills: int = 0                  # kills de guerre infligés (nommé à HERO_KILLS)
+        self.built_count: int = 0                # bâtiments achevés en tant que finisseur (à HERO_BUILDS)
+        self.hero_name: Optional[str] = None     # None tant que pas héros ; sinon « Racine Épithète »
         self._build_target_x: Optional[float] = None   # destination planifiée pour construction
         self._build_target_y: Optional[float] = None
         self._build_target_type: Optional[str] = None
@@ -470,6 +475,8 @@ class Entity:
         d["tr"] = [round(self.traits["speed"], 3),
                    int(self.traits["vision"]),
                    round(self.traits["hunger_rate"], 4)]
+        if self.hero_name is not None:   # P5 E4 : nom de héros (posé seulement sous _HEROES_ON →
+            d["hero"] = self.hero_name   # sous HEROES_OFF/CULTURE_OFF, jamais posé → clé absente, wire exact)
         return d
 
     # ── Sérialisation d'état complet (sauvegarde/reprise) ────────────────────
@@ -513,6 +520,8 @@ class Entity:
             "pilgrim_ticks": self.pilgrim_ticks,
             "gold": self.gold, "cargo_gold": self.cargo_gold,
             "pilgrim_pay": self.pilgrim_pay,
+            "war_kills": self.war_kills, "built_count": self.built_count,
+            "hero_name": self.hero_name,   # P5 E4
         }
 
     @classmethod
@@ -563,6 +572,11 @@ class Entity:
         e.gold = d.get("gold", 0)
         e.cargo_gold = d.get("cargo_gold", 0)
         e.pilgrim_pay = d.get("pilgrim_pay", "wood" if e.pilgrim_phase else None)
+        # Héros & annales (P5 E4) — compat vieux saves : compteurs 0, pas de nom (mais un nom déjà
+        # posé SURVIT : le nom est l'état, un héros pré-save reste un héros).
+        e.war_kills = d.get("war_kills", 0)
+        e.built_count = d.get("built_count", 0)
+        e.hero_name = d.get("hero_name", None)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

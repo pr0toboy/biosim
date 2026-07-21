@@ -646,6 +646,11 @@ MONUMENT_STONE     = 20        # pierre du pool clan pour le chantier
 MONUMENT_GOLD      = 4         # or prélevé au trésor d'église (Building.gold) à la pose
 MONUMENT_TENSION   = 10        # apaisement one-shot de la tension à l'achèvement (clampé ≥ 0)
 MONUMENT_RUIN_MULT = 4         # ruin_ticks ×MULT pour une ruine de monument (vestige durable)
+# Héros & annales (E4) : une entité est NOMMÉE (au fil de l'eau, pas d'éval dédiée) dès qu'elle
+# franchit HERO_KILLS kills de guerre OU HERO_BUILDS bâtiments achevés, OU devient chef FONDATEUR.
+# Nom = _hero_name(seed, entity.id, voie) — arithmétique pure. Sa mort entre aux ANNALES (hero_fallen).
+HERO_KILLS  = 5                # kills de guerre → « le Sanglant/la Lame/… »
+HERO_BUILDS = 10               # bâtiments achevés → « le Bâtisseur/l'Architecte/… »
 
 @dataclass
 class Cult:
@@ -677,6 +682,16 @@ def _hero_name(seed: int, entity_id: int, via: str) -> str:
     h = _hash2(seed, entity_id)
     epis = _HERO_EPITHETS.get(via, _HERO_EPITHETS["kills"])
     return f"{_NAME_ROOTS[h % len(_NAME_ROOTS)]} {epis[(h >> 8) % len(epis)]}"
+
+def _name_hero(entity, via: str, world, events: list) -> None:
+    """P5 E4 — NOMME `entity` héros (voie kills/builds/founder) si pas déjà nommé. Idempotent.
+    Nom déterministe (seed, id) → stable inter-process + après load. Émet hero_named ; la chronique
+    d'annales est distillée depuis l'event (pas ici). Gated _HEROES_ON par l'appelant."""
+    if entity.hero_name is not None:
+        return
+    entity.hero_name = _hero_name(world.seed, entity.id, via)
+    events.append({"type": "hero_named", "entity_id": entity.id, "clan_id": entity.clan_id,
+                   "name": entity.hero_name, "via": via})
 
 def _separate_human(entity: Entity, entity_grid, all_entities, world: "World"):
     """Écarte `entity` (humain) de ses voisins humains en quasi-chevauchement. Répulsion SOMMÉE
@@ -1793,6 +1808,11 @@ def _beh_survival(entity, ctx, _cb, _eff_speed):
                                                "attacker_clan": entity.clan_id,
                                                "victim_clan":   e.clan_id,
                                                "x": entity.ix, "y": entity.iy})
+                                if (_HEROES_ON and entity.etype == EntityType.HUMAN
+                                        and e.etype == EntityType.HUMAN):   # P5 E4 : kill de guerre humain
+                                    entity.war_kills += 1
+                                    if entity.war_kills >= HERO_KILLS:
+                                        _name_hero(entity, "kills", world, events)
                     return True
         # S2c — Marche de guerre : le scan ci-dessus n'a engagé personne (aucun ennemi du
         # clan-cible en vision). Un warrior en guerre pas affamé CONVERGE vers le feu du clan
@@ -2099,6 +2119,11 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             entity.state = State.BUILDING
             if _dist(entity.x, entity.y, near.x, near.y) < 1.5:
                 near.work_done += 2 if (_JOBS_ON and entity.role == "builder") else 1  # bâtisseur ×2 (P1)
+                if (_HEROES_ON and entity.etype == EntityType.HUMAN
+                        and near.work_done >= near.work_needed):   # P5 E4 : le FINISSEUR gagne le crédit
+                    entity.built_count += 1
+                    if entity.built_count >= HERO_BUILDS:
+                        _name_hero(entity, "builds", world, events)
                 entity.target_x = None
                 entity.target_y = None
             else:
@@ -3548,6 +3573,12 @@ class Simulation:
         self.entities.extend(births)
 
         # Purge les morts
+        if _HEROES_ON:   # P5 E4 : un héros qui meurt entre aux ANNALES (une fois, juste avant le retrait)
+            for _e in self.entities:
+                if not _e.alive and _e.hero_name is not None:
+                    tick_events.append({"type": "hero_fallen", "entity_id": _e.id,
+                                        "clan_id": _e.clan_id, "name": _e.hero_name,
+                                        "age_seasons": int(_e.age // TICKS_PER_SEASON)})
         self.entities = [e for e in self.entities if e.alive]
 
         # Clans entièrement éteints : leurs structures durables (maison/moulin/puit)
@@ -4415,7 +4446,7 @@ class Simulation:
                                founder_clan=founder_clan, founded_tick=tick)
         return cid
 
-    def _found_clan(self, leader, members, cx, cy, cult_id=-1):
+    def _found_clan(self, leader, members, cx, cy, cult_id=-1, tick_events=None):
         """P4 §3 — fonde un clan neuf à (cx,cy) : `leader` = chef, `members` (entités) le rejoignent.
         Compteur d'id MONOTONE, couleur id%4, campfire posé. AUCUN RNG (position fournie) → le flux
         `random` global reste byte-identique. Retourne le Clan neuf (âge Bois, tension 0).
@@ -4433,6 +4464,8 @@ class Simulation:
         self.buildings.append(Building(id=self._next_building_id, clan_id=nid,
                                        x=int(cx), y=int(cy), btype="campfire"))
         self._next_building_id += 1
+        if _HEROES_ON and tick_events is not None:   # P5 E4 : le chef FONDATEUR entre dans la légende
+            _name_hero(leader, "founder", self.world, tick_events)
         return nc
 
     def _rebel_split(self, mother_id, tick_events):
@@ -4453,7 +4486,7 @@ class Simulation:
         members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
         rebels = members[:K]
         leader = rebels[0]
-        nc = self._found_clan(leader, rebels, leader.x, leader.y, cult_id=mother.cult_id)
+        nc = self._found_clan(leader, rebels, leader.x, leader.y, cult_id=mother.cult_id, tick_events=tick_events)
         mother.tension = max(0, mother.tension - 60)   # la mère respire par le départ
         _rel_apply(self.relations, self._ally_state, self._rival_state,
                    mother_id, nc.id, REL_D_REBELLION, tick_events)   # née rivale d'entrée
@@ -4488,7 +4521,7 @@ class Simulation:
             on_ruin = True
         else:
             fx, fy = leader.x, leader.y
-        nc = self._found_clan(leader, colonists, fx, fy, cult_id=mother.cult_id)
+        nc = self._found_clan(leader, colonists, fx, fy, cult_id=mother.cult_id, tick_events=tick_events)
         # Alliance d'entrée POSÉE directement (pas de _rel_apply → pas d'event clan_allies → pas de
         # mariage auto ; le mariage P3 scelle les FRANCHISSEMENTS, ici la fondation POSE l'état).
         k = _rel_key(mother_id, nc.id)
@@ -4548,8 +4581,8 @@ class Simulation:
             elif et == "clan_rivals":
                 add({"t": t, "kind": "rival", "msg":
                      f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} deviennent rivaux"})
-            elif et == "clan_absorbed":   # P3a
-                add({"t": t, "kind": "war", "msg":
+            elif et == "clan_absorbed":   # P3a — guerre gagnée = annales
+                add({"t": t, "kind": "war", "cat": "annals", "msg":
                      f"Le clan {ev['by'] + 1} conquiert le clan {ev['clan_id'] + 1} et absorbe ses {ev['members']} survivants"})
             elif et == "clan_tribute":    # P3
                 add({"t": t, "kind": "war", "msg":
@@ -4560,14 +4593,14 @@ class Simulation:
             elif et == "clan_war_aid":    # P3b
                 add({"t": t, "kind": "war", "msg":
                      f"Le clan {ev['clan_id'] + 1} entre en guerre aux côtés de son allié le clan {ev['ally'] + 1}"})
-            elif et == "clan_rebellion":  # P4 scission
-                add({"t": t, "kind": "rebellion", "msg":
+            elif et == "clan_rebellion":  # P4 scission — fondation d'un clan = annales
+                add({"t": t, "kind": "rebellion", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} éclate : {ev['members']} rebelles fondent le clan {ev['new_clan'] + 1}"})
             elif et == "clan_coup":       # P4 coup d'État
                 add({"t": t, "kind": "coup", "msg":
                      f"Un coup d'État renverse le chef du clan {ev['clan_id'] + 1}"})
-            elif et == "cult_schism":     # P5 E1 : rupture religieuse
-                add({"t": t, "kind": "cult", "msg":
+            elif et == "cult_schism":     # P5 E1 : rupture religieuse — fondation d'une foi = annales
+                add({"t": t, "kind": "cult", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} rompt avec sa foi et fonde {ev['name']}"})
             elif et == "cult_converted":  # P5 E1 : conversion
                 add({"t": t, "kind": "cult", "msg":
@@ -4578,11 +4611,21 @@ class Simulation:
                      f"({ev.get('fields', 0)} champs mûrs)"})
             elif et == "monument_built":  # P5 E3 : monument de prestige
                 _ded = ev.get("dedication") or "sa gloire"
-                add({"t": t, "kind": "monument", "msg":
+                add({"t": t, "kind": "monument", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} érige un monument à {_ded}"})
-            elif et == "clan_swarm":      # P4.1 essaimage
+            elif et == "hero_named":      # P5 E4 : une figure entre dans la légende
+                _via = {"kills": "au combat", "builds": "par ses œuvres",
+                        "founder": "en fondant son clan"}.get(ev.get("via"), "")
+                add({"t": t, "kind": "hero", "cat": "annals", "msg":
+                     f"{ev['name']} se distingue {_via} (clan {ev['clan_id'] + 1})"})
+            elif et == "hero_fallen":     # P5 E4 : mort d'un héros → annales
+                _s = ev.get("age_seasons", 0)
+                _life = f"après {_s} saison{'s' if _s > 1 else ''}" if _s >= 1 else "au terme d'une vie brève"
+                add({"t": t, "kind": "hero", "cat": "annals", "msg":
+                     f"{ev['name']}, héros du clan {ev['clan_id'] + 1}, tombe {_life}"})
+            elif et == "clan_swarm":      # P4.1 essaimage — fondation d'une colonie = annales
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
-                add({"t": t, "kind": "swarm", "msg":
+                add({"t": t, "kind": "swarm", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} essaime : une colonie s'installe {_w} (clan {ev['new_clan'] + 1})"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
