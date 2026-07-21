@@ -3193,6 +3193,12 @@ function addEvent(ev) {
     div.textContent = `🌱 Clan ${ev.clan_id + 1} essaime — colonie${ev.on_ruin ? " sur des ruines" : ""} (Clan ${ev.new_clan + 1})`;
     div.style.borderColor = clans.find(c => c.id === ev.new_clan)?.color || "#86efac";
     div.style.color = "#86efac";
+  } else if (ev.type === "cult_schism") {      // P5 E1 rupture religieuse
+    div.textContent = `⛩ Clan ${ev.clan_id + 1} rompt avec sa foi et fonde ${ev.name}`;
+    div.style.color = "#c4b5fd";
+  } else if (ev.type === "cult_converted") {   // P5 E1 conversion
+    div.textContent = `🙏 Clan ${ev.clan_id + 1} se convertit à ${ev.name}`;
+    div.style.color = "#c4b5fd";
   } else {
     div.textContent = JSON.stringify(ev);
   }
@@ -3420,10 +3426,15 @@ canvas.addEventListener("mousemove", (ev) => {
         const tensIco = tension == null ? "" : tension >= 70 ? "🔥" : tension >= 40 ? "😠" : "😌";
         const allyTxt = cn && cn.allies && cn.allies.length ? cn.allies.map(i => i + 1).join(", ") : "";
         const rivalTxt = cn && cn.rivals && cn.rivals.length ? cn.rivals.map(i => i + 1).join(", ") : "";
+        // P5 : culte du clan + guerre SAINTE (l'ennemi visé a un culte différent)
+        const cultTxt = cn && cn.cult ? cn.cult : "";
+        const enemy = (cn && cn.mode === "war" && (cn.war_target ?? -1) >= 0) ? clans.find(c => c.id === cn.war_target) : null;
+        const holy = cn && cn.cult && enemy && enemy.cult && enemy.cult !== cn.cult;
         html = `<b style="color:${cColor}">🔥 Feu de camp — ${cLabel}</b>
           <div class="tt-row"><span>Niveau</span><span>${closestB.level >= 2 ? "★ 2" : "1"}</span></div>
           <div class="tt-row"><span>🎓 Âge</span><span>${cn ? (cn.age_name ?? "Bois") : "Bois"}</span></div>
-          <div class="tt-row"><span>Gouvernement</span><span>${modeIco}${warTgt}</span></div>
+          ${cultTxt ? `<div class="tt-row"><span>⛩ Culte</span><span>${cultTxt}</span></div>` : ""}
+          <div class="tt-row"><span>Gouvernement</span><span>${modeIco}${warTgt}${holy ? " ✝ sainte" : ""}</span></div>
           ${traitTxt ? `<div class="tt-row"><span>Chef</span><span>${traitTxt}</span></div>` : ""}
           ${tension != null ? `<div class="tt-row"><span>Tension</span><span>${tensIco} ${tension}/100</span></div>` : ""}
           ${allyTxt ? `<div class="tt-row"><span>🤝 Alliés</span><span>clan ${allyTxt}</span></div>` : ""}

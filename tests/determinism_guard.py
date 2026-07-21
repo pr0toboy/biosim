@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "0e39bd4edec4a33cd6c27e5d0e51dc3f7b4e4afa1ef0079980faeff5571f15a9"  # regold FIX ANTI-EMPILEMENT 2026-07-21 (ex-ae52bd38 ; _separate_human : espace personnel des humains dans TOUS les états, plus seulement en wander → fin des tas de 30/tuile). C'est un fix de MOUVEMENT (sous toute la pile civ) → les 3 goldens changent, pop 821→849. Imputation : SEPARATE_OFF=1 → ae52bd38 (P4.1) EXACT ; les kill-switches civ (UNREST_OFF, WAR2_OFF…) isolent toujours leurs blocs mais leurs hashes absolus ont aussi glissé (séparation appliquée partout).
+GOLDEN = "6f34810457686d7e9d5e377cb0b2fb2695dccfb83156c5e1c1e85cd697aa38b5"  # regold P5 E1 CULTES 2026-07-21 (ex-0e39bd4e ; wire nom du culte au BASE, pas de conversion/schisme à l'Âge Bois → pop 849 inchangée). Imputation CULTURE_OFF=1 → 0e39bd4e (HEAD pré-P5) EXACT ; CULTS_OFF idem.
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "4b0c9df8c6b371766c6556cb853bf9b7a854294cf446f8a0377a8297c01e57b1"  # regold FIX ANTI-EMPILEMENT 2026-07-21 (ex-bb8f6bcf ; espace personnel des humains). Imputation SEPARATE_OFF=1 → bb8f6bcf (P4) EXACT. pop 1175 → 1174. — Historique : bb8f6bcf = P4 ; c7f1a860 = P3 ; acb48bcb = P2.
+GOLDEN_CIV = "333ab386977e39755a08e2eb788d3932f146fa468507868fa03d8c255649a151"  # regold P5 E1 CULTES 2026-07-21 (ex-4b0c9df8 ; conversions/schismes actifs à l'Acier). Imputation CULTURE_OFF/CULTS_OFF → 4b0c9df8 EXACT.
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "d9294cd1531590ff9a0463524bb4b4b285eadfb87e04cabdb14a92237911e571"  # regold FIX ANTI-EMPILEMENT 2026-07-21 (ex-a714cfaa ; espace personnel des humains). Imputation SEPARATE_OFF=1 → a714cfaa (P4) EXACT. pop 787 → 757. — Historique : a714cfaa = P4 ; 5ffb9432 = P3 ; e51f0ad0 = P2.
+GOLDEN_PROD = "3d70b0474c82042ec3c6ed56f066313c5a63a65b998311e582a3aa150cdd0d96"  # regold P5 E1 CULTES 2026-07-21 (ex-d9294cd1). Imputation CULTURE_OFF → d9294cd1 EXACT.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):

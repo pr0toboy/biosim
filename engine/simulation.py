@@ -60,6 +60,8 @@ class Clan:
     war_kills_for: int = 0     # P3 : kills infligés à la cible depuis la déclaration (issue de guerre)
     war_kills_against: int = 0 # P3 : pertes subies de la cible depuis la déclaration
     tension: int = 0           # P4 : pression interne 0-100 (coup d'État ≥70, scission ≥90)
+    cult_id: int = -1          # P5 : culte du clan (-1 = aucun avant fondation)
+    cult_converted: bool = False  # P5 : verrou de conversion (1× irréversible ; ré-armé par un schisme)
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -604,6 +606,51 @@ _SEPARATE_ON = os.environ.get("SEPARATE_OFF") != "1"   # kill-switch d'imputatio
 SEPARATE_DIST = 0.75     # deux humains plus proches que ça se poussent (anti-chevauchement)
 SEPARATE_PUSH = 0.5      # amplitude du nudge : assez forte pour SORTIR de la tuile partagée
                          # (0.35 était trop faible → ils restaient empilés ; 0.5 → max ~2/tuile)
+
+# ── Religion & culture (P5, chantier E) ────────────────────────────────────────────────
+# Cultes (E1), fête des moissons (E2), monuments (E3), héros & annales (E4). Kill-switch MASTER
+# CULTURE_OFF → hashes HEAD exacts (toute la culture éteinte) ; sous-switches par bloc (chacun
+# ⊂ CULTURE, convention SWARM ⊂ UNREST). AUCUN tirage `random` neuf : les NOMS sont générés par
+# arithmétique pure (hash entier), les effets probabilistes (fête) ne bougent que des SEUILS.
+_CULTURE_ON  = os.environ.get("CULTURE_OFF") != "1"
+_CULTS_ON    = _CULTURE_ON and os.environ.get("CULTS_OFF")    != "1"
+_FEAST_ON    = _CULTURE_ON and os.environ.get("FEAST_OFF")    != "1"
+_MONUMENT_ON = _CULTURE_ON and os.environ.get("MONUMENT_OFF") != "1"
+_HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
+CULT_CONVERT_REL = 60   # rel ≥ ce seuil (+ pop stricte) → le petit clan se convertit au culte du gros
+HOLY_REL_PENALTY = -10  # guerre sainte (cultes ≠) : pénalité relationnelle à la déclaration
+HOLY_TENSION     = 2    # guerre sainte : tension additionnelle par éval en mode war (+3 → +5)
+
+@dataclass
+class Cult:
+    id: int
+    name: str
+    founder_clan: int
+    founded_tick: int
+
+# Générateur de noms déterministe (zéro RNG) : hash entier de (seed, id) indexe des tables de
+# syllabes → nom stable inter-process ET après load. Deux styles (culte / héros via épithète).
+_CULT_FORMS = ["Culte de {r}", "Voie d'{r}", "Ordre de {r}", "Foi de {r}", "Communion d'{r}", "Cercle de {r}"]
+_NAME_ROOTS = ["Vornak", "Ithélis", "Karûn", "Sélene", "Drakh", "Ombrelin", "Vael", "Thoros", "Ysgar",
+               "Miréthil", "Corvak", "Nûl", "Azhen", "Brûm", "Célios", "Dûnmar", "Éphra", "Faelis",
+               "Gorlan", "Haldûr", "Ivrel", "Jorven", "Kûmara", "Lûthien", "Morvane", "Nyx", "Ophir",
+               "Pyrelis", "Quorin", "Rhael", "Sûldis", "Tûvok", "Ûrsel", "Vhalor", "Wyrn", "Xareth",
+               "Ythar", "Zûl", "Alvra", "Belok"]
+_HERO_EPITHETS = {"kills": ["le Sanglant", "la Lame", "l'Implacable", "le Boucher", "la Furie"],
+                  "builds": ["le Bâtisseur", "l'Architecte", "la Maçonne", "le Fondateur d'œuvres", "la Pilière"],
+                  "founder": ["la Fondatrice", "le Fondateur", "l'Émancipé", "la Sécessionniste", "le Rebelle"]}
+
+def _hash2(seed: int, x: int) -> int:
+    return ((seed & 0xFFFFFFFF) * 2654435761 + x * 40503) & 0xFFFFFFFF
+
+def _cult_name(seed: int, cult_id: int) -> str:
+    h = _hash2(seed, cult_id)
+    return _CULT_FORMS[h % len(_CULT_FORMS)].format(r=_NAME_ROOTS[(h >> 8) % len(_NAME_ROOTS)])
+
+def _hero_name(seed: int, entity_id: int, via: str) -> str:
+    h = _hash2(seed, entity_id)
+    epis = _HERO_EPITHETS.get(via, _HERO_EPITHETS["kills"])
+    return f"{_NAME_ROOTS[h % len(_NAME_ROOTS)]} {epis[(h >> 8) % len(epis)]}"
 
 def _separate_human(entity: Entity, entity_grid, all_entities, world: "World"):
     """Écarte `entity` (humain) de ses voisins humains en quasi-chevauchement. Répulsion SOMMÉE
@@ -2975,6 +3022,8 @@ class Simulation:
         self._ally_state: set = set()
         self._rival_state: set = set()
         self._next_clan_id: int = N_CLANS   # P4 : id monotone des clans nés (scission/essaimage)
+        self.cults: dict = {}               # P5 : registre {cult_id: Cult} (jamais purgé — l'histoire)
+        self._next_cult_id: int = 0         # P5 : id de culte monotone
         self.buildings: list[Building] = []
         self._next_building_id = 0
         self.raining: bool = False
@@ -3055,6 +3104,7 @@ class Simulation:
         self.clans = []
         self.relations = {}; self._ally_state = set(); self._rival_state = set()  # P2 : monde neuf = sans histoire
         self._next_clan_id = N_CLANS   # P4 : les 4 clans initiaux occupent 0..N_CLANS-1
+        self.cults = {}; self._next_cult_id = 0   # P5 : monde neuf = cultes refondés ci-dessous
         for cid, (cx, cy) in enumerate(clan_positions):
             # ── Chef : mâle, placé sur le campfire ──────────────────────────
             chief = spawn(EntityType.HUMAN,
@@ -3083,6 +3133,8 @@ class Simulation:
 
             self.clans.append(Clan(id=cid, cx=float(cx), cy=float(cy),
                                    color=CLAN_COLORS[cid], chief_id=chief.id))
+            if _CULTS_ON:   # P5 : chaque clan de départ fonde SON culte
+                self.clans[-1].cult_id = self._found_cult(cid, 0)
             fire = Building(id=self._next_building_id,
                             clan_id=cid,
                             x=cx, y=cy,
@@ -3661,6 +3713,10 @@ class Simulation:
                 dt = 0
                 if c.mode == "famine": dt += 8
                 elif c.mode == "war":  dt += 3
+                if (_CULTS_ON and c.mode == "war" and c.war_target >= 0 and c.cult_id >= 0):
+                    _wt = next((cc for cc in self.clans if cc.id == c.war_target), None)
+                    if _wt is not None and _wt.cult_id >= 0 and _wt.cult_id != c.cult_id:
+                        dt += HOLY_TENSION   # P5 : guerre SAINTE (cultes ≠) → haine religieuse
                 if p > cap:            dt += min(OVERPOP_TENSION_MAX, p - cap)  # overpop SCALÉ (boucle P3↔P4)
                 dt += min(OVEREXTEND_MAX, max(0, (p - OVEREXTEND_SPAN) // 10))  # surextension PERSISTANTE (span-of-control)
                 _tp = _chief_personality(c.chief_id)[0]
@@ -3736,6 +3792,7 @@ class Simulation:
             else:
                 new_mode, target = "peace", -1
             c.war_target = target
+            _holy = False
             # P2b : déclaration/retarget vers un NOUVEL ennemi → -60 sur la paire (ils deviennent rivaux).
             if _POL_ON and new_mode == "war" and target >= 0 and target != old_wt:
                 _rel_apply(self.relations, self._ally_state, self._rival_state,
@@ -3743,13 +3800,22 @@ class Simulation:
                 if _WAR2_ON:   # P3 : nouvelle déclaration → compteurs d'issue remis à zéro
                     c.war_kills_for = 0
                     c.war_kills_against = 0
+                if _CULTS_ON and c.cult_id >= 0:   # P5 : guerre SAINTE (cultes ≠) → pénalité additionnelle
+                    _tc = next((cc for cc in self.clans if cc.id == target), None)
+                    if _tc is not None and _tc.cult_id >= 0 and _tc.cult_id != c.cult_id:
+                        _holy = True
+                        _rel_apply(self.relations, self._ally_state, self._rival_state,
+                                   c.id, target, HOLY_REL_PENALTY, tick_events)
                 if _is_aid:
                     tick_events.append({"type": "clan_war_aid", "clan_id": c.id,
                                         "ally": aid_ally, "target": target})
             if new_mode != old:
                 c.mode = new_mode
                 c.mode_ticks = 0
-                tick_events.append({"type": "clan_mode", "clan_id": c.id, "mode": new_mode})
+                _ev = {"type": "clan_mode", "clan_id": c.id, "mode": new_mode}
+                if _holy:
+                    _ev["holy"] = True   # guerre sainte → bannière teintée au front
+                tick_events.append(_ev)
         # P3 — application différée (mutations de self.clans / buildings hors de la boucle de décision).
         # Absorptions d'ABORD (retirent des clans) puis tributs (skip si un clan a disparu entre-temps).
         if _WAR2_ON:
@@ -3764,6 +3830,69 @@ class Simulation:
                 self._rebel_split(mid, tick_events)
             for mid in colonies:   # P4.1 : essaimages (idem, différés)
                 self._swarm_split(mid, tick_events)
+        if _CULTS_ON:   # P5 E1 : conversion & schisme (après les mutations de clans du tick)
+            self._update_cults(due, pop, tick_events)
+
+    def _cult_guardian(self, cult_id, pop):
+        """P5 E1 — gardien d'un culte, DÉRIVÉ de l'état vivant (rien à sérialiser) : le clan
+        fondateur s'il est vivant et toujours de ce culte, sinon le plus peuplé (tie id min).
+        None si < 2 clans partagent le culte (monoclan → rien à rompre → pas de schisme)."""
+        members = [c for c in self.clans if c.cult_id == cult_id]
+        if len(members) < 2:
+            return None
+        cult = self.cults.get(cult_id)
+        if cult is not None:
+            for c in members:
+                if c.id == cult.founder_clan:   # fondateur vivant → gardien
+                    return c.id
+        return min(members, key=lambda c: (-pop.get(c.id, 0), c.id)).id   # sinon le + peuplé
+
+    def _update_cults(self, due, pop, tick_events):
+        """P5 E1 — à l'éval due : CONVERSION (1× irréversible, verrou cult_converted) puis SCHISME
+        (exclusif). Conversion : un clan converge vers le culte d'un ALLIÉ plus GROS (rel ≥ 60, pop
+        stricte >, autre culte) — verrou anti-ping-pong (triangle à 2 gros amis). Schisme : un clan
+        RIVAL du gardien de son culte fonde le sien (religion suit politique), ré-arme le verrou.
+        100 % déterministe (conditions + tie-breaks, zéro RNG). Skip les clans absorbés ce tick."""
+        alive = {c.id for c in self.clans}
+        for c in due:
+            if c.id not in alive or c.cult_id < 0:
+                continue
+            # CONVERSION (1× ; le schisme ré-arme le verrou) — candidat rel max, tie id min
+            if not c.cult_converted:
+                best = None; best_key = None
+                for o in self.clans:
+                    if o.id == c.id or o.cult_id < 0 or o.cult_id == c.cult_id:
+                        continue
+                    if pop.get(o.id, 0) <= pop.get(c.id, 0):   # pop(B) > pop(A) STRICT
+                        continue
+                    r = self.relations.get(_rel_key(c.id, o.id), 0)
+                    if r < CULT_CONVERT_REL:
+                        continue
+                    key = (-r, o.id)
+                    if best_key is None or key < best_key:
+                        best_key = key; best = o
+                if best is not None:
+                    c.cult_id = best.cult_id
+                    c.cult_converted = True
+                    _rel_apply(self.relations, self._ally_state, self._rival_state,
+                               c.id, best.id, 5, tick_events)   # la conversion rapproche
+                    tick_events.append({"type": "cult_converted", "clan_id": c.id,
+                                        "to_cult": c.cult_id, "name": self.cults[c.cult_id].name})
+                    continue   # exclusif : pas de schisme le même tick
+            # SCHISME (exclusif, après conversion) : rival du gardien de son culte
+            guardian = self._cult_guardian(c.cult_id, pop)
+            if (guardian is not None and guardian != c.id
+                    and _rel_key(c.id, guardian) in self._rival_state):
+                old_cult = c.cult_id
+                new_cult = self._found_cult(c.id, self.tick_count)
+                c.cult_id = new_cult
+                c.cult_converted = False   # une foi neuve peut re-converger plus tard
+                for o in self.clans:       # rancune avec chaque ancien co-cultiste
+                    if o.id != c.id and o.cult_id == old_cult:
+                        _rel_apply(self.relations, self._ally_state, self._rival_state,
+                                   c.id, o.id, -10, tick_events)
+                tick_events.append({"type": "cult_schism", "clan_id": c.id, "old_cult": old_cult,
+                                    "new_cult": new_cult, "name": self.cults[new_cult].name})
 
     def _dispatch_caravans(self, clan_bldg: dict, tick_events: list):
         """D2 : rafraîchit les BOARDS de cours (affiché = négocié) puis évalue les
@@ -4133,14 +4262,26 @@ class Simulation:
         clan.tension = max(0, clan.tension - 40)
         tick_events.append({"type": "clan_coup", "clan_id": clan.id, "chief_id": young.id})
 
-    def _found_clan(self, leader, members, cx, cy):
+    def _found_cult(self, founder_clan, tick):
+        """P5 — enregistre un culte neuf (fondation initiale ou schisme). Nom déterministe."""
+        cid = self._next_cult_id
+        self._next_cult_id += 1
+        self.cults[cid] = Cult(id=cid, name=_cult_name(self.world.seed, cid),
+                               founder_clan=founder_clan, founded_tick=tick)
+        return cid
+
+    def _found_clan(self, leader, members, cx, cy, cult_id=-1):
         """P4 §3 — fonde un clan neuf à (cx,cy) : `leader` = chef, `members` (entités) le rejoignent.
         Compteur d'id MONOTONE, couleur id%4, campfire posé. AUCUN RNG (position fournie) → le flux
-        `random` global reste byte-identique. Retourne le Clan neuf (âge Bois, tension 0)."""
+        `random` global reste byte-identique. Retourne le Clan neuf (âge Bois, tension 0).
+        P5 : `cult_id` = culte HÉRITÉ de la mère (scission/colonie gardent la foi ; rupture religieuse
+        = le schisme, distinct de la rupture politique)."""
         nid = self._next_clan_id
         self._next_clan_id += 1
         nc = Clan(id=nid, cx=float(cx), cy=float(cy),
                   color=CLAN_COLORS[nid % len(CLAN_COLORS)], chief_id=leader.id)
+        if _CULTS_ON:
+            nc.cult_id = cult_id
         self.clans.append(nc)
         for e in members:
             e.clan_id = nid                       # gardent leur rôle jusqu'au prochain _update_jobs
@@ -4167,7 +4308,7 @@ class Simulation:
         members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
         rebels = members[:K]
         leader = rebels[0]
-        nc = self._found_clan(leader, rebels, leader.x, leader.y)
+        nc = self._found_clan(leader, rebels, leader.x, leader.y, cult_id=mother.cult_id)
         mother.tension = max(0, mother.tension - 60)   # la mère respire par le départ
         _rel_apply(self.relations, self._ally_state, self._rival_state,
                    mother_id, nc.id, REL_D_REBELLION, tick_events)   # née rivale d'entrée
@@ -4202,7 +4343,7 @@ class Simulation:
             on_ruin = True
         else:
             fx, fy = leader.x, leader.y
-        nc = self._found_clan(leader, colonists, fx, fy)
+        nc = self._found_clan(leader, colonists, fx, fy, cult_id=mother.cult_id)
         # Alliance d'entrée POSÉE directement (pas de _rel_apply → pas d'event clan_allies → pas de
         # mariage auto ; le mariage P3 scelle les FRANCHISSEMENTS, ici la fondation POSE l'état).
         k = _rel_key(mother_id, nc.id)
@@ -4232,6 +4373,8 @@ class Simulation:
                     d["rivals"] = rivals
             if _UNREST_ON:   # P4 : jauge de tension (discipline golden : clé présente seulement sous ON)
                 d["tension"] = c.tension
+            if _CULTS_ON and c.cult_id >= 0 and c.cult_id in self.cults:   # P5 : nom du culte du clan
+                d["cult"] = self.cults[c.cult_id].name
             out.append(d)
         return out
 
@@ -4276,6 +4419,12 @@ class Simulation:
             elif et == "clan_coup":       # P4 coup d'État
                 add({"t": t, "kind": "coup", "msg":
                      f"Un coup d'État renverse le chef du clan {ev['clan_id'] + 1}"})
+            elif et == "cult_schism":     # P5 E1 : rupture religieuse
+                add({"t": t, "kind": "cult", "msg":
+                     f"Le clan {ev['clan_id'] + 1} rompt avec sa foi et fonde {ev['name']}"})
+            elif et == "cult_converted":  # P5 E1 : conversion
+                add({"t": t, "kind": "cult", "msg":
+                     f"Le clan {ev['clan_id'] + 1} se convertit à {ev['name']}"})
             elif et == "clan_swarm":      # P4.1 essaimage
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
                 add({"t": t, "kind": "swarm", "msg":
@@ -4444,6 +4593,10 @@ class Simulation:
             "ally_state":  sorted([a, b] for (a, b) in self._ally_state),
             "rival_state": sorted([a, b] for (a, b) in self._rival_state),
             "next_clan_id": self._next_clan_id,   # P4 : compteur monotone (asdict n'atteint pas les attrs Simulation)
+            # Cultes (P5) : registre trié + compteur (jamais purgé). Clan.cult_id/cult_converted via asdict.
+            "cults": [[c.id, c.name, c.founder_clan, c.founded_tick]
+                      for c in sorted(self.cults.values(), key=lambda x: x.id)],
+            "next_cult_id": self._next_cult_id,
         }
 
     def load_state(self, d: dict):
@@ -4496,6 +4649,19 @@ class Simulation:
             # P4 : compteur d'id de clans. Vieux save (absent) → max(ids)+1 pour rester monotone.
             next_clan_id    = d.get("next_clan_id",
                                     (max((c.id for c in clans), default=N_CLANS - 1) + 1))
+            # Cultes (P5) : registre restauré, sinon vieux save → refondation À FROID (1 culte/clan,
+            # ids = ordre des clans triés, noms régénérés depuis le seed → identiques à un run frais).
+            if "cults" in d:
+                cults = {cid: Cult(id=cid, name=name, founder_clan=fc, founded_tick=ft)
+                         for cid, name, fc, ft in d["cults"]}
+                next_cult_id = d.get("next_cult_id", (max(cults, default=-1) + 1))
+            else:
+                cults = {}
+                for _i, _c in enumerate(sorted(clans, key=lambda x: x.id)):
+                    cults[_i] = Cult(id=_i, name=_cult_name(world.seed, _i),
+                                     founder_clan=_c.id, founded_tick=0)
+                    _c.cult_id = _i; _c.cult_converted = False
+                next_cult_id = len(clans)
             # États RNG : construire PUIS les valider par un DRY-RUN sur des générateurs
             # JETABLES (gate F2). setstate/set_state rejettent une longueur/version invalide que
             # la simple construction du tuple ne détecte pas ; sans ce dry-run, l'échec surviendrait
@@ -4533,6 +4699,8 @@ class Simulation:
         self._ally_state = ally_state
         self._rival_state = rival_state
         self._next_clan_id = next_clan_id
+        self.cults = cults
+        self._next_cult_id = next_cult_id
         # World.from_state a re-seedé random/np dans __init__ → on restaure les RNG
         # en DERNIER, sinon la reprise repartirait sur le flux de la génération initiale.
         random.setstate(py_rng_state)

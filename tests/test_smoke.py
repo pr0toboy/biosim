@@ -1572,6 +1572,71 @@ def test_p4_found_clan_deterministic():
     print("  test_p4_found_clan_deterministic OK (id/couleur/position stables, compteur ++)")
 
 
+def test_p5_cult_founding_and_names_deterministic():
+    """P5 E1 : populate fonde 1 culte/clan ; noms déterministes (2 process → mêmes noms)."""
+    from engine.simulation import _cult_name
+    sim = Simulation(World(width=90, height=70, seed=333)); sim.populate()
+    assert all(c.cult_id >= 0 for c in sim.clans), "chaque clan fonde son culte"
+    assert len(set(c.cult_id for c in sim.clans)) == len(sim.clans), "cultes initiaux distincts"
+    # nom déterministe = pure fonction (seed, cult_id)
+    assert sim.cults[0].name == _cult_name(sim.world.seed, 0)
+    sim2 = Simulation(World(width=90, height=70, seed=333)); sim2.populate()
+    assert [sim.cults[i].name for i in sim.cults] == [sim2.cults[i].name for i in sim2.cults]
+    print("  test_p5_cult_founding_and_names_deterministic OK (1 culte/clan, noms stables)")
+
+
+def test_p5_conversion_and_schism():
+    """P5 E1 : conversion (petit → culte du gros, rel≥60, verrou 1×) ; schisme (rival du gardien)."""
+    from engine.simulation import Clan, Cult, CULT_CONVERT_REL, _rel_key
+    sim = Simulation(World(width=90, height=70, seed=7))
+    # 2 clans, cultes distincts, A petit (pop 3) / B gros (pop 8), rel 60
+    sim.clans = [Clan(id=0, cx=10.0, cy=10.0, color="#f00", chief_id=0, cult_id=0),
+                 Clan(id=1, cx=30.0, cy=10.0, color="#00f", chief_id=1, cult_id=1)]
+    sim.cults = {0: Cult(0, "Foi A", 0, 0), 1: Cult(1, "Foi B", 1, 0)}; sim._next_cult_id = 2
+    sim.relations = {(0, 1): CULT_CONVERT_REL}; sim._ally_state = {(0, 1)}
+    pop = {0: 3, 1: 8}
+    ev = []
+    sim._update_cults([sim.clans[0]], pop, ev)   # A(petit) due
+    assert sim.clans[0].cult_id == 1 and sim.clans[0].cult_converted, "A converti au culte de B"
+    assert [e for e in ev if e["type"] == "cult_converted"], "event conversion"
+    # rel 59 → pas de conversion (nouveau clan C)
+    sim.clans.append(Clan(id=2, cx=50.0, cy=10.0, color="#0f0", chief_id=2, cult_id=1))
+    sim.relations[(1, 2)] = 59
+    ev2 = []; sim._update_cults([sim.clans[2]], {0: 3, 1: 8, 2: 2}, ev2)
+    assert not [e for e in ev2 if e["type"] == "cult_converted"], "rel 59 < 60 → pas de conversion"
+    # SCHISME : D rival du gardien de son culte
+    sim.clans.append(Clan(id=3, cx=70.0, cy=10.0, color="#ff0", chief_id=3, cult_id=1))
+    sim._rival_state = {(1, 3)}   # D rival du fondateur/gardien (clan 1) de son culte
+    ev3 = []; sim._update_cults([sim.clans[3]], {0: 3, 1: 8, 2: 2, 3: 5}, ev3)
+    s = [e for e in ev3 if e["type"] == "cult_schism"]
+    assert s and sim.clans[3].cult_id not in (1,) and not sim.clans[3].cult_converted, "schisme : D fonde son culte, verrou ré-armé"
+    print("  test_p5_conversion_and_schism OK (conversion verrou, seuil 60, schisme rival du gardien)")
+
+
+def test_p5_guardian_and_save_load():
+    """P5 E1 : gardien dérivé (fondateur vivant sinon +peuplé) ; cults round-trip + vieux save refondé."""
+    from engine.simulation import Clan, Cult
+    sim = Simulation(World(width=90, height=70, seed=7))
+    sim.clans = [Clan(id=0, cx=0., cy=0., color="#f00", chief_id=0, cult_id=5),
+                 Clan(id=1, cx=0., cy=0., color="#00f", chief_id=1, cult_id=5)]
+    sim.cults = {5: Cult(5, "X", founder_clan=0, founded_tick=0)}
+    assert sim._cult_guardian(5, {0: 2, 1: 9}) == 0, "fondateur vivant = gardien"
+    # fondateur (clan 0) éteint → le + peuplé (clan 1)
+    sim.clans = [c for c in sim.clans if c.id != 0]
+    assert sim._cult_guardian(5, {1: 9}) is None, "1 seul clan du culte → pas de gardien (pas de schisme)"
+    # save/load round-trip du registre
+    sim2 = Simulation(World(width=90, height=70, seed=7)); sim2.populate()
+    sim2.cults[0].name = "Culte Test"; sim2._next_cult_id = 42
+    sim3 = Simulation(World(width=90, height=70, seed=7)); sim3.load_state(sim2.save_state())
+    assert sim3.cults[0].name == "Culte Test" and sim3._next_cult_id == 42
+    # vieux save (sans cults) → refondation à froid déterministe
+    st = sim2.save_state(); del st["cults"]; del st["next_cult_id"]
+    for c in st["clans"]: c.pop("cult_id", None); c.pop("cult_converted", None)
+    sim4 = Simulation(World(width=90, height=70, seed=7)); sim4.load_state(st)
+    assert len(sim4.cults) == len(sim4.clans) and all(c.cult_id >= 0 for c in sim4.clans)
+    print("  test_p5_guardian_and_save_load OK (gardien dérivé, cults round-trip, vieux save refondé)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1675,6 +1740,9 @@ if __name__ == "__main__":
             test_p41_swarm_recolonizes_ruin,
             test_p4_save_load_tension_counter,
             test_audit_ally_hysteresis_survives_save_load,
+            test_p5_cult_founding_and_names_deterministic,
+            test_p5_conversion_and_schism,
+            test_p5_guardian_and_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
