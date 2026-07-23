@@ -1834,6 +1834,30 @@ def test_p6_f1_money_dawn_and_save_load():
     print("  test_p6_f1_money_dawn_and_save_load OK (money_dawn flag+annale, gold_dest round-trip, défauts)")
 
 
+def test_p6_f1_gold_leak_refund():
+    """P6 F1 (correctif fuite) : une pièce d'or INVENDUE (refus/timeout) est re-créditée au coffre
+    du marché maison (cap → dorure église), repli au trésor si marché disparu ; _clear_trade nettoie
+    cargo_gold en dernier filet → aucune pièce fantôme, atomicité préservée (finding Regigigas T7/T8)."""
+    from engine.simulation import _refund_cargo_gold, _clear_trade, Building, MARKET_GOLD_MAX
+    from engine.entities import spawn, EntityType
+    # marché présent : coffre + cap → débordement en dorure d'église
+    e = spawn(EntityType.HUMAN, 5, 5); e.cargo_gold = 3
+    mkt = Building(id=1, clan_id=0, x=1, y=1, btype="market", gold=7)
+    ch = Building(id=2, clan_id=0, x=2, y=2, btype="church", gold=0, gilt=0)
+    _refund_cargo_gold(e, {"market": [mkt], "church": [ch]})
+    assert mkt.gold == MARKET_GOLD_MAX and ch.gilt == 2 and e.cargo_gold == 0, "refund marché cap(8)→dorure(2)"
+    # marché disparu → repli au trésor de l'église
+    e2 = spawn(EntityType.HUMAN, 5, 5); e2.cargo_gold = 1
+    ch2 = Building(id=3, clan_id=0, x=2, y=2, btype="church", gold=1, gilt=0)
+    _refund_cargo_gold(e2, {"church": [ch2]})
+    assert ch2.gold == 2 and e2.cargo_gold == 0, "refund repli trésor église (marché disparu)"
+    # _clear_trade nettoie cargo_gold (dernier filet, après un éventuel refund)
+    e3 = spawn(EntityType.HUMAN, 5, 5); e3.cargo_gold = 1; e3.trade_phase = "home"
+    _clear_trade(e3)
+    assert e3.cargo_gold == 0 and e3.trade_phase is None, "_clear_trade dernier filet cargo_gold"
+    print("  test_p6_f1_gold_leak_refund OK (refund marché/église, cap→dorure, _clear_trade net)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1947,6 +1971,7 @@ if __name__ == "__main__":
             test_p5_hero_naming_and_wire,
             test_p5_hero_fallen_and_save_load,
             test_p6_f1_money_dawn_and_save_load,
+            test_p6_f1_gold_leak_refund,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

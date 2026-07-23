@@ -1153,6 +1153,31 @@ def _add_pool_stone(houses, n: int):
         houses[0].stone += n
 
 
+def _refund_cargo_gold(entity: Entity, _cb: dict) -> None:
+    """P6 F1 : re-crédite une pièce d'or INVENDUE (refus/timeout) au coffre du MARCHÉ maison
+    (cap MARKET_GOLD_MAX → dorure de l'église maison), repli au TRÉSOR de l'église si le marché a
+    disparu, sinon perte BORNÉE (1 pièce). Symétrique du re-crédit bois/pierre invendu → aucune fuite,
+    l'atomicité est préservée. À appeler AVANT _clear_trade. No-op si pas de pièce (sous MONEY_OFF)."""
+    if not entity.cargo_gold:
+        return
+    _mk = _cb.get("market", [])
+    if _mk:
+        _g = _mk[0].gold + entity.cargo_gold
+        _mk[0].gold = min(MARKET_GOLD_MAX, _g)
+        _spill = _g - _mk[0].gold
+        if _spill:
+            _ch = _cb.get("church", [])
+            if _ch:
+                _ch[0].gilt += _spill
+    else:                                    # marché disparu → repli au trésor de l'église
+        _ch = _cb.get("church", [])
+        if _ch:
+            _g = _ch[0].gold + entity.cargo_gold
+            _ch[0].gold = min(GOLD_TREASURY_MAX, _g)
+            _ch[0].gilt += _g - _ch[0].gold
+    entity.cargo_gold = 0
+
+
 def _clear_trade(entity: Entity):
     """Efface proprement une mission caravane (D1)."""
     entity.trade_phase = None
@@ -1161,6 +1186,7 @@ def _clear_trade(entity: Entity):
     entity.cargo_wood = 0
     entity.cargo_stone = 0
     entity.cargo_iron = 0
+    entity.cargo_gold = 0    # P6 F1 : dernier filet (les chemins d'échec re-créditent AVANT via _refund_cargo_gold)
     entity.trade_good = None
     entity.trade_pay = None
 
@@ -1185,6 +1211,7 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
                            if f.iron < FORGE_MAX_IRON), None)
                 if _f is not None:
                     _f.iron = min(FORGE_MAX_IRON, _f.iron + entity.cargo_iron)
+        _refund_cargo_gold(entity, _cb)   # F1 : la pièce invendue rentre au coffre maison (pas de fuite)
         events.append({"type": "trade_aborted", "clan_id": entity.clan_id})
         _clear_trade(entity)
         return False
@@ -1295,6 +1322,7 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
                                if f.iron < FORGE_MAX_IRON), None)
                     if _f is not None:
                         _f.iron = min(FORGE_MAX_IRON, _f.iron + entity.cargo_iron)
+            _refund_cargo_gold(entity, _cb)   # F1 : pièce invendue → trésor église (marché disparu)
             _clear_trade(entity)
             return False
         mkt = mkts[0]
@@ -1302,6 +1330,7 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
             mkt.stone = min(MARKET_MAX_STOCK, mkt.stone + entity.cargo_stone)
             mkt.wood = min(MARKET_MAX_STOCK, mkt.wood + entity.cargo_wood)  # invendu visible
             mkt.iron = min(MARKET_MAX_STOCK, mkt.iron + entity.cargo_iron)  # étal fer (D2)
+            _refund_cargo_gold(entity, _cb)   # F1 : pièce invendue (refus) → coffre du marché maison
             events.append({"type": "trade_complete", "clan_id": entity.clan_id,
                            "dest_clan_id": entity.trade_dest_cid,
                            "good": entity.trade_good,
