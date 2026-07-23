@@ -414,6 +414,9 @@ const BLENDS_SPRITE = { img: new Image(), src: "/static/refonte/blends.png" };
 
 // Sprite feu de camp (centre de clan)
 const CAMPFIRE_SPRITE = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/campfire.png", col: 0, row: 0, size: 16 };
+// Monument de prestige (P5 E3) — planche Regigigas 80x32 : 5 col 16x32 (col0 neutre + Cyan/Lime/
+// Purple/Red = CLAN_COLORS), ANCRAGE BAS (rangée 31 = sol de la tuile b.y). Statue du héros.
+const MONUMENT_SPRITE = { img: new Image(), src: "/static/refonte/monument_statue.png" };
 // Sprite maison (bâtiment construit)
 const HOUSE_SPRITE          = { img: new Image(), src: "/static/MiniWorldSprites/Buildings/Wood/Houses.png", col: 1, row: 1, size: 16 };
 const HOUSE_L2_SPRITE       = { img: HOUSE_SPRITE.img, col: 1, row: 3, size: 16 };
@@ -510,7 +513,7 @@ function loadAllSprites() {
     ...Object.values(BIOME_SPRITES).flatMap(sp => sp.overlay ? (Array.isArray(sp.overlay) ? sp.overlay : [sp.overlay]) : []),
     ...Object.values(ENTITY_SPRITES),
     ...Object.values(TREE_SPRITES),
-    CLIFF_SPRITE, CLIFF_HIGH_SPRITE, GRAVEL_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
+    CLIFF_SPRITE, CLIFF_HIGH_SPRITE, GRAVEL_SPRITE, PALM_SPRITE, DEEPS_SPRITE, BLENDS_SPRITE, CAMPFIRE_SPRITE, MONUMENT_SPRITE, HOUSE_SPRITE, BOX_SELECTOR_SPRITE,
     ...CLAN_FARMER_SPRITES, ...CLAN_HUT_SPRITES,   // fermiers + huttes colorés par clan (nº22)
     ...Object.values(CLAN_ROLE_SPRITES).flat(),     // sprites par métier V9 (8 rôles × 4 clans)
     // src OBLIGATOIRE ici : le loader fait `sp.img.src = sp.src` inconditionnellement →
@@ -872,7 +875,7 @@ const SHADOW_ALPHA = 0.24;
 const SHADOW_COLOR = "#1a2e1a"; // vert très sombre (soleil plein nord, comme le template)
 // Seuls les bâtiments VOLUMÉTRIQUES projettent une assise ; wheatfield (cultures) et ruin
 // (gravats) sont à plat → pas d'ombre portée, campfire a son propre halo (nº10).
-const SHADOW_SOLID_BTYPE = { house: 1, mill: 1, well: 1, church: 1, forge: 1, market: 1 };
+const SHADOW_SOLID_BTYPE = { house: 1, mill: 1, well: 1, church: 1, forge: 1, market: 1, monument: 1 };
 
 // ── Canopée (refonte nº7) — arbres 32 px dessinés APRÈS les entités (look WorldBox) ──
 // TREES : liste plate reconstruite quand le monde/les biomes changent. Chaque arbre porte
@@ -2568,6 +2571,66 @@ function drawAll() {
   drawWeatherSky(ctx);
 }
 
+// Fête des moissons (P5 E2) — rendu DESSINÉ PAR REGIGIGAS (params exacts : positions/couleurs/
+// périodes ; je ne fais que les câbler). Actif quand le clan du feu a le flag wire `feast`. Toutes
+// les cotes en unités tuile T, centre = centre de la tuile campfire, t en secondes. Respecte
+// prefers-reduced-motion (halo fixe, pas d'oscillation ni d'étincelles).
+const FEAST_REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+function drawFeast(ctx, T, b, clanCol, now) {
+  const t = now / 1000;
+  const fx = (b.x + 0.5) * T, fy = (b.y + 0.5) * T;                 // centre du feu
+  // HALO radial chaud qui respire
+  const a = FEAST_REDUCED ? 0.26 : 0.20 + 0.09 * Math.sin(2.1 * t);
+  const g = ctx.createRadialGradient(fx, fy, 0, fx, fy, 1.9 * T);
+  g.addColorStop(0,    `rgba(251,191,36,${(a + 0.22).toFixed(3)})`);
+  g.addColorStop(0.55, `rgba(251,146,60,${a.toFixed(3)})`);
+  g.addColorStop(1,    "rgba(251,146,60,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(fx, fy, 1.9 * T, 0, Math.PI * 2); ctx.fill();
+  // MÂTS ×3 (offset du PIED depuis le feu), fût bois 2 tons + contour + pommeau or
+  const masts = [[-2.1, -0.95], [2.1, -1.1], [0, -1.66]], H = 0.72 * T;
+  const tops = masts.map(([ox, oy]) => ({ x: fx + ox * T, y: fy + oy * T - H, by: fy + oy * T }));
+  tops.forEach(top => {
+    ctx.lineCap = "round";
+    ctx.lineWidth = 0.075 * T; ctx.strokeStyle = "#373737";        // contour
+    ctx.beginPath(); ctx.moveTo(top.x, top.by); ctx.lineTo(top.x, top.y); ctx.stroke();
+    ctx.lineWidth = 0.05 * T;  ctx.strokeStyle = "#93674d";        // fût foncé
+    ctx.beginPath(); ctx.moveTo(top.x, top.by); ctx.lineTo(top.x, top.y); ctx.stroke();
+    ctx.lineWidth = 0.02 * T;  ctx.strokeStyle = "#d3a061";        // arête claire
+    ctx.beginPath(); ctx.moveTo(top.x - 0.012 * T, top.by); ctx.lineTo(top.x - 0.012 * T, top.y); ctx.stroke();
+    ctx.fillStyle = "#ebbb00";                                     // pommeau or
+    ctx.beginPath(); ctx.arc(top.x, top.y, 0.045 * T, 0, Math.PI * 2); ctx.fill();
+  });
+  // GUIRLANDES ×2 (mât gauche→central, central→droit), 7 fanions triangulaires par guirlande
+  const cols = [clanCol, "#ebbb00", "#f3f4f6"];
+  [[0, 2, 0], [2, 1, 2.1]].forEach(([ia, ib, seed]) => {
+    const p0 = tops[ia], p1 = tops[ib], midx = (p0.x + p1.x) / 2;
+    const sag = Math.max(p0.y, p1.y) + 0.33 * T + (FEAST_REDUCED ? 0 : 0.04 * T * Math.sin(0.8 * t + seed));
+    ctx.strokeStyle = "rgba(60,50,40,0.6)"; ctx.lineWidth = Math.max(1, 0.02 * T);
+    ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.quadraticCurveTo(midx, sag, p1.x, p1.y); ctx.stroke();
+    for (let i = 1; i <= 7; i++) {
+      const u = i / 8, iu = 1 - u;
+      const qx = iu * iu * p0.x + 2 * iu * u * midx + u * u * p1.x;
+      const qy = iu * iu * p0.y + 2 * iu * u * sag  + u * u * p1.y;
+      const tip = FEAST_REDUCED ? 0 : 0.025 * T * Math.sin(2.2 * t + 1.7 * i + seed);
+      ctx.fillStyle = cols[(i - 1) % 3];
+      ctx.beginPath();
+      ctx.moveTo(qx - 0.0625 * T, qy); ctx.lineTo(qx + 0.0625 * T, qy);
+      ctx.lineTo(qx + tip, qy + 0.14 * T); ctx.closePath(); ctx.fill();
+    }
+  });
+  // ÉTINCELLES montantes (omises en reduced-motion)
+  if (!FEAST_REDUCED) {
+    for (let i = 0; i < 14; i++) {
+      const u = (0.16 * t + i / 14) % 1;
+      const off = (-0.27 + 0.54 * (((i * 5 + 2) % 14) / 13)) * T;   // offset fixe par particule
+      const sx = fx + off * (0.4 + u), sy = fy - 0.1 * T - 1.2 * T * u;
+      ctx.fillStyle = `rgba(253,224,71,${((1 - u) * 0.8).toFixed(3)})`;
+      ctx.fillRect(sx - 0.02 * T, sy - 0.02 * T, 0.04 * T, 0.04 * T);
+    }
+  }
+}
+
 // Vie des bâtiments (refonte nº20) : effets procéduraux par-dessus les sprites (aucun asset
 // neuf). Fumée de cheminée + fanion de clan sur les maisons, ailes tournantes des moulins,
 // braise+étincelles des forges. Lit `buildings` moteur → hash-neutre.
@@ -2613,6 +2676,9 @@ function drawBuildingFx(ctx, T) {
         ctx.fillStyle = `rgba(255,${Math.round(200 - ph * 120)},60,${(1 - ph).toFixed(3)})`;
         ctx.fillRect(Math.round(cx + (s - 1) * 3 * ph), Math.round(cy - ph * T * 0.8), 1, 1);
       }
+    } else if (b.btype === "campfire") {                // P5 E2 : fête si le clan festoie (flag wire feast)
+      const cl = clans.find(c => c.id === b.clan_id);
+      if (cl && cl.feast) drawFeast(ctx, T, b, clanColor(b.clan_id), now);
     }
   });
 }
@@ -2824,6 +2890,14 @@ function drawBuildings(c, T) {
         c.fillStyle = "#cbd5e1";
         c.fillText(`⛓${b.iron}`, (b.x + 0.5) * T, b.y * T - 1);
       }
+    } else if (b.btype === "monument") {
+      // Monument de prestige (P5 E3) — planche Regigigas « statue du héros ». Colonne = couleur du
+      // clan (col0 neutre, cols 1-4 = CLAN_COLORS via ((clan_id-1)%4+4)%4). ANCRAGE BAS : la source
+      // 16x32 se pose de (b.y-1)*T sur 2*T de haut → emprise tuile b.y + débord 1 tuile au-dessus
+      // (comme la croix d'église ; les entités passent dessous, cohérent).
+      if (!MONUMENT_SPRITE.img.complete || !MONUMENT_SPRITE.img.naturalWidth) return;
+      const mcol = b.clan_id != null ? 1 + (((b.clan_id - 1) % 4 + 4) % 4) : 0;
+      c.drawImage(MONUMENT_SPRITE.img, mcol * 16, 0, 16, 32, b.x * T, (b.y - 1) * T, T, 2 * T);
     } else if (b.btype === "ruin") {
       // Ruine d'un clan éteint (E8) : gravats gris, s'estompent en fin de vie.
       const life = Math.max(0, Math.min(1, (b.ruin_ticks ?? 2500) / 2500));
