@@ -350,6 +350,7 @@ class Entity:
         "pray_ticks", "blessed_ticks", "pilgrim_phase", "pilgrim_dest_cid", "pilgrim_ticks",
         "gold", "cargo_gold", "pilgrim_pay",
         "war_kills", "built_count", "hero_name",   # P5 E4 : héros & annales
+        "gold_dest",                                # P6 F1 : destination du dépôt d'or (church|market)
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -411,6 +412,7 @@ class Entity:
         self.war_kills: int = 0                  # kills de guerre infligés (nommé à HERO_KILLS)
         self.built_count: int = 0                # bâtiments achevés en tant que finisseur (à HERO_BUILDS)
         self.hero_name: Optional[str] = None     # None tant que pas héros ; sinon « Racine Épithète »
+        self.gold_dest: str = "church"           # P6 F1 : où déposer l'or miné, figé au départ (church|market)
         self._build_target_x: Optional[float] = None   # destination planifiée pour construction
         self._build_target_y: Optional[float] = None
         self._build_target_type: Optional[str] = None
@@ -522,6 +524,7 @@ class Entity:
             "pilgrim_pay": self.pilgrim_pay,
             "war_kills": self.war_kills, "built_count": self.built_count,
             "hero_name": self.hero_name,   # P5 E4
+            "gold_dest": self.gold_dest,   # P6 F1
         }
 
     @classmethod
@@ -577,6 +580,7 @@ class Entity:
         e.war_kills = d.get("war_kills", 0)
         e.built_count = d.get("built_count", 0)
         e.hero_name = d.get("hero_name", None)
+        e.gold_dest = d.get("gold_dest", "church")   # P6 F1 (vieux save → church)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

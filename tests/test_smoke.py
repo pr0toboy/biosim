@@ -1808,6 +1808,32 @@ def test_p5_hero_fallen_and_save_load():
     print("  test_p5_hero_fallen_and_save_load OK (hero_fallen+annals, compteurs+nom round-trip, défauts)")
 
 
+def test_p6_f1_money_dawn_and_save_load():
+    """P6 F1 : money_dawn (flag + annale cat=annals) + save/load money_dawn/gold_dest ; vieux save → défauts."""
+    from engine.entities import EntityType
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    assert sim.money_dawn is False, "money_dawn faux au départ"
+    # annale money_dawn depuis l'event
+    sim._update_chronicle([{"type": "money_dawn"}])
+    assert any(c.get("cat") == "annals" and "monnaie" in c["msg"] for c in sim.chronicle), "annale money_dawn cat=annals"
+    # save/load : money_dawn (Simulation) + gold_dest/gold (Entity)
+    sim.money_dawn = True
+    e0 = next(x for x in sim.entities if x.etype == EntityType.HUMAN)
+    e0.gold_dest = "market"; e0.gold = 3
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    assert sim2.money_dawn is True, "money_dawn restauré"
+    r = next(x for x in sim2.entities if x.id == e0.id)
+    assert r.gold_dest == "market" and r.gold == 3, "gold_dest + or portés restaurés"
+    # vieux save (champs absents) → défauts
+    st = sim.save_state(); st.pop("money_dawn", None)
+    for e in st["entities"]:
+        e.pop("gold_dest", None)
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st)
+    assert sim3.money_dawn is False, "vieux save → money_dawn False"
+    assert all(x.gold_dest == "church" for x in sim3.entities), "vieux save → gold_dest church"
+    print("  test_p6_f1_money_dawn_and_save_load OK (money_dawn flag+annale, gold_dest round-trip, défauts)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1920,6 +1946,7 @@ if __name__ == "__main__":
             test_p5_monument_save_load,
             test_p5_hero_naming_and_wire,
             test_p5_hero_fallen_and_save_load,
+            test_p6_f1_money_dawn_and_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

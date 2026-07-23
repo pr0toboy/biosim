@@ -129,6 +129,8 @@ class Building:
             d["iron"] = self.iron               # étal fer (D2)
             d["rs"] = self.rate_stone; d["ri"] = self.rate_iron   # cours affichés
             d["ws"] = self.wants_stone; d["wi"] = self.wants_iron # recherche
+            if self.gold:                       # F1 : coffre d'or du marché (0-gardé → absent sous MONEY_OFF)
+                d["gold"] = self.gold
         elif self.btype == "church":
             d["pil"] = self.pilgrims_served     # renommée du sanctuaire (C1)
             d["gold"] = self.gold               # trésor (C2)
@@ -621,6 +623,13 @@ _CULTS_ON    = _CULTURE_ON and os.environ.get("CULTS_OFF")    != "1"
 _FEAST_ON    = _CULTURE_ON and os.environ.get("FEAST_OFF")    != "1"
 _MONUMENT_ON = _CULTURE_ON and os.environ.get("MONUMENT_OFF") != "1"
 _HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
+# ── Économie profonde (P6, chantier F) — master ECON_OFF → hashes pré-P6 exacts ; sous-switches
+# par bloc ⊂ ECON (convention CULTURE). Zéro tirage neuf : décisions par seuils + tris.
+_ECON_ON  = os.environ.get("ECON_OFF") != "1"
+_MONEY_ON = _ECON_ON and os.environ.get("MONEY_OFF") != "1"   # F1 : or-monnaie au marché
+MARKET_GOLD_MAX = 8   # F1 : cap du coffre d'or du marché (débordement → dorure de l'église du clan)
+MONEY_RESTOCK   = 3   # F1 : le marché tire une expédition d'or si son coffre < ce seuil (demande-pull)
+MONEY_PAY_VALUE = 4   # F1 : préférence de l'or en paiement (> max _scarcity bois/pierre = 3 → toujours préféré)
 CULT_CONVERT_REL = 60   # rel ≥ ce seuil (+ pop stricte) → le petit clan se convertit au culte du gros
 HOLY_REL_PENALTY = -10  # guerre sainte (cultes ≠) : pénalité relationnelle à la déclaration
 HOLY_TENSION     = 2    # guerre sainte : tension additionnelle par éval en mode war (+3 → +5)
@@ -1188,7 +1197,12 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
         mkt = mkts[0]
         if _dist(entity.x, entity.y, mkt.x, mkt.y) < 1.5:
             houses = _cb.get("house", [])
-            if entity.trade_pay == "stone":
+            if entity.trade_pay == "gold":                # F1 : une pièce du coffre du MARCHÉ acheteur
+                ok = mkt.gold >= 1
+                if ok:
+                    mkt.gold -= 1
+                    entity.cargo_gold = 1
+            elif entity.trade_pay == "stone":
                 ok = _spend_pool_stone(houses, PAY_STONE_LOT)
                 if ok:
                     entity.cargo_stone = PAY_STONE_LOT
@@ -1201,7 +1215,7 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
                 events.append({"type": "trade_depart", "clan_id": entity.clan_id,
                                "dest_clan_id": entity.trade_dest_cid,
                                "good": entity.trade_good, "pay": entity.trade_pay,
-                               "pay_qty": entity.cargo_wood or entity.cargo_stone,
+                               "pay_qty": entity.cargo_wood or entity.cargo_stone or entity.cargo_gold,
                                "wood": entity.cargo_wood})
             else:   # pool fondu entre-temps : mission annulée, rien n'a été déduit
                 _clear_trade(entity)
@@ -1235,6 +1249,16 @@ def _beh_trade(entity: Entity, ctx, _cb, _eff_speed) -> bool:
                 dmkt.stone = min(MARKET_MAX_STOCK, dmkt.stone + entity.cargo_stone)
                 pay_qty = entity.cargo_wood or entity.cargo_stone
                 pay_good = "wood" if entity.cargo_wood else "stone"
+                if entity.cargo_gold:            # F1 : la pièce entre au coffre du VENDEUR (cap → dorure)
+                    _g = dmkt.gold + entity.cargo_gold
+                    dmkt.gold = min(MARKET_GOLD_MAX, _g)
+                    _spill = _g - dmkt.gold
+                    if _spill:                   # débordement → dorure de l'église du vendeur (le puits)
+                        _chs_v = dest_cb.get("church", [])
+                        if _chs_v:
+                            _chs_v[0].gilt += _spill
+                    pay_qty = entity.cargo_gold; pay_good = "gold"
+                    entity.cargo_gold = 0
                 entity.cargo_wood = 0
                 entity.cargo_stone = 0
                 if entity.trade_good == "iron":
@@ -2037,6 +2061,35 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
                 return True
         elif _forges and entity.iron >= MAX_IRON_CARRY:
             entity.iron = 0   # toutes les forges pleines → on lâche sur place (symétrie bois)
+    # 3.64 F1 : dépôt de l'OR au MARCHÉ (si gold_dest=market). AVANT le dépôt église INCHANGÉ ci-dessous
+    # → sous MONEY_OFF ce bloc est mort (gold_dest toujours "church") → dépôt église exact. Débordement
+    # du coffre → dorure de l'ÉGLISE (le puits ; l'église est requise à la pose de l'expédition marché).
+    # Repli défensif (perte bornée) : marché disparu en route → on RETOMBE sur le bloc église ci-dessous.
+    if (_MONEY_ON and entity.spec.can_mine and entity.gold > 0
+            and entity.clan_id is not None and entity.gold_dest == "market"):
+        _mkt_dep = _cb.get("market", [])
+        if _mkt_dep:
+            _md = _mkt_dep[0]
+            if _dist(entity.x, entity.y, _md.x, _md.y) < 1.5:
+                _g = _md.gold + entity.gold
+                _md.gold = min(MARKET_GOLD_MAX, _g)
+                _spill = _g - _md.gold
+                if _spill:
+                    _chs_sp = _cb.get("church", [])
+                    if _chs_sp:
+                        _chs_sp[0].gilt += _spill
+                        events.append({"type": "church_gilt", "clan_id": entity.clan_id,
+                                       "gilt": _chs_sp[0].gilt, "x": _chs_sp[0].x, "y": _chs_sp[0].y})
+                entity.gold = 0
+                events.append({"type": "gold_deposit", "clan_id": entity.clan_id,
+                               "total": _md.gold, "x": _md.x, "y": _md.y})
+                return True
+            else:                                    # livraison engagée : converge vers l'étal
+                entity.state = State.WANDERING
+                entity.target_x = float(_md.x); entity.target_y = float(_md.y)
+                _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+                return True
+        # marché disparu → chute vers le bloc église (repli défensif, perte bornée)
     # 3.65 Dépôt de l'OR au trésor de l'église (bloc C2). Débordement → DORURE
     # (le puits). Condition de marche amendée contre-vérif : rapatrie aussi la
     # pièce orpheline quand la vanne s'est fermée en cours d'expédition.
@@ -2900,7 +2953,20 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             and entity.gold < MAX_GOLD_CARRY and entity.hunger < 65
             and _cobj_fer is not None and _cobj_fer.age >= GOLD_AGE):
         _chs_gold = _cb.get("church", [])
-        if _chs_gold and _chs_gold[0].gold < GOLD_RESTOCK_THRESHOLD:
+        # F1 : un seul flux minier, deux destinations. Priorité au trésor d'église (règle actuelle) ;
+        # SINON, sous _MONEY_ON, la DEMANDE du marché tire l'or (église requise → le puits de
+        # débordement, la dorure, existe). gold_dest figé au départ. MONEY_OFF → seul le restock
+        # trésor<4 subsiste → condition et flux RNG IDENTIQUES à l'actuel (imputation exacte).
+        _dest = None
+        if _chs_gold:
+            if _chs_gold[0].gold < GOLD_RESTOCK_THRESHOLD:
+                _dest = "church"
+            elif _MONEY_ON:
+                _mkt_g = _cb.get("market", [])
+                if _mkt_g and _mkt_g[0].gold < MONEY_RESTOCK:
+                    _dest = "market"
+        if _dest is not None:
+            entity.gold_dest = _dest
             for adx in range(-1, 2):
                 for ady in range(-1, 2):
                     if adx == 0 and ady == 0:
@@ -3143,6 +3209,7 @@ class Simulation:
         self._next_clan_id: int = N_CLANS   # P4 : id monotone des clans nés (scission/essaimage)
         self.cults: dict = {}               # P5 : registre {cult_id: Cult} (jamais purgé — l'histoire)
         self._next_cult_id: int = 0         # P5 : id de culte monotone
+        self.money_dawn: bool = False       # P6 F1 : 1er paiement en or déjà eu lieu ? (annale unique)
         self.buildings: list[Building] = []
         self._next_building_id = 0
         self.raining: bool = False
@@ -3425,6 +3492,13 @@ class Simulation:
                        clan_bldg, active_predators, predator_grid, entity_grid)
         for e in self.entities:
             _tick_entity(e, ctx)
+
+        if _MONEY_ON and not self.money_dawn:   # F1 : 1er paiement en or de la partie → annale (1×)
+            for _ev in tick_events:
+                if _ev.get("type") == "trade_exchange" and _ev.get("pay_good") == "gold":
+                    self.money_dawn = True
+                    tick_events.append({"type": "money_dawn"})
+                    break
 
         # Traiter les constructions (dédoublonnage intra-tick inclus)
         new_this_tick: list[Building] = []
@@ -4152,6 +4226,8 @@ class Simulation:
                     pays.append(("wood", _scarcity(pool_wood(b.id), WOOD_VALUE_TIERS)))
                 if good == "iron" and pool_stone(a.id) >= PAY_STONE_MIN:
                     pays.append(("stone", _scarcity(pool_stone(b.id), STONE_VALUE_TIERS)))
+                if _MONEY_ON and market(a.id).gold >= 1:   # F1 : l'or (valeur 4 > max scarcity 3 → préféré, zéro tie-break)
+                    pays.append(("gold", MONEY_PAY_VALUE))
                 if not pays:
                     continue
                 pay = max(pays, key=lambda p: p[1])[0] if len(pays) > 1 else pays[0][0]
@@ -4623,6 +4699,9 @@ class Simulation:
                 _life = f"après {_s} saison{'s' if _s > 1 else ''}" if _s >= 1 else "au terme d'une vie brève"
                 add({"t": t, "kind": "hero", "cat": "annals", "msg":
                      f"{ev['name']}, héros du clan {ev['clan_id'] + 1}, tombe {_life}"})
+            elif et == "money_dawn":      # P6 F1 : l'or devient monnaie (1× dans la partie) → annales
+                add({"t": t, "kind": "econ", "cat": "annals", "msg":
+                     "L'or devient monnaie : les marchés acceptent désormais la pièce en paiement"})
             elif et == "clan_swarm":      # P4.1 essaimage — fondation d'une colonie = annales
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
                 add({"t": t, "kind": "swarm", "cat": "annals", "msg":
@@ -4795,6 +4874,7 @@ class Simulation:
             "cults": [[c.id, c.name, c.founder_clan, c.founded_tick]
                       for c in sorted(self.cults.values(), key=lambda x: x.id)],
             "next_cult_id": self._next_cult_id,
+            "money_dawn": self.money_dawn,   # P6 F1
         }
 
     def load_state(self, d: dict):
@@ -4899,6 +4979,7 @@ class Simulation:
         self._next_clan_id = next_clan_id
         self.cults = cults
         self._next_cult_id = next_cult_id
+        self.money_dawn = d.get("money_dawn", False)   # P6 F1 (vieux save → False)
         # World.from_state a re-seedé random/np dans __init__ → on restaure les RNG
         # en DERNIER, sinon la reprise repartirait sur le flux de la génération initiale.
         random.setstate(py_rng_state)

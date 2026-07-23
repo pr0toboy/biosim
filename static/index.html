@@ -2799,6 +2799,7 @@ function drawBuildings(c, T) {
       const quotes = [];
       if ((b.rs ?? 0) > 0) quotes.push({ txt: `🪨${b.rs}`, col: b.rs >= 12 ? "#f1c40f" : b.rs >= 9 ? "#fb923c" : "#9ca3af" });
       if ((b.ri ?? 0) > 0) quotes.push({ txt: `⛓${b.ri}`, col: b.ri >= 3 ? "#f1c40f" : "#9ca3af" });
+      if ((b.gold ?? 0) > 0) quotes.push({ txt: `🪙${b.gold}`, col: "#fcd34d" });   // P6 F1 : coffre d'or du marché
       if (quotes.length) {
         c.font = `${Math.max(5, T * 0.5)}px monospace`;
         c.textAlign = "center";
