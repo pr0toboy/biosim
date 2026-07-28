@@ -143,12 +143,13 @@ BUILDING_SPECS: dict[str, BuildingSpec] = {
         min_dist=2, min_from_fire=3, max_from_fire=15,
         max_per_clan=8,
     ),
-    "mill": BuildingSpec(
+    "mill": BuildingSpec(   # P6 F4 : L2 = GRENIER (stock ×3, cap blé ×2 ; le débit ne change pas)
         btype="mill",
         wood_cost=12, stone_cost=8,
         build_time=60, pop_bonus=0,
         min_dist=4, min_from_fire=3, max_from_fire=16,
         max_per_clan=2,
+        max_level=2, upgrade_wood=0, upgrade_stone=6,
     ),
     # (storehouse retiré le 2026-07-09 : spec jamais planifiée/construite par l'IA —
     #  les ressources vivent dans les maisons, pas de stockage centralisé.)

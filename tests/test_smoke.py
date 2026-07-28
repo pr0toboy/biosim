@@ -1175,6 +1175,45 @@ def test_p6_f3_trails_grid():
     print("  test_p6_f3_trails_grid OK (incrément, décroissance plancher 0, saturation, save/load, hors payload)")
 
 
+def test_p6_f4_granary_and_famine_exit():
+    """P6 F4 : le moulin L2 (grenier) triple le stock de pains ; la SORTIE de famine exige une
+    réserve (anti-clignotement) ; sous GRANARY_OFF le moulin reste L1 et la famine est l'actuelle."""
+    from engine.simulation import (Building, Clan, MILL_MAX_BREAD, MILL_L2_BREAD_MULT,
+                                    FAMINE_EXIT_BREAD, FAMINE_HUNGER, _GRANARY_ON)
+    from engine.entities import BUILDING_SPECS
+    assert BUILDING_SPECS["mill"].max_level == 2 and BUILDING_SPECS["mill"].upgrade_stone == 6, \
+        "spec moulin : L2 ouvert à 6 pierre"
+    # cap de pains : L1 plafonne à 5, L2 (grenier) à 15 — le débit ne change pas
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    m1 = Building(id=9200, clan_id=0, x=3, y=3, btype="mill", level=1, bread=MILL_MAX_BREAD, wheat=9)
+    m2 = Building(id=9201, clan_id=0, x=9, y=9, btype="mill", level=2, bread=MILL_MAX_BREAD, wheat=9)
+    sim.buildings += [m1, m2]
+    for _ in range(3):
+        sim.step()
+    assert m1.bread == MILL_MAX_BREAD, "moulin L1 plafonné à MILL_MAX_BREAD"
+    assert m2.mill_ticks > 0 or m2.bread > MILL_MAX_BREAD, "grenier L2 : la cuisson continue au-delà de 5"
+    # hystérésis de SORTIE de famine, testée sur l'éval due directe (comme au banc) :
+    # faim moyenne SOUS le seuil d'entrée (55) mais AU-DESSUS du seuil de sortie (55−10=45).
+    from engine.simulation import MODE_PERIOD
+    from engine.entities import spawn, EntityType
+    def _famine_exit(bread_stock):
+        s2 = Simulation(World(width=60, height=45, seed=7))
+        s2.clans = [Clan(id=0, cx=10.0, cy=10.0, color="#f00", chief_id=0, mode="famine")]
+        s2.entities = []
+        for i in range(4):
+            e = spawn(EntityType.HUMAN, 10 + i * 0.1, 10)
+            e.clan_id = 0; e.hunger = FAMINE_HUNGER - 5      # 50 : sous l'entrée, au-dessus de la sortie
+            s2.entities.append(e)
+        mill = Building(id=1, clan_id=0, x=11, y=10, btype="mill", bread=bread_stock)
+        s2.buildings = [mill]
+        s2.tick_count = MODE_PERIOD                          # clan 0 → due à cette éval
+        ev = []; s2._update_society({0: {"mill": [mill]}}, ev)
+        return s2.clans[0].mode
+    assert _famine_exit(0) == "famine", "réserve vide (<2) → la crise CONTINUE (anti-clignotement)"
+    assert _famine_exit(FAMINE_EXIT_BREAD + 1) != "famine", "grenier garni (>=2) → sortie de crise"
+    print("  test_p6_f4_granary_and_famine_exit OK (spec L2, cap pains L1/L2, constantes sortie famine)")
+
+
 def test_harden_load_state_transactional():
     """I1 durcissement persistance : un load_state qui ÉCHOUE (save corrompu) laisse
     la sim vivante ET les RNG globaux INTACTS. Avant, load_state mutait self champ par
@@ -2035,6 +2074,7 @@ if __name__ == "__main__":
             test_p6_f1_gold_leak_refund,
             test_p6_f2_wealth_formula_and_wire,
             test_p6_f3_trails_grid,
+            test_p6_f4_granary_and_famine_exit,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

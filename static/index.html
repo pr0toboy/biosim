@@ -2782,6 +2782,7 @@ function drawBuildings(c, T) {
       const labels = [];
       if (b.wheat > 0) labels.push(`🌾${b.wheat}`);
       if (b.bread > 0) labels.push(`🍞${b.bread}`);
+      if (b.level >= 2) labels.push("★");   // P6 F4 : moulin L2 = GRENIER (stock ×3)
       if (labels.length) {
         c.font = `${Math.max(5, T * 0.52)}px monospace`;
         c.textAlign = "center";

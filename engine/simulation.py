@@ -629,6 +629,9 @@ _ECON_ON  = os.environ.get("ECON_OFF") != "1"
 _MONEY_ON = _ECON_ON and os.environ.get("MONEY_OFF") != "1"   # F1 : or-monnaie au marché
 _ENVY_ON  = _ECON_ON and os.environ.get("ENVY_OFF")  != "1"   # F2 : l'envie réordonne le choix de cible
 _TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
+_GRANARY_ON = _ECON_ON and os.environ.get("GRANARY_OFF") != "1"  # F4 : moulin L2 = grenier + famine par les réserves
+MILL_L2_BREAD_MULT = 3   # F4 : cap de pains du moulin L2 (5 → 15) — il STOCKE, il n'accélère pas
+FAMINE_EXIT_BREAD  = 2   # F4 : réserve minimale pour SORTIR de la famine (anti-clignotement)
 TRAIL_DECAY_PERIOD = 60 * TIME_SCALE   # période d'estompage des sentiers → durée (un sentier vit des saisons)
 TRAIL_MAX = 65535                      # saturation uint16 (jamais de wrap : un chemin très fréquenté plafonne)
 MARKET_GOLD_MAX = 8   # F1 : cap du coffre d'or du marché (débordement → dorure de l'église du clan)
@@ -2760,7 +2763,9 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
             # Le moulin ne reçoit du grain que d'un fermier rassasié (surplus).
             # Avant, tout le blé partait au moulin même quand le récolteur mourait
             # de faim → l'agriculture était un trou noir alimentaire.
-            mill_dst = (next((m for m in clan_mills if m.wheat < MILL_MAX_BREAD * 2), None)
+            mill_dst = (next((m for m in clan_mills
+                              if m.wheat < (MILL_MAX_BREAD * MILL_L2_BREAD_MULT * 2
+                                            if (_GRANARY_ON and m.level >= 2) else MILL_MAX_BREAD * 2)), None)
                         if entity.hunger < WHEAT_HUNGER_THRESH else None)
             if mill_dst is not None:
                 mill_dst.wheat += 1
@@ -3614,7 +3619,9 @@ class Simulation:
         for b in self.buildings:
             if b.btype != "mill":
                 continue
-            if b.bread >= MILL_MAX_BREAD or b.wheat <= 0:
+            _cap_bread = (MILL_MAX_BREAD * MILL_L2_BREAD_MULT
+                          if (_GRANARY_ON and b.level >= 2) else MILL_MAX_BREAD)
+            if b.bread >= _cap_bread or b.wheat <= 0:
                 b.mill_ticks = 0
                 continue
             # Vérifie qu'une tuile d'eau est accessible dans un rayon de 6 tuiles
@@ -3678,6 +3685,8 @@ class Simulation:
             bspec = BUILDING_SPECS.get(b.btype)
             if not bspec or bspec.max_level <= 1 or b.level >= bspec.max_level:
                 continue
+            if b.btype == "mill" and not _GRANARY_ON:
+                continue        # F4 gated : GRANARY_OFF → le moulin ne devient jamais grenier
             clan_houses = [x for x in self.buildings
                            if x.clan_id == b.clan_id and x.btype == "house"]
             # Pour upgrader une maison L2, le feu de camp doit être L2 d'abord
@@ -4045,6 +4054,12 @@ class Simulation:
             _is_aid = False
             if avg_h >= FAMINE_HUNGER or (bread == 0 and avg_h >= 40):
                 new_mode, target = "famine", -1                # survie : prime sur tout
+            elif (_GRANARY_ON and c.mode == "famine"
+                  and bread < FAMINE_EXIT_BREAD and avg_h >= FAMINE_HUNGER - 10):
+                # F4 — SORTIE par les RÉSERVES : sans grenier garni, la crise continue même si la
+                # faim moyenne redescend ponctuellement (anti-clignotement). GRANARY_OFF → branche
+                # absente → mode famine EXACTEMENT l'actuel.
+                new_mode, target = "famine", -1
             elif c.mode == "war":
                 _wt = c.war_target
                 _wtpop = pop.get(_wt, 0) if _wt >= 0 else 0
