@@ -3550,6 +3550,7 @@ canvas.addEventListener("mousemove", (ev) => {
           <div class="tt-row"><span>Gouvernement</span><span>${modeIco}${warTgt}${holy ? " ✝ sainte" : ""}</span></div>
           ${traitTxt ? `<div class="tt-row"><span>Chef</span><span>${traitTxt}</span></div>` : ""}
           ${tension != null ? `<div class="tt-row"><span>Tension</span><span>${tensIco} ${tension}/100</span></div>` : ""}
+          ${cn && cn.wealth != null ? `<div class="tt-row"><span>💰 Richesse</span><span>${cn.wealth}</span></div>` : ""}
           ${allyTxt ? `<div class="tt-row"><span>🤝 Alliés</span><span>clan ${allyTxt}</span></div>` : ""}
           ${rivalTxt ? `<div class="tt-row"><span>⚔ Rivaux</span><span>clan ${rivalTxt}</span></div>` : ""}
           <div class="tt-row"><span>👥 Population</span><span>${tot}</span></div>

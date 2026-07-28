@@ -43,14 +43,14 @@ HEIGHT = 100
 # Golden versionné — invariant #2. Historique complet dans ~/torterra/NEXT-STEPS.md.
 # Regold bloc PRÉDATION (2026-07-15) : ex-d39fb432 (pop 600) → prédation réelle
 # (boar hh14/em30/cap140, ciblage réparti 4 proies, I3 rebond). pop 706.
-GOLDEN = "6f34810457686d7e9d5e377cb0b2fb2695dccfb83156c5e1c1e85cd697aa38b5"  # regold P5 E1 CULTES 2026-07-21 (ex-0e39bd4e ; wire nom du culte au BASE, pas de conversion/schisme à l'Âge Bois → pop 849 inchangée). Imputation CULTURE_OFF=1 → 0e39bd4e (HEAD pré-P5) EXACT ; CULTS_OFF idem. P5 E2 FÊTE : INCHANGÉ (3000t < 1er automne 3600t → fête dormante) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (Âge Bois, pas d'Acier ni d'église → aucun monument) ; MONUMENT_OFF idem. P5 E4 HÉROS : INCHANGÉ (Âge Bois, pas de héros nommé à 3000t) ; HEROES_OFF idem. P6 F1 OR-MONNAIE : INCHANGÉ (Bois, pas d'église/marché/or à 3000t) ; MONEY_OFF/ECON_OFF idem.
+GOLDEN = "07a1aedffe014ad70cef73f8a9250be3ae4ac39425b214833ee670a723b5764f"  # regold P5 E1 CULTES 2026-07-21 (ex-0e39bd4e ; wire nom du culte au BASE, pas de conversion/schisme à l'Âge Bois → pop 849 inchangée). Imputation CULTURE_OFF=1 → 0e39bd4e (HEAD pré-P5) EXACT ; CULTS_OFF idem. P5 E2 FÊTE : INCHANGÉ (3000t < 1er automne 3600t → fête dormante) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (Âge Bois, pas d'Acier ni d'église → aucun monument) ; MONUMENT_OFF idem. P5 E4 HÉROS : INCHANGÉ (Âge Bois, pas de héros nommé à 3000t) ; HEROES_OFF idem. P6 F1 OR-MONNAIE : INCHANGÉ (Bois, pas d'église/marché/or à 3000t) ; MONEY_OFF/ECON_OFF idem. REGOLD P6 F2 RICHESSE+ENVIE 2026-07-28 (ex-6f348104) : wire wealth sur tous les clans + l'ENVIE réordonne le choix de cible de guerre (pop 849→839 = comportement réellement modifié). ECON_OFF → 6f348104 (pré-P6) EXACT ; ENVY_OFF → 004a7ded (wire seul, pop 849).
 
 # ── Scénario CIV (Âge Acier, systèmes avancés) ───────────────────────────────
 CIV_SEED = 42
 CIV_TICKS = 1000 * TIME_SCALE   # DURÉE → × : à 1000t bruts PLUS AUCUN système avancé
                                 # ne tire (cloche 1800 > 1000) → golden vidé de son sens
 CIV_SCIENCE = 6500   # > seuil Acier (6000) → tous les clans montent à Acier au 1er tick
-GOLDEN_CIV = "8daee48e8d642100627f5e724f6b4d6c38f820eb7e6b11e169d4e89201402f02"  # regold P6 F1 OR-MONNAIE 2026-07-23 (ex-2477001a P5 ; l'or CIRCULE dans le CIV Acier — injection demande-marché + paiement en or → flux caravane modifié, pop 1150→1153). Imputation MONEY_OFF → 2477001a (P5) EXACT ; HEROES_OFF → 114dd533 (E3) ; CULTURE_OFF → 4b0c9df8 (pré-P5) ; ECON_OFF → 2477001a (pré-P6).
+GOLDEN_CIV = "31f00c5bc4592cda886b5354fa1fd8c11bb1979ee5b466c8b8f859a0f24cda60"  # regold P6 F1 OR-MONNAIE 2026-07-23 (ex-2477001a P5 ; l'or CIRCULE dans le CIV Acier — injection demande-marché + paiement en or → flux caravane modifié, pop 1150→1153). Imputation MONEY_OFF → 2477001a (P5) EXACT ; HEROES_OFF → 114dd533 (E3) ; CULTURE_OFF → 4b0c9df8 (pré-P5) ; ECON_OFF → 2477001a (pré-P6). REGOLD P6 F2 RICHESSE+ENVIE 2026-07-28 (ex-8daee48e) : wire wealth + envie (pop 1153→1175). ECON_OFF → 2477001a EXACT ; ENVY_OFF → 96ac30fa (wire seul).
 
 # ── Scénario PROD (--prod) : gabarit RÉELLEMENT déployé, 220x160 ──────────────
 # À LA DEMANDE / nightly (trop lent pour le smoke rapide). Ferme l'angle mort
@@ -60,7 +60,7 @@ PROD_SEED = 424242
 PROD_TICKS = 500 * TIME_SCALE   # DURÉE → suit TIME_SCALE
 PROD_WIDTH = 220
 PROD_HEIGHT = 160
-GOLDEN_PROD = "3d70b0474c82042ec3c6ed56f066313c5a63a65b998311e582a3aa150cdd0d96"  # regold P5 E1 CULTES 2026-07-21 (ex-d9294cd1). Imputation CULTURE_OFF → d9294cd1 EXACT. P5 E2 FÊTE : INCHANGÉ (3000t < automne 3600t) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (pas d'Acier @3000t) ; MONUMENT_OFF idem. P5 E4 HÉROS : INCHANGÉ (pas de héros @3000t) ; HEROES_OFF idem. P6 F1 OR-MONNAIE : INCHANGÉ (pas d'or @3000t) ; MONEY_OFF idem.
+GOLDEN_PROD = "8eff7ae1e5963e7d4d242dacd02a951efb69e10c534ba4c57d8f62715e9aa340"  # regold P5 E1 CULTES 2026-07-21 (ex-d9294cd1). Imputation CULTURE_OFF → d9294cd1 EXACT. P5 E2 FÊTE : INCHANGÉ (3000t < automne 3600t) ; FEAST_OFF idem. P5 E3 MONUMENTS : INCHANGÉ (pas d'Acier @3000t) ; MONUMENT_OFF idem. P5 E4 HÉROS : INCHANGÉ (pas de héros @3000t) ; HEROES_OFF idem. P6 F1 OR-MONNAIE : INCHANGÉ (pas d'or @3000t) ; MONEY_OFF idem. REGOLD P6 F2 2026-07-28 (ex-3d70b047) : wire wealth (pop 757 inchangée). ECON_OFF → 3d70b047 EXACT.
 
 
 def _run(seed, ticks, width=WIDTH, height=HEIGHT, science_boost=None):

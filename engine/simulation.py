@@ -627,9 +627,22 @@ _HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
 # par bloc ⊂ ECON (convention CULTURE). Zéro tirage neuf : décisions par seuils + tris.
 _ECON_ON  = os.environ.get("ECON_OFF") != "1"
 _MONEY_ON = _ECON_ON and os.environ.get("MONEY_OFF") != "1"   # F1 : or-monnaie au marché
+_ENVY_ON  = _ECON_ON and os.environ.get("ENVY_OFF")  != "1"   # F2 : l'envie réordonne le choix de cible
 MARKET_GOLD_MAX = 8   # F1 : cap du coffre d'or du marché (débordement → dorure de l'église du clan)
 MONEY_RESTOCK   = 3   # F1 : le marché tire une expédition d'or si son coffre < ce seuil (demande-pull)
 MONEY_PAY_VALUE = 4   # F1 : préférence de l'or en paiement (> max _scarcity bois/pierre = 3 → toujours préféré)
+
+
+def _clan_wealth(cb: dict) -> int:
+    """P6 F2 — richesse d'un clan depuis SES bâtiments déjà groupés (clan_bldg[cid]) : entiers purs,
+    pondérations = rareté relative (bois 1, pierre 3, fer 6, pain 2, or/dorure 12). Pure fonction de
+    l'état courant → DÉRIVABLE : jamais sérialisée, jamais mémorisée (recalcul au besoin ; le wire la
+    recalcule chaque tick, sinon un load la figerait à 0 jusqu'à la prochaine éval due = replay divergent)."""
+    w = 0
+    for _bl in cb.values():
+        for b in _bl:
+            w += b.wood + 3 * b.stone + 6 * b.iron + 2 * b.bread + 12 * (b.gold + b.gilt)
+    return w
 CULT_CONVERT_REL = 60   # rel ≥ ce seuil (+ pop stricte) → le petit clan se convertit au culte du gros
 HOLY_REL_PENALTY = -10  # guerre sainte (cultes ≠) : pénalité relationnelle à la déclaration
 HOLY_TENSION     = 2    # guerre sainte : tension additionnelle par éval en mode war (+3 → +5)
@@ -3977,8 +3990,20 @@ class Simulation:
                 war_tgt = max(rivals, key=lambda o: (pop.get(o.id, 0), -o.id)).id if rivals else -1
             else:
                 _cands = [o for o in rivals if _rel_key(c.id, o.id) not in self._ally_state]
-                war_tgt = (min(_cands, key=lambda o: (self.relations.get(_rel_key(c.id, o.id), 0), o.id)).id
-                           if _cands else -1)
+                if _ENVY_ON:
+                    # F2 ENVIE : à choix égal, on convoite le voisin RICHE et FAIBLE (richesse par
+                    # tête). Réordonnancement PUR d'un choix existant — les conditions d'entrée en
+                    # guerre (rivaux, pop, cooldown, temper) sont inchangées → aucune guerre créée.
+                    # ENVY_OFF → clé (relation, id) actuelle EXACTE.
+                    _envy = {o.id: _clan_wealth(clan_bldg.get(o.id, {})) // max(1, pop.get(o.id, 0))
+                             for o in _cands}
+                    war_tgt = (min(_cands, key=lambda o: (-_envy[o.id],
+                                                          self.relations.get(_rel_key(c.id, o.id), 0),
+                                                          o.id)).id
+                               if _cands else -1)
+                else:
+                    war_tgt = (min(_cands, key=lambda o: (self.relations.get(_rel_key(c.id, o.id), 0), o.id)).id
+                               if _cands else -1)
             temper = _chief_personality(c.chief_id)[0] if _POL_ON else 0   # P2a : belliqueux → guerre + tôt
             # P3 : riposte (être attaqué annule le cooldown) + aide d'allié (rejoindre la guerre
             # subie par un allié). Calculés une fois par clan due, gated _WAR2_ON (sinon inertes).
@@ -4638,10 +4663,18 @@ class Simulation:
     def _clans_wire(self):
         """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
         n'apparaît que si non vide → RELATIONS_OFF/étages-off = payload pré-P2 exact).
-        chief_trait dérivé du chief_id (temper) ; allies/rivals dérivés des états d'hystérésis."""
+        chief_trait dérivé du chief_id (temper) ; allies/rivals dérivés des états d'hystérésis.
+        P6 F2 : `wealth` recalculée ICI à chaque tick (pure fonction de l'état, 0 accepté) — la
+        mémoriser à l'éval due la figerait après un load → replay divergent."""
         out = []
+        _wcb: dict = {}
+        if _ECON_ON:                       # pools par clan (une passe, comme clan_bldg dans step)
+            for _b in self.buildings:
+                _wcb.setdefault(_b.clan_id, []).append(_b)
         for c in self.clans:
             d = c.to_dict()
+            if _ECON_ON:                   # F2 : richesse du clan (la pauvreté est une info → 0 émis)
+                d["wealth"] = _clan_wealth({"_": _wcb.get(c.id, [])})
             if _POL_ON:
                 temper, _ = _chief_personality(c.chief_id)
                 if temper != 0:

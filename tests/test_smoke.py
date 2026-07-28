@@ -1858,6 +1858,32 @@ def test_p6_f1_gold_leak_refund():
     print("  test_p6_f1_gold_leak_refund OK (refund marché/église, cap→dorure, _clear_trade net)")
 
 
+def test_p6_f2_wealth_formula_and_wire():
+    """P6 F2 : formule de richesse exacte (bois 1 / pierre 3 / fer 6 / pain 2 / or+dorure 12) ;
+    wire `wealth` présent sur chaque clan (0 accepté) ; DÉRIVÉE — survit au save/load sans être
+    sérialisée (recalcul à la volée : un load ne doit pas la figer)."""
+    from engine.simulation import _clan_wealth, Building
+    cb = {"house": [Building(id=1, clan_id=0, x=0, y=0, btype="house", wood=10, stone=2)],
+          "forge": [Building(id=2, clan_id=0, x=1, y=0, btype="forge", iron=3)],
+          "mill":  [Building(id=3, clan_id=0, x=2, y=0, btype="mill", bread=4)],
+          "church": [Building(id=4, clan_id=0, x=3, y=0, btype="church", gold=5, gilt=1)]}
+    # 10 + 3*2 + 6*3 + 2*4 + 12*(5+1) = 10+6+18+8+72 = 114
+    assert _clan_wealth(cb) == 114, f"formule richesse exacte (attendu 114, obtenu {_clan_wealth(cb)})"
+    assert _clan_wealth({}) == 0, "clan sans bâtiment → 0"
+    # wire : clé présente sur chaque clan, valeur = richesse dérivée de l'état courant
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    w = sim._clans_wire()
+    assert all("wealth" in d for d in w), "wire wealth sur tous les clans (0 accepté)"
+    # dérivée : après save/load, la valeur est RECALCULÉE (pas figée à 0 ni sérialisée)
+    sim.buildings.append(Building(id=9100, clan_id=sim.clans[0].id, x=4, y=4, btype="house", wood=30))
+    w_before = next(d["wealth"] for d in sim._clans_wire() if d["id"] == sim.clans[0].id)
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    w_after = next(d["wealth"] for d in sim2._clans_wire() if d["id"] == sim2.clans[0].id)
+    assert w_after == w_before, f"richesse recalculée à l'identique après load ({w_before} vs {w_after})"
+    assert "wealth" not in sim.save_state()["clans"][0], "richesse JAMAIS sérialisée (dérivable)"
+    print("  test_p6_f2_wealth_formula_and_wire OK (formule exacte, wire 0-accepté, dérivée save/load-safe)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -1972,6 +1998,7 @@ if __name__ == "__main__":
             test_p5_hero_fallen_and_save_load,
             test_p6_f1_money_dawn_and_save_load,
             test_p6_f1_gold_leak_refund,
+            test_p6_f2_wealth_formula_and_wire,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
