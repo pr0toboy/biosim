@@ -1205,7 +1205,7 @@ async function refreshTrails() {
     trailCanvas.width = W; trailCanvas.height = H;
     const tctx = trailCanvas.getContext("2d");
     const img = tctx.createImageData(W, H);
-    const bio = worldData && worldData.biome_grid ? worldData.biome_grid : null;
+    const bio = worldData && worldData.biomes ? worldData.biomes : null;   // clé réelle du payload monde (fix gate F3)
     for (let i = 0; i < W * H; i++) {
       const v = readVal(i);
       if (v < TRAIL_T1) continue;
