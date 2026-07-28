@@ -178,6 +178,10 @@ class World:
         self.gold_grid = np.where(self._gold_mask, 100.0, 0.0).astype(np.float32)
         # Grille de feu (intensité 0–100, uniquement tuiles forêt avec arbre debout)
         self.fire_grid = np.zeros((self.height, self.width), dtype=np.float32)
+        # Sentiers (P6 F3) : passages cumulés des humains, uint16 saturant. COSMÉTIQUE PUR —
+        # aucune décision moteur ne la lit (pas de rétroaction mouvement→grille→mouvement) ;
+        # hors payload step() (canal /api/trails comme le territoire) → hash-neutre.
+        self.trail_grid = np.zeros((self.height, self.width), dtype=np.uint16)
         # Fertilité des tuiles herbe (GRASS → DIRT quand épuisée, régénère lentement)
         self._orig_grass_mask = (self.biome_grid == int(Biome.GRASS))
         self.fertility_grid = np.where(
@@ -680,6 +684,7 @@ class World:
             "gold_grid":      _grid_to_b64(self.gold_grid),
             "fertility_grid": _grid_to_b64(self.fertility_grid),
             "fire_grid":      _grid_to_b64(self.fire_grid),
+            "trail_grid":     _grid_to_b64(self.trail_grid),   # P6 F3 (non dérivable → sérialisée)
         }
 
     @classmethod
@@ -701,6 +706,8 @@ class World:
             w.gold_grid  = _grid_from_b64(d["gold_grid"])
         w.fertility_grid = _grid_from_b64(d["fertility_grid"])
         w.fire_grid      = _grid_from_b64(d["fire_grid"])
+        if d.get("trail_grid"):   # P6 F3 — compat vieux saves : sinon garde les sentiers vierges
+            w.trail_grid = _grid_from_b64(d["trail_grid"])
         # _max_grid / _regen_grid dépendent du biome (0 sur DIRT) → recomputer
         # depuis le biome chargé pour rester cohérents avec l'état surpâturé.
         w._max_grid   = w._build_max_grid()

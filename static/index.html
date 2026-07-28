@@ -723,6 +723,7 @@ function handleInit(data) {
   clans     = data.clans  || [];
   refreshChronicle();   // annales (bloc K) : chargement initial
   refreshTerritory();   // territoire (T1) : owner-grid initial
+  refreshTrails();      // sentiers (P6 F3) : grille d'usure initiale
   stumps         = new Set((data.world.stumps         || []).map(([x, y]) => `${x},${y}`));
   depleted_rocks = new Set((data.world.depleted_rocks || []).map(([x, y]) => `${x},${y}`));
   fires          = new Map((data.world.fires || []).map(([x, y]) => [`${x},${y}`, 80]));
@@ -1180,6 +1181,44 @@ async function refreshTerritory() {
   } catch (e) { /* serveur occupé → retentera au prochain poll */ }
 }
 setInterval(refreshTerritory, 4000);
+
+// ── Sentiers (P6 F3) : grille d'usure uint16 servie par /api/trails, rasterisée une fois
+// par poll dans un canvas offscreen (1 px/tuile) puis blittée SOUS les bâtiments. Deux
+// niveaux par seuils : herbe foulée (T1) puis terre nue (T2). Décodage PAR DTYPE obligatoire
+// (leçon de la régression int16 du territoire). Cosmétique pur : rien ne dépend de ces valeurs.
+let trailCanvas = null;
+const TRAIL_T1 = 40, TRAIL_T2 = 140;             // seuils d'usure (spec F3)
+const TRAIL_C1 = { r: 150, g: 134, b: 84, a: 70 };   // herbe foulée (jaune-vert terni)
+const TRAIL_C2 = { r: 124, g: 96,  b: 62, a: 130 };  // terre nue (DIRT du blend existant)
+async function refreshTrails() {
+  try {
+    const r = await fetch("/api/trails");
+    const d = await r.json();
+    if (!d.available || !d.grid) return;
+    const [H, W] = d.grid.shape;
+    const raw = atob(d.grid.b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const u16 = (d.grid.dtype === "uint16");      // décodage selon le dtype annoncé
+    const readVal = u16 ? (i) => bytes[2 * i] | (bytes[2 * i + 1] << 8) : (i) => bytes[i];
+    if (!trailCanvas) trailCanvas = document.createElement("canvas");
+    trailCanvas.width = W; trailCanvas.height = H;
+    const tctx = trailCanvas.getContext("2d");
+    const img = tctx.createImageData(W, H);
+    const bio = worldData && worldData.biome_grid ? worldData.biome_grid : null;
+    for (let i = 0; i < W * H; i++) {
+      const v = readVal(i);
+      if (v < TRAIL_T1) continue;
+      // Jamais sur l'eau / la falaise / le désert (un sentier n'a de sens que sur sol foulable)
+      if (bio) { const b = bio[(i / W) | 0][i % W]; if (b === 0 || b === 4 || b === 3 || b === 5) continue; }
+      const c = v >= TRAIL_T2 ? TRAIL_C2 : TRAIL_C1;
+      img.data[i * 4] = c.r; img.data[i * 4 + 1] = c.g;
+      img.data[i * 4 + 2] = c.b; img.data[i * 4 + 3] = c.a;
+    }
+    tctx.putImageData(img, 0, 0);
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+setInterval(refreshTrails, 6000);   // les sentiers bougent lentement → poll plus espacé
 
 function updateSeasonBadge() {
   const s = SEASONS[currentSeason] || SEASONS.spring;
@@ -2221,6 +2260,14 @@ function drawAll() {
   // l'échelle du monde. Remplace l'ancienne boîte approximative : on voit la vraie carte
   // de contrôle (zones organiques par proximité aux bâtiments), le visuel « empires ».
   const T = TILE_SIZE;
+  // Sentiers (F3) : usure du sol par le passage — SOUS le territoire et les bâtiments, juste
+  // au-dessus du sol. Lissage désactivé : la trace suit la tuile (chemin net, pas un nuage).
+  if (trailCanvas && worldData) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(trailCanvas, 0, 0, worldData.width * T, worldData.height * T);
+    ctx.restore();
+  }
   if (territoryCanvas && worldData) {
     ctx.save();
     ctx.imageSmoothingEnabled = true;   // zones douces (influence) plutôt que pixelisées

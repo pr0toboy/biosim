@@ -1140,6 +1140,41 @@ def test_k_chronicle_records_and_persists():
           f"({len(sim.chronicle)} entrée(s), round-trip identique)")
 
 
+def test_p6_f3_trails_grid():
+    """P6 F3 : la grille de sentiers s'incrémente sous les pas humains, décroît périodiquement
+    (plancher 0), sature sans wrap, survit au save/load, et reste HORS du payload step()."""
+    import numpy as np
+    from engine.simulation import TRAIL_DECAY_PERIOD, TRAIL_MAX
+    sim = Simulation(World(width=60, height=45, seed=7)); sim.populate()
+    g = sim.world.trail_grid
+    assert g.dtype == np.uint16 and g.shape == (45, 60), "grille uint16 H×W"
+    assert int(g.sum()) == 0, "monde neuf → sentiers vierges"
+    data = sim.step()
+    assert "trail" not in str(data.keys()), "la grille N'ENTRE PAS dans le payload step (hors hash)"
+    for _ in range(200):
+        sim.step()
+    assert int(sim.world.trail_grid.sum()) > 0, "les pas humains marquent le sol"
+    # décroissance : −1 plancher 0, jamais de valeur négative ni de wrap
+    sim.world.trail_grid[0, 0] = 5; sim.world.trail_grid[0, 1] = 0
+    sim.tick_count = TRAIL_DECAY_PERIOD - 1      # le prochain step tombe sur la période
+    sim.step()
+    assert sim.world.trail_grid[0, 1] == 0, "plancher 0 (pas de wrap uint16)"
+    # saturation : une tuile au max ne déborde pas
+    sim.world.trail_grid[2, 2] = TRAIL_MAX
+    for _ in range(3):
+        sim.step()
+    assert sim.world.trail_grid[2, 2] >= TRAIL_MAX - 1, "saturation sans wrap à 0"
+    # save/load : grille non dérivable → sérialisée
+    sim.world.trail_grid[5, 5] = 1234
+    sim2 = Simulation(World(width=60, height=45, seed=7)); sim2.load_state(sim.save_state())
+    assert int(sim2.world.trail_grid[5, 5]) == 1234, "sentiers restaurés au load"
+    # vieux save (grille absente) → sentiers vierges, pas de crash
+    st = sim.save_state(); st["world"].pop("trail_grid", None)
+    sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st)
+    assert int(sim3.world.trail_grid.sum()) == 0, "vieux save → grille vierge"
+    print("  test_p6_f3_trails_grid OK (incrément, décroissance plancher 0, saturation, save/load, hors payload)")
+
+
 def test_harden_load_state_transactional():
     """I1 durcissement persistance : un load_state qui ÉCHOUE (save corrompu) laisse
     la sim vivante ET les RNG globaux INTACTS. Avant, load_state mutait self champ par
@@ -1999,6 +2034,7 @@ if __name__ == "__main__":
             test_p6_f1_money_dawn_and_save_load,
             test_p6_f1_gold_leak_refund,
             test_p6_f2_wealth_formula_and_wire,
+            test_p6_f3_trails_grid,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

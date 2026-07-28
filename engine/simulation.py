@@ -628,6 +628,9 @@ _HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
 _ECON_ON  = os.environ.get("ECON_OFF") != "1"
 _MONEY_ON = _ECON_ON and os.environ.get("MONEY_OFF") != "1"   # F1 : or-monnaie au marché
 _ENVY_ON  = _ECON_ON and os.environ.get("ENVY_OFF")  != "1"   # F2 : l'envie réordonne le choix de cible
+_TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
+TRAIL_DECAY_PERIOD = 60 * TIME_SCALE   # période d'estompage des sentiers → durée (un sentier vit des saisons)
+TRAIL_MAX = 65535                      # saturation uint16 (jamais de wrap : un chemin très fréquenté plafonne)
 MARKET_GOLD_MAX = 8   # F1 : cap du coffre d'or du marché (débordement → dorure de l'église du clan)
 MONEY_RESTOCK   = 3   # F1 : le marché tire une expédition d'or si son coffre < ce seuil (demande-pull)
 MONEY_PAY_VALUE = 4   # F1 : préférence de l'or en paiement (> max _scarcity bois/pierre = 3 → toujours préféré)
@@ -780,6 +783,14 @@ def _move_toward(entity: Entity, tx: float, ty: float, speed: float, world: "Wor
     really_moved = moved and ((entity.x - ox)**2 + (entity.y - oy)**2 >= 0.0001)
     if really_moved:
         entity._stuck_ticks = 0
+        if _TRAILS_ON and entity.etype == EntityType.HUMAN:
+            # F3 SENTIER : la tuile foulée s'use (uint16 saturant). O(1), COSMÉTIQUE — aucune
+            # décision ne relit cette grille (pas de rétroaction mouvement→grille→mouvement) et
+            # elle sort hors payload step() (/api/trails) → hash déterministe intact.
+            _tg = world.trail_grid
+            _ty, _tx = entity.iy, entity.ix
+            if _tg[_ty, _tx] < TRAIL_MAX:
+                _tg[_ty, _tx] += 1
     else:
         entity._stuck_ticks += 1
     if entity._stuck_ticks >= STUCK_TICKS_RESET:
@@ -3414,6 +3425,13 @@ class Simulation:
         # le lit via /api/territory). Le territoire évolue lentement → inutile chaque tick.
         if self.territory_grid is None or self.tick_count % TERRITORY_RECOMPUTE_PERIOD == 0:
             self.territory_grid = self._compute_territory()
+
+        # Sentiers (F3) : la nature reprend lentement ses droits — décroissance VECTORISÉE
+        # périodique (−1, plancher 0). Un chemin entretenu reste marqué, un chemin abandonné
+        # s'efface en quelques saisons. Hors hash (grille non émise dans step()).
+        if _TRAILS_ON and self.tick_count % TRAIL_DECAY_PERIOD == 0:
+            _tg = self.world.trail_grid
+            _tg -= (_tg >= 1)
 
         births: list[Entity] = []
         tick_events: list[dict] = []

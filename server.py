@@ -318,6 +318,20 @@ async def territory():
         return {"available": True, "grid": _grid_to_b64(g)}
 
 
+@app.get("/api/trails")
+async def trails():
+    """Grille des SENTIERS (P6 F3) : uint16 H×W (passages cumulés des humains sur chaque tuile,
+    saturés à 65535), encodée b64 avec son dtype (le front décode selon dtype — leçon de la
+    régression int16 du territoire). Purement COSMÉTIQUE : aucune décision moteur ne la lit.
+    Découplée du flux de ticks (poll léger côté front, comme le territoire et la chronique) →
+    n'entre pas dans le hash déterministe. Le front applique 2 seuils d'usure."""
+    async with state_lock:
+        g = getattr(sim.world, "trail_grid", None)
+        if g is None:
+            return {"available": False}
+        return {"available": True, "grid": _grid_to_b64(g)}
+
+
 @app.post("/api/pause")
 async def pause():
     global sim_running
