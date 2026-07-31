@@ -337,6 +337,18 @@ async def trails():
         return {"available": True, "grid": _grid_to_b64(g)}
 
 
+@app.get("/api/explored")
+async def explored():
+    """Carte EXPLORÉE (P7 G1) : uint8 H×W, 1 = tuile déjà vue par un humain du monde. Même
+    plomberie que les sentiers (b64 + dtype, poll léger hors flux de ticks) → hors hash.
+    Cosmétique stricte : aucun brouillard de guerre, aucune décision moteur ne la lit."""
+    async with state_lock:
+        g = getattr(sim.world, "explored_grid", None)
+        if g is None:
+            return {"available": False}
+        return {"available": True, "grid": _grid_to_b64(g)}
+
+
 @app.post("/api/pause")
 async def pause():
     global sim_running

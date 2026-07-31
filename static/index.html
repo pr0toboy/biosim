@@ -1220,6 +1220,38 @@ async function refreshTrails() {
 }
 setInterval(refreshTrails, 6000);   // les sentiers bougent lentement → poll plus espacé
 
+// ── Carte explorée (P7 G1) : /api/explored sert un uint8 (1 = tuile déjà vue). On peint le
+// NÉGATIF — un voile froid sur ce que personne n'a encore parcouru — dans un canvas offscreen
+// 1 px/tuile, blitté au-dessus du sol et SOUS les bâtiments/créatures (rien n'est caché :
+// c'est une teinte de terre inconnue, pas un brouillard de guerre). Décodage par dtype.
+let exploredCanvas = null;
+const EXPLORED_VEIL = { r: 30, g: 41, b: 59, a: 89 };   // bleu ardoise, alpha ~0.35 (spec)
+async function refreshExplored() {
+  try {
+    const r = await fetch("/api/explored");
+    const d = await r.json();
+    if (!d.available || !d.grid) return;
+    const [H, W] = d.grid.shape;
+    const raw = atob(d.grid.b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const u16 = (d.grid.dtype === "uint16");
+    const readVal = u16 ? (i) => bytes[2 * i] | (bytes[2 * i + 1] << 8) : (i) => bytes[i];
+    if (!exploredCanvas) exploredCanvas = document.createElement("canvas");
+    exploredCanvas.width = W; exploredCanvas.height = H;
+    const ectx = exploredCanvas.getContext("2d");
+    const img = ectx.createImageData(W, H);
+    for (let i = 0; i < W * H; i++) {
+      if (readVal(i)) continue;                  // déjà exploré → aucune retouche
+      img.data[i * 4] = EXPLORED_VEIL.r; img.data[i * 4 + 1] = EXPLORED_VEIL.g;
+      img.data[i * 4 + 2] = EXPLORED_VEIL.b; img.data[i * 4 + 3] = EXPLORED_VEIL.a;
+    }
+    ectx.putImageData(img, 0, 0);
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+setInterval(refreshExplored, 6000);   // la connaissance progresse lentement → poll espacé
+refreshExplored();
+
 function updateSeasonBadge() {
   const s = SEASONS[currentSeason] || SEASONS.spring;
   const el = document.getElementById("season-label");
@@ -2274,6 +2306,14 @@ function drawAll() {
     ctx.drawImage(territoryCanvas, 0, 0, worldData.width * T, worldData.height * T);
     ctx.restore();
   }
+  // Voile des terres inconnues (G1) : au-dessus du sol, sous les bâtiments et les créatures.
+  // Lissage ON → la frontière du su et de l'inconnu est floue, pas un damier.
+  if (exploredCanvas && worldData) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(exploredCanvas, 0, 0, worldData.width * T, worldData.height * T);
+    ctx.restore();
+  }
   // Numéro de clan en filigrane, centré sur chaque feu de camp (repère de capitale)
   buildings.filter(b => b.btype === "campfire").forEach(fire => {
     const clan = clans.find(c => c.id === fire.clan_id);
@@ -3057,6 +3097,9 @@ const SILENT_EVENTS = new Set([
   "clan_new_chief",
   // caravane avortée (D1) : la mission se re-crédite proprement, pas un événement à narrer (audit #4)
   "trade_aborted",
+  // expéditions (P7 G1) : seule la DÉCOUVERTE se raconte ; le départ et l'abandon sont
+  // de la mécanique (un éclaireur qui part n'a encore rien appris à personne)
+  "expedition_depart", "expedition_lost",
   // relations inter-clans (P2b) : franchissements allié/rival → chroniques K, pas le feed
   "clan_allies", "clan_rivals",
 ]);
@@ -3356,6 +3399,9 @@ function addEvent(ev) {
     const via = {kills:"au combat", builds:"par ses œuvres", founder:"en fondant son clan"}[ev.via] || "";
     div.textContent = `⭐ ${ev.name} se distingue ${via} (clan ${ev.clan_id + 1})`;
     div.style.color = "#fcd34d";
+  } else if (ev.type === "site_discovered") {  // P7 G1 : une terre remarquable entre dans la carte du clan
+    div.textContent = `🧭 Clan ${ev.clan_id + 1} découvre une terre à ${ev.dist} tuiles de son feu`;
+    div.style.color = "#7dd3fc";
   } else if (ev.type === "hero_fallen") {      // P5 E4 mort d'un héros
     div.textContent = `†  ${ev.name} tombe — le clan ${ev.clan_id + 1} pleure son héros`;
     div.style.color = "#cbb58a";

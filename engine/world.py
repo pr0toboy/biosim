@@ -182,6 +182,10 @@ class World:
         # aucune décision moteur ne la lit (pas de rétroaction mouvement→grille→mouvement) ;
         # hors payload step() (canal /api/trails comme le territoire) → hash-neutre.
         self.trail_grid = np.zeros((self.height, self.width), dtype=np.uint16)
+        # Carte explorée (P7 G1) : 1 = une tuile qu'un humain a vue au moins une fois.
+        # Cosmétique pure elle aussi (canal /api/explored) et SANS décroissance : ce qui a
+        # été découvert ne se re-perd pas. Mutable et non dérivable du seed → sérialisée.
+        self.explored_grid = np.zeros((self.height, self.width), dtype=np.uint8)
         # Fertilité des tuiles herbe (GRASS → DIRT quand épuisée, régénère lentement)
         self._orig_grass_mask = (self.biome_grid == int(Biome.GRASS))
         self.fertility_grid = np.where(
@@ -225,6 +229,14 @@ class World:
         # Carte BFS : pour chaque tuile terrestre, coordonnées de la tuile bord-eau la plus proche
         # Permet à _find_water_spot de répondre en O(1) au lieu d'O(r²)
         self._nearest_water_tile = self._build_nearest_water()
+        # Sites remarquables (P7 G1) : figés MAINTENANT, sur le monde VIERGE. C'est la seule
+        # façon de tenir la promesse « catalogue dérivé du seed » : conv() lit la fertilité et
+        # les arbres, qui sont MUTABLES (les clans coupent, la terre s'épuise) — calculé
+        # paresseusement, le catalogue aurait dépendu de l'instant du premier appel (mesuré :
+        # 17 sites sur 24 se déplacent entre t=0 et t=1500) et un save/load aurait fait pointer
+        # les `known_sites` sérialisés sur d'AUTRES lieux. Ici, from_state() reconstruit le
+        # World vierge puis écrase les grilles : le catalogue reste celui de l'origine.
+        self.site_catalogue()
 
     def _fbm(self, X: np.ndarray, Y: np.ndarray,
              octaves: int = 6, base_freq: float = 0.025,
@@ -673,6 +685,114 @@ class World:
     # (_forest/_mountain/_orig_grass/_walkable/_near_water/_nearest_water_tile)
     # ne dépendent que de biomes qui ne changent jamais (forêt/montagne/eau/
     # herbe-d'origine) → régénérés à l'identique par World(seed) au chargement.
+    # ── Sites remarquables (P7 G1) — DÉRIVÉS du seed, JAMAIS sérialisés ──────
+    # conv(x,y) juge la valeur d'une terre : eau proche, fertilité, forêt, plaine
+    # constructible. Entiers/quantifié (aucun float dans les tie-breaks → tri stable
+    # inter-machines). Un seul juge sert au catalogue (G1), aux colonies (G2) et à la
+    # migration (G3) : une terre vaut la même chose pour tout le monde.
+    @staticmethod
+    def _box_sum(a, r):
+        """Somme glissante carrée (rayon r, bords tronqués) par image intégrale."""
+        h, w = a.shape
+        ii = np.zeros((h + 1, w + 1), dtype=np.int64)
+        np.cumsum(np.cumsum(a.astype(np.int64), axis=0), axis=1, out=ii[1:, 1:])
+        y0 = np.clip(np.arange(h) - r, 0, h); y1 = np.clip(np.arange(h) + r + 1, 0, h)
+        x0 = np.clip(np.arange(w) - r, 0, w); x1 = np.clip(np.arange(w) + r + 1, 0, w)
+        return (ii[np.ix_(y1, x1)] - ii[np.ix_(y0, x1)]
+                - ii[np.ix_(y1, x0)] + ii[np.ix_(y0, x0)])
+
+    def conv_grid(self):
+        """Grille ENTIÈRE de convenance (P7) — celle du monde VIERGE : elle est calculée une
+        fois à la construction (cf. fin de __init__) et ne bouge PLUS, pour que le catalogue
+        de sites reste dérivé du seul seed.
+
+        ⚠ Elle ne juge donc PAS l'état courant d'une terre. Le jour où la migration (G3) devra
+        constater qu'un terroir s'est effondré (PUSH), il lui faudra un calcul FRAIS sur les
+        grilles du moment — ne pas réutiliser celle-ci, qui répondra éternellement la valeur
+        d'origine."""
+        if getattr(self, "_conv_cache", None) is not None:
+            return self._conv_cache
+        fert_n  = self._box_sum(self.fertility_grid >= 1, 8)          # tuiles fertiles r=8
+        fert_s  = self._box_sum(np.minimum(self.fertility_grid, 100).astype(np.int64), 8)
+        trees   = self._box_sum(self.tree_grid >= TREE_STUMP_THRESHOLD, 8)   # arbres debout r=8
+        plain   = self._box_sum(self._walkable, 4)                    # tuiles foulables r=4
+        fert_avg = np.where(fert_n > 0, fert_s // np.maximum(fert_n, 1), 0)
+        conv = (3 * self._near_water_mill.astype(np.int64)     # eau à portée (r=6, masque existant)
+                + fert_avg // 25                               # fertilité moyenne quantifiée
+                + trees // 10                                  # couvert forestier
+                + 2 * (plain >= 12))                           # plaine constructible
+        conv[~self._walkable] = 0                              # un site s'ancre sur du sol foulable
+        self._conv_cache = conv
+        return conv
+
+    def site_catalogue(self, lattice: int = 16, keep: int = 24, exclusion: int = 20):
+        """Catalogue DÉRIVÉ (seed) des meilleurs sites : maxima locaux de conv() sur une
+        grille coarse, ancre foulable, espacés d'au moins `exclusion` tuiles (on garde le
+        mieux scoré). Retourne [(site_id, x, y, score)] trié (score desc, y, x) — site_id
+        = rang dans ce tri, STABLE par seed. Jamais sérialisé : recalculé au load."""
+        if getattr(self, "_site_cache", None) is not None:
+            return self._site_cache
+        conv = self.conv_grid()
+        cands = []
+        for cy in range(lattice // 2, self.height, lattice):
+            for cx in range(lattice // 2, self.width, lattice):
+                y0, y1 = max(0, cy - lattice // 2), min(self.height, cy + lattice // 2 + 1)
+                x0, x1 = max(0, cx - lattice // 2), min(self.width, cx + lattice // 2 + 1)
+                blk = conv[y0:y1, x0:x1]
+                if blk.size == 0 or int(blk.max()) <= 0:
+                    continue
+                iy, ix = np.unravel_index(int(np.argmax(blk)), blk.shape)   # 1er max : ordre stable
+                y, x = y0 + int(iy), x0 + int(ix)
+                if not self._walkable[y, x]:
+                    continue
+                cands.append((int(conv[y, x]), y, x))
+        cands.sort(key=lambda c: (-c[0], c[1], c[2]))       # score desc, puis y, puis x
+        kept = []
+        for score, y, x in cands:                            # exclusion : garde le mieux scoré
+            if all((y - ky) ** 2 + (x - kx) ** 2 >= exclusion ** 2 for _, ky, kx in kept):
+                kept.append((score, y, x))
+                if len(kept) >= keep:
+                    break
+        self._site_cache = [(i, x, y, score) for i, (score, y, x) in enumerate(kept)]
+        return self._site_cache
+
+    def land_component(self, x: int, y: int) -> int:
+        """Étiquette de la MASSE TERRESTRE contenant (x, y) — −1 sur l'eau. Deux tuiles de
+        même étiquette sont reliées par un chemin à pied ; d'étiquettes différentes, aucun
+        marcheur ne passera de l'une à l'autre (pas de navigation, cf. spec §10).
+
+        Sert à ne jamais envoyer un éclaireur — ni plus tard une colonie ou un village entier —
+        vers une terre séparée par la mer : mesuré sur les mondes servis, 1 site du catalogue
+        sur 24 tombe sur une île (PROD 424242 : site 16 ; PROD 7 : site 13), et l'éclaireur
+        qui le vise marche jusqu'au timeout en gelant l'expédition de son clan.
+
+        Dérivé de `_walkable`, qui ne change jamais (l'eau ne bouge pas) → calculé une fois,
+        mémorisé, JAMAIS sérialisé. ~340 ms sur 320×232, payés au premier besoin réel."""
+        if getattr(self, "_land_lab", None) is None:
+            walk = self._walkable
+            h, w = walk.shape
+            lab = np.full((h, w), -1, dtype=np.int32)
+            nxt = 0
+            for sy in range(h):
+                for sx in range(w):
+                    if not walk[sy, sx] or lab[sy, sx] >= 0:
+                        continue
+                    stack = [(sy, sx)]
+                    lab[sy, sx] = nxt
+                    while stack:                      # parcours en profondeur, pile explicite
+                        cy, cx = stack.pop()
+                        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                            ny, nx = cy + dy, cx + dx
+                            if (0 <= ny < h and 0 <= nx < w
+                                    and walk[ny, nx] and lab[ny, nx] < 0):
+                                lab[ny, nx] = nxt
+                                stack.append((ny, nx))
+                    nxt += 1
+            self._land_lab = lab
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return -1
+        return int(self._land_lab[y, x])
+
     def to_state(self) -> dict:
         return {
             "seed": self.seed, "width": self.width, "height": self.height,
@@ -685,6 +805,7 @@ class World:
             "fertility_grid": _grid_to_b64(self.fertility_grid),
             "fire_grid":      _grid_to_b64(self.fire_grid),
             "trail_grid":     _grid_to_b64(self.trail_grid),   # P6 F3 (non dérivable → sérialisée)
+            "explored_grid":  _grid_to_b64(self.explored_grid),  # P7 G1 (idem)
         }
 
     @classmethod
@@ -708,6 +829,8 @@ class World:
         w.fire_grid      = _grid_from_b64(d["fire_grid"])
         if d.get("trail_grid"):   # P6 F3 — compat vieux saves : sinon garde les sentiers vierges
             w.trail_grid = _grid_from_b64(d["trail_grid"])
+        if d.get("explored_grid"):   # P7 G1 — compat vieux saves : sinon carte vierge
+            w.explored_grid = _grid_from_b64(d["explored_grid"])
         # _max_grid / _regen_grid dépendent du biome (0 sur DIRT) → recomputer
         # depuis le biome chargé pour rester cohérents avec l'état surpâturé.
         w._max_grid   = w._build_max_grid()

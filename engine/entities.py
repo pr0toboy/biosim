@@ -352,6 +352,7 @@ class Entity:
         "gold", "cargo_gold", "pilgrim_pay",
         "war_kills", "built_count", "hero_name",   # P5 E4 : héros & annales
         "gold_dest",                                # P6 F1 : destination du dépôt d'or (church|market)
+        "expedition_site", "expedition_t0", "expedition_phase",   # P7 G1 : mission d'exploration (état PERSISTANT)
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -414,6 +415,12 @@ class Entity:
         self.built_count: int = 0                # bâtiments achevés en tant que finisseur (à HERO_BUILDS)
         self.hero_name: Optional[str] = None     # None tant que pas héros ; sinon « Racine Épithète »
         self.gold_dest: str = "church"           # P6 F1 : où déposer l'or miné, figé au départ (church|market)
+        # P7 G1 — mission d'exploration. C'est la PHASE qui fait la mission, pas la cible :
+        # target_x est écrasé par tous les besoins vitaux, donc la destination doit vivre dans
+        # un slot persistant re-posé chaque tick (même discipline que trade_phase/pilgrim_phase).
+        self.expedition_site: Optional[int] = None   # site_id visé (None = pas en mission)
+        self.expedition_t0: int = 0                  # tick de DÉPART (timeout absolu, cf. _beh_expedition)
+        self.expedition_phase: Optional[str] = None  # None | "out" (vers le site) | "home" (retour au feu)
         self._build_target_x: Optional[float] = None   # destination planifiée pour construction
         self._build_target_y: Optional[float] = None
         self._build_target_type: Optional[str] = None
@@ -526,6 +533,9 @@ class Entity:
             "war_kills": self.war_kills, "built_count": self.built_count,
             "hero_name": self.hero_name,   # P5 E4
             "gold_dest": self.gold_dest,   # P6 F1
+            "expedition_site": self.expedition_site,     # P7 G1
+            "expedition_t0": self.expedition_t0,
+            "expedition_phase": self.expedition_phase,
         }
 
     @classmethod
@@ -582,6 +592,9 @@ class Entity:
         e.built_count = d.get("built_count", 0)
         e.hero_name = d.get("hero_name", None)
         e.gold_dest = d.get("gold_dest", "church")   # P6 F1 (vieux save → church)
+        e.expedition_site = d.get("expedition_site", None)   # P7 G1 (vieux save → pas en mission)
+        e.expedition_t0 = d.get("expedition_t0", 0)
+        e.expedition_phase = d.get("expedition_phase", None)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

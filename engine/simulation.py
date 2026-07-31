@@ -9,7 +9,7 @@ import os
 import time
 import numpy as np
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
                        get_id_counter, set_id_counter, _JOBS_ON)
@@ -65,6 +65,8 @@ class Clan:
     feast_ticks: int = 0       # P5 E2 : ticks de fête restants (>0 = fête en cours ; convergence + natalité×2)
     feast_year: int = -1       # P5 E2 : dernière année où une fête a eu lieu (verrou 1×/an)
     last_deed: str = "sa fondation"  # P5 E3 : dernier jalon majeur (dédicace d'un futur monument)
+    known_sites: list = field(default_factory=list)  # P7 G1 : site_id connus, triés, bornés KNOWN_SITES_MAX
+    failed_sites: list = field(default_factory=list)  # P7 G1 : sites où un éclaireur a échoué (renoncement)
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -628,6 +630,34 @@ _HEROES_ON   = _CULTURE_ON and os.environ.get("HEROES_OFF")   != "1"
 _ECON_ON  = os.environ.get("ECON_OFF") != "1"
 _MONEY_ON = _ECON_ON and os.environ.get("MONEY_OFF") != "1"   # F1 : or-monnaie au marché
 _ENVY_ON  = _ECON_ON and os.environ.get("ENVY_OFF")  != "1"   # F2 : l'envie réordonne le choix de cible
+# ── Migration & exploration (P7, chantier G) — master EXPLO_OFF → hashes P6 exacts ;
+# _CARTO_ON (G1) est le SOCLE : G2/G3/G4 consomment ses données, donc sans carto tout P7
+# est inerte par construction. Zéro tirage neuf : les missionnés sont pilotés hors flux RNG
+# (pattern caravanes/pèlerins), le bloc scout 4.7 existant garde son flux intact.
+_EXPLO_ON  = os.environ.get("EXPLO_OFF")  != "1"
+_CARTO_ON  = _EXPLO_ON and os.environ.get("CARTO_OFF")  != "1"   # G1 catalogue + expéditions
+_COLONY_ON = _CARTO_ON and os.environ.get("COLONY_OFF") != "1"   # G2 colonies lointaines
+_MIGRATE_ON= _CARTO_ON and os.environ.get("MIGRATE_OFF")!= "1"   # G3 migration de village
+_TOPO_ON   = _CARTO_ON and os.environ.get("TOPO_OFF")   != "1"   # G4 toponymes & annales
+SCOUT_PERIOD     = 150 * TIME_SCALE  # période de dispatch d'expédition par clan (déphasée) → durée
+SCOUT_PHASE      = 37   # déphasage par clan (premier avec SCOUT_PERIOD → les clans ne partent pas ensemble)
+KNOWN_SITES_MAX  = 12   # sites mémorisés par clan (on garde les mieux scorés)
+SITE_DISCOVER_R  = 4.0  # un site passé à cette distance d'un humain en mission est DÉCOUVERT
+EXPEDITION_HOME_R = 6.0 # mission close quand l'éclaireur est rentré à cette distance du feu
+# Anti-zombie. C'est un budget de TRAJET (aller + retour), pas une durée biologique : il ne
+# suit donc PAS TIME_SCALE, exactement comme TRADE_TIMEOUT=1200 dont il est le frère (la
+# vitesse de marche, elle, n'a pas été rescalée). 3× ce budget parce que la mission fait
+# l'aller-retour sur une carte 2× plus grande — soit ~690 tuiles parcourues, au-delà de la
+# diagonale du gabarit servi. Court exprès : une mission qui s'éternise gèle l'exploration
+# de son clan (une seule en vol), donc le filet doit tomber en 4 périodes de dispatch max.
+EXPEDITION_TIMEOUT = 3600
+SITE_MIN_AGE     = 1    # âge technologique minimal pour explorer (Pierre)
+SITE_MIN_POP     = 6    # pop minimale du clan pour détacher un éclaireur
+SCOUT_HUNGER_MAX = 65   # seuils d'éligibilité — MÊMES valeurs que le bloc d'exploration 4.7
+SCOUT_THIRST_MAX = 55
+EXPLORE_MARK_PERIOD = 25       # ticks entre deux marquages de la carte explorée (cosmétique)
+EXPLORE_MARK_R      = 2        # rayon de marquage autour d'un humain
+EXPLORE_MARK_R_SCOUT = 4       # rayon de marquage autour d'un éclaireur en mission (il regarde loin)
 _TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
 _GRANARY_ON = _ECON_ON and os.environ.get("GRANARY_OFF") != "1"  # F4 : moulin L2 = grenier + famine par les réserves
 MILL_L2_BREAD_MULT = 3   # F4 : cap de pains du moulin L2 (5 → 15) — il STOCKE, il n'accélère pas
@@ -1500,6 +1530,86 @@ def _beh_pilgrim(entity: Entity, ctx, _cb, _eff_speed) -> bool:
     return False
 
 
+def _clear_expedition(entity: Entity):
+    """Efface proprement une mission d'exploration (P7 G1). Appelée à TOUS les chemins de
+    sortie (arrivée, retour, timeout, clan disparu, site volatilisé) : un slot qui traîne
+    bloquerait le clan pour toujours (une expédition en vol max) — le piège d'état."""
+    entity.expedition_site = None
+    entity.expedition_phase = None
+    entity.expedition_t0 = 0
+
+
+def _learn_site(clan, site_id: int) -> bool:
+    """Mémorise un site dans `clan.known_sites` : liste TRIÉE, dédupliquée, bornée à
+    KNOWN_SITES_MAX. Le site_id EST le rang du site au tri par score décroissant (cf.
+    World.site_catalogue) → garder les plus petits ids, c'est garder les meilleures terres.
+    True si le savoir est neuf (l'appelant narre), False si le clan connaissait déjà."""
+    if site_id in clan.known_sites:
+        return False
+    ks = sorted(set(clan.known_sites) | {site_id})[:KNOWN_SITES_MAX]
+    clan.known_sites = ks
+    return site_id in ks   # borne atteinte et site moins bon que les 12 connus → rien appris
+
+
+def _beh_expedition(entity: Entity, ctx, _cb, _eff_speed) -> bool:
+    """Mission d'exploration (P7 G1) : « out » = marche vers le site visé, « home » = retour
+    au feu. La cible est RE-POSÉE à chaque tick tant que la mission court — target_x est
+    écrasé par les détours vitaux en 54 endroits du moteur, donc c'est la PHASE persistante
+    qui fait la mission, pas la cible (même discipline que trade_phase/pilgrim_phase). La
+    survie reste prioritaire : les blocs amont de la cascade mettent la mission en PAUSE,
+    ils ne l'annulent pas. Aucun tirage aléatoire. Découvre tout site qui passe à portée,
+    même celui qu'il ne visait pas — c'est le hasard des chemins, pas celui d'un dé."""
+    world = ctx.world; events = ctx.events
+    clan = (ctx.clans or {}).get(entity.clan_id)
+    if clan is None:            # clan éteint sous ses pieds → la mission n'a plus de commanditaire
+        _clear_expedition(entity)
+        return False
+    # Timeout ABSOLU (tick courant − tick de départ) et non un compteur incrémenté ici : un
+    # éclaireur figé par la faim ou par un combat ne traverse plus ce bloc, son compteur ne
+    # tournerait plus et son clan resterait « expédition en vol » à vie. Le dispatch balaie
+    # les missions périmées avec la même horloge.
+    if ctx.tick - entity.expedition_t0 > EXPEDITION_TIMEOUT:
+        # RENONCEMENT. Sans ça le clan re-viserait éternellement la même terre : la cible est
+        # toujours « inconnue » et toujours la plus proche, donc le prochain éclaireur repartirait
+        # buter au même endroit — un clan estropié à vie (mesuré sur seed 424242 : le site 15 est
+        # à 21 tuiles et sur la MÊME masse terrestre, mais la marche gloutonne — il n'y a pas de
+        # pathfinding — plafonne à 13 tuiles ; le clan 0 est resté à 1 seul site connu de t=3000
+        # à t=12000). On ne le déclare PAS « connu » : il ne doit jamais devenir une cible de
+        # colonie ou de migration. On acte seulement que ses hommes n'y arrivent pas.
+        if entity.expedition_site is not None and entity.expedition_site not in clan.failed_sites:
+            clan.failed_sites = sorted(set(clan.failed_sites) | {entity.expedition_site})[:KNOWN_SITES_MAX]
+        events.append({"type": "expedition_lost", "clan_id": entity.clan_id,
+                       "site": entity.expedition_site})
+        _clear_expedition(entity)
+        return False
+    # DÉCOUVERTE : tout site à portée de vue est relevé (le sien comme un autre).
+    sites = world.site_catalogue()
+    target = None
+    for sid, sx, sy, _score in sites:
+        if sid == entity.expedition_site:
+            target = (sx, sy)
+        if _dist(entity.x, entity.y, sx, sy) <= SITE_DISCOVER_R and _learn_site(clan, sid):
+            events.append({"type": "site_discovered", "clan_id": clan.id, "site": sid,
+                           "x": sx, "y": sy,
+                           "dist": int(_dist(clan.cx, clan.cy, sx, sy))})
+    if entity.expedition_phase == "out":
+        if target is None or entity.expedition_site in clan.known_sites:
+            entity.expedition_phase = "home"   # relevé fait (ou site introuvable) → il rentre
+        else:
+            entity.state = State.EXPLORING
+            entity.target_x = float(target[0]); entity.target_y = float(target[1])
+            _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+            return True
+    # phase "home" (ou bascule à l'instant) : le savoir rentre au village avec l'homme.
+    if _dist(entity.x, entity.y, clan.cx, clan.cy) <= EXPEDITION_HOME_R:
+        _clear_expedition(entity)
+        return False        # rendu au feu : il reprend une vie normale dès ce tick
+    entity.state = State.EXPLORING
+    entity.target_x = float(clan.cx); entity.target_y = float(clan.cy)
+    _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+    return True
+
+
 def _try_forge_upgrade(entity: Entity, forge, events: list) -> bool:
     """Bloc B : à la forge, upgrade un outil PIERRE → FER en consommant le fer
     stocké. Pioche pierre → pioche fer, puis hache pierre → hache fer."""
@@ -2035,6 +2145,11 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     # 3.4bis Mission de pèlerinage (C1) — même priorité que la caravane
     if entity.pilgrim_phase is not None:
         if _beh_pilgrim(entity, ctx, _cb, _eff_speed):
+            return True
+    # 3.4ter Mission d'exploration (P7 G1) — même priorité : un éclaireur en mission n'est
+    # pas happé par un chantier. Slot toujours None sous CARTO_OFF → garde gratuite.
+    if entity.expedition_phase is not None:
+        if _beh_expedition(entity, ctx, _cb, _eff_speed):
             return True
     # 3.45 OFFICE (C1) : la cloche a sonné → procession vers l'église du clan puis
     # prière (PRAY_DURATION agenouillé) → bénédiction. Collectif, gratuit, borné à
@@ -3438,6 +3553,26 @@ class Simulation:
             _tg = self.world.trail_grid
             _tg -= (_tg >= 1)
 
+        # Carte explorée (G1) : marquage périodique VECTORISÉ autour des humains (r=2), plus
+        # large autour d'un éclaireur en mission (r=4 : il est là pour regarder). Cosmétique
+        # pur, hors payload step(), SANS décroissance — la connaissance ne s'oublie pas.
+        if _CARTO_ON and self.tick_count % EXPLORE_MARK_PERIOD == 0:
+            _eg = self.world.explored_grid
+            _hh, _ww = _eg.shape
+            _walk: list = []; _miss: list = []
+            for _e in self.entities:
+                if _e.alive and _e.etype == EntityType.HUMAN:
+                    (_miss if _e.expedition_phase is not None else _walk).append((_e.ix, _e.iy))
+            for _pts, _r in ((_walk, EXPLORE_MARK_R), (_miss, EXPLORE_MARK_R_SCOUT)):
+                if not _pts:
+                    continue
+                _ax = np.array([p[0] for p in _pts], dtype=np.int32)
+                _ay = np.array([p[1] for p in _pts], dtype=np.int32)
+                for _dy in range(-_r, _r + 1):
+                    _yy = np.clip(_ay + _dy, 0, _hh - 1)
+                    for _dx in range(-_r, _r + 1):
+                        _eg[_yy, np.clip(_ax + _dx, 0, _ww - 1)] = 1
+
         births: list[Entity] = []
         tick_events: list[dict] = []
 
@@ -3522,6 +3657,10 @@ class Simulation:
         # Pèlerinages (C1) : APRÈS les caravanes (gardes croisées → pas de double-booking)
         if self.tick_count % PILGRIM_CHECK_PERIOD == 0 and len(self.clans) >= 2:
             self._dispatch_pilgrims(clan_bldg, tick_events)
+        # Expéditions d'éclaireurs (P7 G1) : APRÈS les deux autres dispatches (mêmes gardes
+        # croisées). Sort tout de suite si aucun clan n'est à l'échéance de sa période.
+        if _CARTO_ON and self.clans:
+            self._dispatch_expeditions(clan_bldg, tick_events)
         # Société : le chef réévalue le mode de gouvernement du clan (déterministe, déphasé).
         self._update_society(clan_bldg, tick_events)
         # Métiers (P1) : assignation des rôles selon la pop (déterministe, déphasé *41).
@@ -4245,6 +4384,9 @@ class Simulation:
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
                     and e.iron == 0 and e.gold == 0
                     and e._build_target_type is None
+                    and e.expedition_phase is None   # P7 G1 : un éclaireur en mission n'est
+                    # pas recrutable marchand (sinon son slot d'expédition fuit → le clan
+                    # reste marqué « expédition en vol » pour toujours)
                     and e.pilgrim_phase is None):   # garde croisée (gate-review C1 :
                     # sans elle, un pèlerin en mission était recrutable marchand →
                     # offrande écrasée, Σ violée, bénédiction gratuite, renom fantôme)
@@ -4374,6 +4516,7 @@ class Simulation:
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
                     and e.iron == 0 and e.gold == 0
                     and e._build_target_type is None
+                    and e.expedition_phase is None   # P7 G1 : idem, pas de double-booking
                     and e.trade_phase is None):
                 candidates.setdefault(e.clan_id, []).append(e)
 
@@ -4420,6 +4563,70 @@ class Simulation:
             tick_events.append({"type": "pilgrim_depart", "clan_id": a.id,
                                 "dest_clan_id": b.id, "pay": pil.pilgrim_pay})
             return   # un seul pèlerin lancé par évaluation
+
+    def _dispatch_expeditions(self, clan_bldg: dict, tick_events: list):
+        """P7 G1 — détache UN éclaireur vers le site remarquable inconnu le plus proche.
+        Cadence : période SCOUT_PERIOD déphasée par clan (pattern caravanes) → les clans
+        ne partent pas au même tick. UNE expédition en vol par clan. Éligible = rôle scout
+        s'il en existe un, SINON un versatile : c'est la définition que le moteur donne
+        DÉJÀ de l'exploration (_ROLE_SECTIONS["scout"] = ("scout", "versatile")) — sans ça
+        le chantier serait resté inerte sous 25 habitants, palier d'apparition du rôle.
+        AUCUN tirage : clans triés, sites triés, tie-break id → hash-neutre sans carto."""
+        due = [c for c in sorted(self.clans, key=lambda c: c.id)
+               if (self.tick_count + c.id * SCOUT_PHASE) % SCOUT_PERIOD == 0]
+        if not due:
+            return
+        sites = self.world.site_catalogue()
+        if not sites:
+            return
+        busy = set()
+        pop: dict = {}
+        candidates: dict[int, list] = {}
+        for e in self.entities:
+            if not e.alive or e.etype != EntityType.HUMAN or e.clan_id is None:
+                continue
+            pop[e.clan_id] = pop.get(e.clan_id, 0) + 1
+            if e.expedition_phase is not None:
+                if self.tick_count - e.expedition_t0 > EXPEDITION_TIMEOUT:
+                    # mission périmée sur un éclaireur que la cascade ne visite plus (famine,
+                    # combat permanent) → on la clôt ICI, sinon le clan ne repartirait jamais
+                    tick_events.append({"type": "expedition_lost", "clan_id": e.clan_id,
+                                        "site": e.expedition_site})
+                    _clear_expedition(e)
+                else:
+                    busy.add(e.clan_id)      # max 1 éclaireur en mission par clan
+            elif (e.hunger < SCOUT_HUNGER_MAX and e.thirst < SCOUT_THIRST_MAX
+                    and e.gestation_left == 0
+                    and e._build_target_type is None
+                    and e.trade_phase is None and e.pilgrim_phase is None
+                    and _role_ok(e.role, "scout")):   # gardes croisées : pas de double-booking
+                candidates.setdefault(e.clan_id, []).append(e)
+        for c in due:
+            if (c.id in busy or c.age < SITE_MIN_AGE
+                    or pop.get(c.id, 0) < SITE_MIN_POP
+                    or c.id not in candidates):
+                continue
+            scout = min(candidates[c.id],
+                        key=lambda e: (0 if e.role == "scout" else 1, e.id))
+            # La cible doit être sur SA masse terrestre : sans navigation, un site au-delà
+            # d'une mer n'est pas une découverte, c'est une mission perdue d'avance (mesuré :
+            # 1 site sur 24 est insulaire sur les mondes servis). Référence = la tuile de
+            # l'éclaireur, c'est lui qui marche.
+            comp = self.world.land_component(int(scout.x), int(scout.y))
+            unknown = [s for s in sites
+                       if s[0] not in c.known_sites
+                       and s[0] not in c.failed_sites      # terre à laquelle on a renoncé
+                       and (comp < 0 or self.world.land_component(s[1], s[2]) == comp)]
+            if not unknown:
+                continue      # ce clan a fait le tour du monde qui lui est accessible
+            sid, sx, sy, _score = min(
+                unknown, key=lambda s: ((s[1] - c.cx) ** 2 + (s[2] - c.cy) ** 2, s[0]))
+            scout.expedition_site = sid
+            scout.expedition_phase = "out"
+            scout.expedition_t0 = self.tick_count
+            scout.state = State.EXPLORING
+            tick_events.append({"type": "expedition_depart", "clan_id": c.id,
+                                "site": sid, "x": sx, "y": sy})
 
     def _church_upkeep(self, clan_bldg: dict, tick_events: list):
         """Cloche (1 event par office, déphasé par clan) + cierges : l'offrande de
@@ -4609,7 +4816,8 @@ class Simulation:
                                founder_clan=founder_clan, founded_tick=tick)
         return cid
 
-    def _found_clan(self, leader, members, cx, cy, cult_id=-1, tick_events=None):
+    def _found_clan(self, leader, members, cx, cy, cult_id=-1, tick_events=None,
+                    known_sites=None, failed_sites=None):
         """P4 §3 — fonde un clan neuf à (cx,cy) : `leader` = chef, `members` (entités) le rejoignent.
         Compteur d'id MONOTONE, couleur id%4, campfire posé. AUCUN RNG (position fournie) → le flux
         `random` global reste byte-identique. Retourne le Clan neuf (âge Bois, tension 0).
@@ -4621,6 +4829,13 @@ class Simulation:
                   color=CLAN_COLORS[nid % len(CLAN_COLORS)], chief_id=leader.id)
         if _CULTS_ON:
             nc.cult_id = cult_id
+        if _CARTO_ON and failed_sites:
+            nc.failed_sites = list(failed_sites)
+        if _CARTO_ON and known_sites:
+            # P7 G1 : le savoir part avec les hommes — colons et rebelles emportent la carte
+            # de la mère (même pattern que l'héritage de culte E1). Copie, pas partage : les
+            # deux clans exploreront ensuite chacun de leur côté.
+            nc.known_sites = list(known_sites)
         self.clans.append(nc)
         for e in members:
             e.clan_id = nid                       # gardent leur rôle jusqu'au prochain _update_jobs
@@ -4649,7 +4864,9 @@ class Simulation:
         members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
         rebels = members[:K]
         leader = rebels[0]
-        nc = self._found_clan(leader, rebels, leader.x, leader.y, cult_id=mother.cult_id, tick_events=tick_events)
+        nc = self._found_clan(leader, rebels, leader.x, leader.y, cult_id=mother.cult_id,
+                              tick_events=tick_events, known_sites=mother.known_sites,
+                              failed_sites=mother.failed_sites)
         mother.tension = max(0, mother.tension - 60)   # la mère respire par le départ
         _rel_apply(self.relations, self._ally_state, self._rival_state,
                    mother_id, nc.id, REL_D_REBELLION, tick_events)   # née rivale d'entrée
@@ -4684,7 +4901,9 @@ class Simulation:
             on_ruin = True
         else:
             fx, fy = leader.x, leader.y
-        nc = self._found_clan(leader, colonists, fx, fy, cult_id=mother.cult_id, tick_events=tick_events)
+        nc = self._found_clan(leader, colonists, fx, fy, cult_id=mother.cult_id,
+                              tick_events=tick_events, known_sites=mother.known_sites,
+                              failed_sites=mother.failed_sites)
         # Alliance d'entrée POSÉE directement (pas de _rel_apply → pas d'event clan_allies → pas de
         # mariage auto ; le mariage P3 scelle les FRANCHISSEMENTS, ici la fondation POSE l'état).
         k = _rel_key(mother_id, nc.id)

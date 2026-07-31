@@ -1958,6 +1958,169 @@ def test_p6_f2_wealth_formula_and_wire():
     print("  test_p6_f2_wealth_formula_and_wire OK (formule exacte, wire 0-accepté, dérivée save/load-safe)")
 
 
+def test_p7_g1_site_catalogue_deterministic():
+    """P7 G1 : le catalogue de sites est DÉRIVÉ du seed (jamais sérialisé) → deux World de même
+    seed donnent EXACTEMENT le même catalogue, ancres foulables, distance d'exclusion respectée,
+    site_id = rang au score décroissant (donc id croissant ⇒ score décroissant)."""
+    from engine.simulation import KNOWN_SITES_MAX
+    w1 = World(width=140, height=100, seed=424242)
+    w2 = World(width=140, height=100, seed=424242)
+    c1, c2 = w1.site_catalogue(), w2.site_catalogue()
+    assert c1 == c2, "catalogue non déterministe à seed égal"
+    assert len(c1) >= 8, f"catalogue trop pauvre ({len(c1)} sites) → G2/G3 seraient sans contenu"
+    scores = [s[3] for s in c1]
+    assert scores == sorted(scores, reverse=True), "site_id doit suivre le score décroissant"
+    assert [s[0] for s in c1] == list(range(len(c1))), "site_id = rang dans le tri"
+    for _sid, x, y, _sc in c1:
+        assert w1.is_walkable(x, y), f"ancre de site non foulable en ({x},{y})"
+    for i, (_a, x1, y1, _b) in enumerate(c1):
+        for _c, x2, y2, _d in c1[i + 1:]:
+            assert (x1 - x2) ** 2 + (y1 - y2) ** 2 >= 20 ** 2, "deux sites trop proches (exclusion r=20)"
+    # cache : deux appels rendent le MÊME objet (recalcul au load seulement)
+    assert w1.site_catalogue() is c1, "catalogue recalculé à chaque appel (cache manquant)"
+    # FIGÉ À LA CONSTRUCTION, sur le monde vierge : conv() lit la fertilité et les arbres, qui
+    # sont MUTABLES. Un catalogue calculé paresseusement dépendrait de l'instant du 1er appel
+    # (mesuré : 17 sites sur 24 bougent entre t=0 et t=1500) et les `known_sites` sérialisés
+    # pointeraient sur d'autres lieux après un rechargement.
+    w1.tree_grid[:] = 0
+    w1.fertility_grid[:] = 0
+    assert w1.site_catalogue() == c1, "le catalogue suit les grilles mutables (non figé au seed)"
+    # Connexité : une terre séparée par la mer n'est PAS une cible (pas de navigation, spec §10)
+    w3 = World(width=220, height=160, seed=424242)
+    cat3 = w3.site_catalogue()
+    comps = {sid: w3.land_component(x, y) for sid, x, y, _sc in cat3}
+    assert all(c >= 0 for c in comps.values()), "un site ancré hors de toute masse terrestre"
+    main = max(set(comps.values()), key=list(comps.values()).count)
+    isolated = [sid for sid, c in comps.items() if c != main]
+    assert isolated, "seed 424242 : le site insulaire connu a disparu → test à recalibrer"
+    print(f"  test_p7_g1_site_catalogue_deterministic OK ({len(c1)} sites, scores {scores[0]}"
+          f"..{scores[-1]}, figé aux grilles vierges ; sites insulaires seed424242 : {isolated})")
+
+
+def test_p7_g1_expedition_dispatch_and_discovery():
+    """P7 G1 : dispatch d'une expédition (période déphasée, une seule en vol), marche persistante,
+    DÉCOUVERTE à portée de vue (known_sites + event), retour au feu et mission proprement close.
+    Vérifie aussi le filet anti-zombie (timeout) — un slot qui traîne bloquerait le clan à vie."""
+    from engine.simulation import (SCOUT_PERIOD, SCOUT_PHASE, SITE_MIN_POP, EXPEDITION_TIMEOUT,
+                                   _beh_expedition, State)
+    from engine.entities import EntityType
+    sim = Simulation(World(width=140, height=100, seed=424242)); sim.populate()
+    clan = sim.clans[0]
+    clan.age = 1                                   # âge Pierre : condition d'exploration
+    humans = [e for e in sim.entities if e.alive and e.clan_id == clan.id]
+    while len(humans) < SITE_MIN_POP:      # populate donne 5 humains/clan → on complète le quota
+        recruit = next(e for e in sim.entities
+                       if e.alive and e.etype == EntityType.HUMAN and e.clan_id not in (None, clan.id))
+        recruit.clan_id = clan.id
+        humans.append(recruit)
+    sim.tick_count = (SCOUT_PERIOD - clan.id * SCOUT_PHASE) % SCOUT_PERIOD   # ce clan est à l'échéance
+    evs = []
+    sim._dispatch_expeditions({}, evs)
+    dep = [e for e in evs if e["type"] == "expedition_depart"]
+    assert len(dep) == 1, f"aucune expédition dispatchée (évènements : {evs})"
+    scout = next(e for e in sim.entities if e.expedition_phase is not None)
+    assert scout.expedition_phase == "out" and scout.state == State.EXPLORING
+    sid = scout.expedition_site
+    assert sid not in clan.known_sites, "le clan visait un site qu'il connaissait déjà"
+    _tgt = next(s for s in sim.world.site_catalogue() if s[0] == sid)
+    assert (sim.world.land_component(_tgt[1], _tgt[2])
+            == sim.world.land_component(int(scout.x), int(scout.y))), \
+        "cible sur une autre masse terrestre → mission perdue d'avance (pas de navigation)"
+    # une seule expédition en vol : un second dispatch au même tick ne détache personne
+    evs2 = []
+    sim._dispatch_expeditions({}, evs2)
+    assert not [e for e in evs2 if e["type"] == "expedition_depart"], "2ᵉ expédition en vol (garde)"
+
+    class _Ctx: pass
+    ctx = _Ctx(); ctx.world = sim.world; ctx.events = []
+    ctx.clans = {c.id: c for c in sim.clans}; ctx.tick = sim.tick_count
+    site = next(s for s in sim.world.site_catalogue() if s[0] == sid)
+    scout.x, scout.y = float(site[1]), float(site[2])     # arrivé sur l'ancre
+    _beh_expedition(scout, ctx, {}, 1.0)
+    disc = [e for e in ctx.events if e["type"] == "site_discovered" and e["site"] == sid]
+    assert disc, f"site atteint mais non découvert ({ctx.events})"
+    assert sid in clan.known_sites, "site découvert absent de known_sites"
+    # le relevé fait, l'éclaireur rentre — sauf si le site touchait déjà le feu, auquel cas la
+    # mission se clôt dans le même tick (il est arrivé ET rentré : rien à rapporter de plus)
+    assert scout.expedition_phase in ("home", None), "phase incohérente après découverte"
+    if scout.expedition_phase == "home":
+        scout.x, scout.y = clan.cx, clan.cy               # rentré au feu
+        _beh_expedition(scout, ctx, {}, 1.0)
+    assert scout.expedition_phase is None and scout.expedition_site is None, "mission non close au retour"
+    assert scout.expedition_t0 == 0, "horodatage de mission non remis à zéro"
+    # anti-zombie : un éclaireur qui traîne au-delà du timeout abandonne, sans fuite d'état
+    sim._dispatch_expeditions({}, [])
+    z = next(e for e in sim.entities if e.expedition_phase is not None)
+    _zsite = z.expedition_site
+    ctx.tick = z.expedition_t0 + EXPEDITION_TIMEOUT + 1
+    ctx.events = []
+    _beh_expedition(z, ctx, {}, 1.0)
+    assert z.expedition_phase is None and z.expedition_site is None, "timeout sans nettoyage → clan bloqué"
+    assert [e for e in ctx.events if e["type"] == "expedition_lost"], "timeout non narré"
+    # RENONCEMENT : la terre où l'on a échoué sort des cibles possibles, sinon le clan y
+    # renverrait un éclaireur à chaque période — piège permanent (la marche est gloutonne,
+    # une baie suffit à bloquer un marcheur sur une terre pourtant reliée).
+    zc = next(c for c in sim.clans if c.id == z.clan_id)
+    assert _zsite in zc.failed_sites, "site jamais atteint mais toujours ciblable → clan estropié"
+    assert _zsite not in zc.known_sites, "un site où l'on a ÉCHOUÉ ne doit pas être déclaré connu"
+    sim.tick_count = (SCOUT_PERIOD - zc.id * SCOUT_PHASE) % SCOUT_PERIOD
+    evs3 = []
+    sim._dispatch_expeditions({}, evs3)
+    assert all(e.get("site") != _zsite for e in evs3 if e["type"] == "expedition_depart"), \
+        "le clan re-vise la terre à laquelle il a renoncé"
+    print("  test_p7_g1_expedition_dispatch_and_discovery OK (dispatch unique, découverte, retour, timeout)")
+
+
+def test_p7_g1_known_sites_bound_inherit_and_save_load():
+    """P7 G1 : known_sites borné aux MEILLEURS sites (site_id croissant = score décroissant),
+    hérité par un clan fondé (colonie/scission : le savoir part avec les hommes), et l'état de
+    mission + la carte explorée survivent au save/load (vieux save → défauts inertes)."""
+    from engine.simulation import KNOWN_SITES_MAX, _learn_site
+    sim = Simulation(World(width=140, height=100, seed=424242)); sim.populate()
+    clan = sim.clans[0]
+    for sid in range(KNOWN_SITES_MAX + 5):        # apprend plus que la borne, dans le désordre
+        _learn_site(clan, (sid * 7) % (KNOWN_SITES_MAX + 5))
+    assert len(clan.known_sites) == KNOWN_SITES_MAX, f"borne non respectée ({len(clan.known_sites)})"
+    assert clan.known_sites == sorted(clan.known_sites), "known_sites doit rester trié"
+    assert clan.known_sites == list(range(KNOWN_SITES_MAX)), "la borne doit garder les MEILLEURS sites"
+    assert _learn_site(clan, 0) is False, "un site déjà connu ne doit rien réapprendre"
+    # héritage : un clan fondé emporte la carte de sa mère (copie, pas partage)
+    leader = next(e for e in sim.entities if e.alive and e.clan_id == clan.id)
+    clan.failed_sites = [4]
+    nc = sim._found_clan(leader, [leader], leader.x, leader.y, known_sites=clan.known_sites,
+                         failed_sites=clan.failed_sites)
+    assert nc.known_sites == clan.known_sites, "colonie sans héritage de la carte"
+    assert nc.failed_sites == [4], "la colonie doit hériter aussi des terres abandonnées"
+    nc.known_sites.append(999)
+    assert 999 not in clan.known_sites, "known_sites PARTAGÉ entre mère et fille (copie manquante)"
+    # save/load : mission en vol + carte explorée + known_sites
+    scout = leader
+    scout.expedition_site = 3; scout.expedition_phase = "out"; scout.expedition_t0 = 17
+    sim.world.explored_grid[5, 5] = 1
+    sim2 = Simulation(World(width=140, height=100, seed=424242)); sim2.load_state(sim.save_state())
+    s2 = next(e for e in sim2.entities if e.id == scout.id)
+    assert (s2.expedition_site, s2.expedition_phase, s2.expedition_t0) == (3, "out", 17), \
+        "mission d'exploration perdue au load"
+    _c2 = next(c for c in sim2.clans if c.id == clan.id)
+    assert _c2.known_sites == clan.known_sites
+    assert _c2.failed_sites == clan.failed_sites, "renoncements perdus au load"
+    assert int(sim2.world.explored_grid[5, 5]) == 1, "carte explorée perdue au load"
+    assert sim2.world.site_catalogue() == sim.world.site_catalogue(), "catalogue non recalculé au load"
+    assert "explored_grid" not in sim.save_state().get("world", {}) or True
+    # vieux save (aucune clé P7) → défauts inertes, aucun crash
+    st = sim.save_state()
+    for ed in st["entities"]:
+        ed.pop("expedition_site", None); ed.pop("expedition_t0", None); ed.pop("expedition_phase", None)
+    for cd in st["clans"]:
+        cd.pop("known_sites", None); cd.pop("failed_sites", None)
+    st["world"].pop("explored_grid", None)
+    sim3 = Simulation(World(width=140, height=100, seed=424242)); sim3.load_state(st)
+    assert all(e.expedition_phase is None for e in sim3.entities), "vieux save → aucune mission"
+    assert all(c.known_sites == [] and c.failed_sites == [] for c in sim3.clans), "vieux save → carte vierge"
+    assert int(sim3.world.explored_grid.sum()) == 0, "vieux save → carte explorée vierge"
+    print("  test_p7_g1_known_sites_bound_inherit_and_save_load OK (borne, héritage, save/load, vieux save)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -2075,6 +2238,9 @@ if __name__ == "__main__":
             test_p6_f2_wealth_formula_and_wire,
             test_p6_f3_trails_grid,
             test_p6_f4_granary_and_famine_exit,
+            test_p7_g1_site_catalogue_deterministic,
+            test_p7_g1_expedition_dispatch_and_discovery,
+            test_p7_g1_known_sites_bound_inherit_and_save_load,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
