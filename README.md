@@ -116,7 +116,8 @@ before promises.
 
 ## Credits & license
 
-- Code: [MIT](LICENSE).
+- Code: [MIT](LICENSE). Bundled third-party assets keep their own licenses — see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 - Art: [16×16 MiniWorld Sprites](https://merchant-shade.itch.io/16x16-mini-world-sprites)
   by Shade & octoshrimpy (CC0); job/character sheets derived from
   [Ninja Adventure](https://pixel-boy.itch.io/ninja-adventure-asset-pack) by Pixel-boy &
