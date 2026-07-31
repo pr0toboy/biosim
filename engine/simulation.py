@@ -1593,7 +1593,15 @@ def _beh_expedition(entity: Entity, ctx, _cb, _eff_speed) -> bool:
                            "x": sx, "y": sy,
                            "dist": int(_dist(clan.cx, clan.cy, sx, sy))})
     if entity.expedition_phase == "out":
-        if target is None or entity.expedition_site in clan.known_sites:
+        # La bascule retour tient à l'ARRIVÉE, pas à l'apprentissage : quand les 12 sites déjà
+        # connus sont tous meilleurs, `_learn_site` refuse d'enregistrer celui-ci (borne), et
+        # une condition fondée sur `known_sites` ne tomberait JAMAIS — l'éclaireur piétinerait
+        # sur sa cible jusqu'au timeout, et cette terre qu'il a POURTANT ATTEINTE finirait
+        # classée « inatteignable » (finding de gate Regigigas 978a6812). Rare, borné, mais
+        # sémantiquement faux : il est arrivé, il rentre.
+        arrived = (target is not None
+                   and _dist(entity.x, entity.y, target[0], target[1]) <= SITE_DISCOVER_R)
+        if target is None or arrived or entity.expedition_site in clan.known_sites:
             entity.expedition_phase = "home"   # relevé fait (ou site introuvable) → il rentre
         else:
             entity.state = State.EXPLORING
@@ -4589,7 +4597,10 @@ class Simulation:
             if e.expedition_phase is not None:
                 if self.tick_count - e.expedition_t0 > EXPEDITION_TIMEOUT:
                     # mission périmée sur un éclaireur que la cascade ne visite plus (famine,
-                    # combat permanent) → on la clôt ICI, sinon le clan ne repartirait jamais
+                    # combat permanent) → on la clôt ICI, sinon le clan ne repartirait jamais.
+                    # Ce balayage ne passe qu'aux ticks où un clan est à l'échéance (retour
+                    # précoce plus haut) : la mission périmée peut donc survivre au plus une
+                    # période avant d'être ramassée — latence acceptée, pas une fuite.
                     tick_events.append({"type": "expedition_lost", "clan_id": e.clan_id,
                                         "site": e.expedition_site})
                     _clear_expedition(e)

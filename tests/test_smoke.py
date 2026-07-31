@@ -2071,6 +2071,44 @@ def test_p7_g1_expedition_dispatch_and_discovery():
     print("  test_p7_g1_expedition_dispatch_and_discovery OK (dispatch unique, découverte, retour, timeout)")
 
 
+def test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn():
+    """P7 G1 (finding de gate) : l'éclaireur qui ATTEINT sa cible rentre, même quand la borne
+    des 12 sites connus l'empêche d'enregistrer celle-ci (tous les connus sont meilleurs).
+    Sinon la bascule retour ne tombe jamais : il piétine sur place jusqu'au timeout et cette
+    terre POURTANT ATTEINTE finit classée inatteignable — sémantique fausse."""
+    from engine.simulation import (KNOWN_SITES_MAX, SCOUT_PERIOD, SCOUT_PHASE, SITE_MIN_POP,
+                                   _beh_expedition, State)
+    from engine.entities import EntityType
+    sim = Simulation(World(width=140, height=100, seed=424242)); sim.populate()
+    clan = sim.clans[0]
+    clan.age = 1
+    clan.known_sites = list(range(KNOWN_SITES_MAX))      # les 12 MEILLEURS déjà connus
+    humans = [e for e in sim.entities if e.alive and e.clan_id == clan.id]
+    while len(humans) < SITE_MIN_POP:
+        recruit = next(e for e in sim.entities
+                       if e.alive and e.etype == EntityType.HUMAN and e.clan_id not in (None, clan.id))
+        recruit.clan_id = clan.id
+        humans.append(recruit)
+    sim.tick_count = (SCOUT_PERIOD - clan.id * SCOUT_PHASE) % SCOUT_PERIOD
+    sim._dispatch_expeditions({}, [])
+    scout = next((e for e in sim.entities if e.expedition_phase is not None), None)
+    assert scout is not None, "aucune expédition alors qu'il reste des sites hors des 12 connus"
+    assert scout.expedition_site >= KNOWN_SITES_MAX, "la cible devrait être un site moins bon"
+
+    class _Ctx: pass
+    ctx = _Ctx(); ctx.world = sim.world; ctx.events = []
+    ctx.clans = {c.id: c for c in sim.clans}; ctx.tick = sim.tick_count
+    site = next(s for s in sim.world.site_catalogue() if s[0] == scout.expedition_site)
+    sid = scout.expedition_site
+    scout.x, scout.y = float(site[1]), float(site[2])     # il est arrivé dessus
+    _beh_expedition(scout, ctx, {}, 1.0)
+    assert sid not in clan.known_sites, "la borne devrait avoir refusé ce site (moins bon que les 12)"
+    assert scout.expedition_phase == "home", "arrivé mais sans rien apprendre → il doit RENTRER"
+    assert sid not in clan.failed_sites, "une terre ATTEINTE ne doit jamais être dite inatteignable"
+    print("  test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn OK "
+          "(arrivée close la mission même borne atteinte, aucun renoncement abusif)")
+
+
 def test_p7_g1_known_sites_bound_inherit_and_save_load():
     """P7 G1 : known_sites borné aux MEILLEURS sites (site_id croissant = score décroissant),
     hérité par un clan fondé (colonie/scission : le savoir part avec les hommes), et l'état de
@@ -2241,6 +2279,7 @@ if __name__ == "__main__":
             test_p7_g1_site_catalogue_deterministic,
             test_p7_g1_expedition_dispatch_and_discovery,
             test_p7_g1_known_sites_bound_inherit_and_save_load,
+            test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
