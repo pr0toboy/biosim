@@ -2188,7 +2188,13 @@ def test_p7_g2_directed_colony_founding_and_filters():
     sim = Simulation(w); sim.populate()
     mother, far = _g2_ready_mother(sim, w, COLONY_MIN_SCORE)
     assert far, "aucun site lointain éligible : scénario à recalibrer"
-    ruin = Building(id=90001, clan_id=None, x=int(mother.cx) + 3, y=int(mother.cy) + 3, btype="ruin")
+    # ruine posée sur une terre MÉDIOCRE : la terre lointaine doit l'emporter (A7)
+    _conv = w.conv_grid()
+    _poor = min(((int(_conv[_y, _x]), _x, _y)
+                 for _y in range(int(mother.cy) - 12, int(mother.cy) + 13)
+                 for _x in range(int(mother.cx) - 12, int(mother.cx) + 13)
+                 if 0 <= _x < w.width and 0 <= _y < w.height and w.is_walkable(_x, _y)))
+    ruin = Building(id=90001, clan_id=None, x=_poor[1], y=_poor[2], btype="ruin")
     sim.buildings.append(ruin)
     evs = []
     sim._swarm_split(mother.id, evs)
@@ -2239,8 +2245,27 @@ def test_p7_g2_directed_colony_founding_and_filters():
     assert sw4["on_ruin"] is True and ruin4 not in sim4.buildings, \
         "COLONY_OFF : le chemin actuel (ruine consommée) doit être repris à l'identique"
     assert all(e.colonist_dest is None for e in sim4.entities), "COLONY_OFF : personne en marche"
+    # A7 : face à une BONNE ruine, l'exil est refusé — sinon la recolonisation des ruines (E8)
+    # deviendrait du contenu mort (mesuré : 6 essaimages sur 6 partaient au loin sans cette marge).
+    from engine.simulation import SWARM_DIRECT_MARGIN
+    w5 = World(width=220, height=160, seed=424242)
+    sim5 = Simulation(w5); sim5.populate()
+    m5, far5 = _g2_ready_mother(sim5, w5, COLONY_MIN_SCORE)
+    _best_site = max(s5[3] for s5 in far5)
+    _conv5 = w5.conv_grid()
+    _rich = max(((int(_conv5[_y, _x]), _x, _y)
+                 for _y in range(w5.height) for _x in range(w5.width)
+                 if w5.is_walkable(_x, _y)))
+    assert _rich[0] + SWARM_DIRECT_MARGIN > _best_site, "scénario à recalibrer : ruine pas assez riche"
+    sim5.buildings.append(Building(id=90003, clan_id=None, x=_rich[1], y=_rich[2], btype="ruin"))
+    evs5 = []
+    sim5._swarm_split(m5.id, evs5)
+    sw5 = next(e for e in evs5 if e["type"] == "clan_swarm")
+    assert "site" not in sw5 and sw5["on_ruin"] is True, \
+        "face à une ruine qui vaut mieux que la terre lointaine, on doit REPEUPLER la ruine"
     print("  test_p7_g2_directed_colony_founding_and_filters OK (ruine préservée, site/on_ruin "
-          "exclusifs, colons en marche, filtres renoncé et occupé, COLONY_OFF inerte)")
+          "exclusifs, colons en marche, filtres renoncé et occupé, COLONY_OFF inerte, "
+          "marge A7 rend les ruines aux vivants)")
 
 
 def test_p7_g2_colonist_march_is_persistent_and_bounded():

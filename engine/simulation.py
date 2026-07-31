@@ -667,6 +667,12 @@ EXPLORE_MARK_R_SCOUT = 4       # rayon de marquage autour d'un éclaireur en mis
 COLONY_MIN_SCORE = 9    # une colonie lointaine se fonde sur une BONNE terre (médiane du catalogue)
 SITE_OCCUPIED_R  = 6    # un site est OCCUPÉ si un feu de camp vivant est à cette distance
 COLONIST_TIMEOUT = 3600 # budget de marche des colons (même échelle que l'expédition, plat)
+# A7 : la terre lointaine ne l'emporte sur la ruine d'à côté que si elle est NETTEMENT
+# meilleure. Sans cette marge, il suffit qu'UNE terre lointaine soit connue — condition
+# vraie tôt et durablement — pour que TOUS les essaimages partent au loin : mesuré 6 sur 6
+# sur deux gabarits, et la recolonisation des ruines (E8) devenait du contenu mort, alors
+# que le cycle des empires a besoin que les ruines se repeuplent.
+SWARM_DIRECT_MARGIN = 4  # provisoire, calibré par sonde : il faut les DEUX contenus vivants
 _TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
 _GRANARY_ON = _ECON_ON and os.environ.get("GRANARY_OFF") != "1"  # F4 : moulin L2 = grenier + famine par les réserves
 MILL_L2_BREAD_MULT = 3   # F4 : cap de pains du moulin L2 (5 → 15) — il STOCKE, il n'accélère pas
@@ -4429,6 +4435,8 @@ class Simulation:
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
                     and e.iron == 0 and e.gold == 0
                     and e._build_target_type is None
+                    and e.colonist_dest is None      # P7 G2 : ni un colon en route (sinon la
+                    # colonne perd ses hommes en chemin : la garde inverse existait déjà)
                     and e.expedition_phase is None   # P7 G1 : un éclaireur en mission n'est
                     # pas recrutable marchand (sinon son slot d'expédition fuit → le clan
                     # reste marqué « expédition en vol » pour toujours)
@@ -4561,6 +4569,7 @@ class Simulation:
                     and e.gestation_left == 0 and e.wood == 0 and e.stone == 0
                     and e.iron == 0 and e.gold == 0
                     and e._build_target_type is None
+                    and e.colonist_dest is None      # P7 G2 : idem pour un colon en route
                     and e.expedition_phase is None   # P7 G1 : idem, pas de double-booking
                     and e.trade_phase is None):
                 candidates.setdefault(e.clan_id, []).append(e)
@@ -4647,6 +4656,7 @@ class Simulation:
                     and e.gestation_left == 0
                     and e._build_target_type is None
                     and e.trade_phase is None and e.pilgrim_phase is None
+                    and e.colonist_dest is None       # P7 G2 : un colon marche vers sa terre
                     and _role_ok(e.role, "scout")):   # gardes croisées : pas de double-booking
                 candidates.setdefault(e.clan_id, []).append(e)
         for c in due:
@@ -4969,12 +4979,20 @@ class Simulation:
                                                        -c[0]))
         # Recolonisation : la ruine la plus proche du feu-mère (tie-break id bâtiment) si elle existe.
         ruins = [b for b in self.buildings if b.btype == "ruin"]
+        ruin = (min(ruins, key=lambda b: ((b.x - mother.cx) ** 2 + (b.y - mother.cy) ** 2, b.id))
+                if ruins else None)
         on_ruin = False
+        if site_pick is not None and ruin is not None:
+            # A7 — l'exil ne se décide pas contre une ruine qui vaut le coup. On compare les deux
+            # terres avec le MÊME juge et à la MÊME époque : la conv FIGÉE du monde vierge, des
+            # deux côtés (le score du catalogue EST cette conv à l'ancre). Lookup O(1), aucun
+            # calcul frais — la conv fraîche reste réservée au PUSH de la migration (G3).
+            if site_pick[3] < int(self.world.conv_grid()[ruin.y, ruin.x]) + SWARM_DIRECT_MARGIN:
+                site_pick = None          # la ruine tient la comparaison → on repeuple l'ancien lieu
         if site_pick is not None:
             # La ruine n'est PAS consommée : elle reste disponible pour le prochain essaimage local.
             fx, fy = float(site_pick[1]), float(site_pick[2])
-        elif ruins:
-            ruin = min(ruins, key=lambda b: ((b.x - mother.cx) ** 2 + (b.y - mother.cy) ** 2, b.id))
+        elif ruin is not None:
             fx, fy = ruin.x, ruin.y
             self.buildings.remove(ruin)   # consommée → le feu de la colonie prend sa place
             on_ruin = True
