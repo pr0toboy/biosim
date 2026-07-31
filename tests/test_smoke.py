@@ -2159,6 +2159,133 @@ def test_p7_g1_known_sites_bound_inherit_and_save_load():
     print("  test_p7_g1_known_sites_bound_inherit_and_save_load OK (borne, héritage, save/load, vieux save)")
 
 
+def _g2_ready_mother(sim, w, min_score):
+    """Prépare un clan capable d'essaimer LOIN : carte des sites éligibles + pop suffisante."""
+    from engine.simulation import SWARM_MIN_POP
+    from engine.entities import EntityType, spawn
+    mother = sim.clans[0]
+    min_d = min(w.width, w.height) // 4
+    far = [s for s in w.site_catalogue()
+           if ((s[1] - mother.cx) ** 2 + (s[2] - mother.cy) ** 2) ** 0.5 >= min_d and s[3] >= min_score]
+    mother.known_sites = sorted(s[0] for s in far)[:12]
+    members = [e for e in sim.entities if e.alive and e.etype == EntityType.HUMAN
+               and e.clan_id == mother.id]
+    while len(members) < SWARM_MIN_POP:
+        e = spawn(EntityType.HUMAN, mother.cx + 1, mother.cy + 1)
+        e.clan_id = mother.id
+        sim.entities.append(e)
+        members.append(e)
+    return mother, far
+
+
+def test_p7_g2_directed_colony_founding_and_filters():
+    """P7 G2 : quand la mère connaît une belle terre au loin, la colonie s'y fonde — la RUINE
+    N'EST PAS consommée (elle reste pour le prochain essaimage local), l'event porte `site` et
+    `on_ruin` reste False (mutuellement exclusifs), et les colons partent en marche. Vérifie
+    aussi les filtres d'éligibilité : terre renoncée, terre déjà habitée."""
+    from engine.simulation import Building, COLONY_MIN_SCORE, SITE_OCCUPIED_R
+    w = World(width=220, height=160, seed=424242)
+    sim = Simulation(w); sim.populate()
+    mother, far = _g2_ready_mother(sim, w, COLONY_MIN_SCORE)
+    assert far, "aucun site lointain éligible : scénario à recalibrer"
+    ruin = Building(id=90001, clan_id=None, x=int(mother.cx) + 3, y=int(mother.cy) + 3, btype="ruin")
+    sim.buildings.append(ruin)
+    evs = []
+    sim._swarm_split(mother.id, evs)
+    sw = next(e for e in evs if e["type"] == "clan_swarm")
+    assert "site" in sw, "fondation dirigée attendue (la mère connaît des terres lointaines)"
+    assert sw["on_ruin"] is False, "`site` et `on_ruin` doivent être mutuellement exclusifs"
+    assert ruin in sim.buildings, "la ruine ne doit PAS être consommée par une fondation dirigée"
+    colons = [e for e in sim.entities if e.colonist_dest is not None]
+    assert colons, "les colons doivent partir en marche vers leur terre"
+    assert colons[0].colonist_dest == (sw["x"], sw["y"]), "destination des colons ≠ ancre du site"
+
+    # une terre RENONCÉE ne doit jamais être choisie (A5), ni une terre déjà habitée
+    w2 = World(width=220, height=160, seed=424242)
+    sim2 = Simulation(w2); sim2.populate()
+    m2, far2 = _g2_ready_mother(sim2, w2, COLONY_MIN_SCORE)
+    m2.failed_sites = list(m2.known_sites)          # tout ce qu'elle connaît est abandonné
+    evs2 = []
+    sim2._swarm_split(m2.id, evs2)
+    sw2 = next(e for e in evs2 if e["type"] == "clan_swarm")
+    assert "site" not in sw2, "une terre renoncée ne doit jamais devenir une colonie"
+
+    w3 = World(width=220, height=160, seed=424242)
+    sim3 = Simulation(w3); sim3.populate()
+    m3, far3 = _g2_ready_mother(sim3, w3, COLONY_MIN_SCORE)
+    for sid, sx, sy, _sc in far3:                   # on plante un feu sur chaque terre connue
+        sim3.buildings.append(Building(id=91000 + sid, clan_id=99, x=sx, y=sy, btype="campfire"))
+    evs3 = []
+    sim3._swarm_split(m3.id, evs3)
+    sw3 = next(e for e in evs3 if e["type"] == "clan_swarm")
+    assert "site" not in sw3, "un site OCCUPÉ (feu à ≤6) ne doit pas être colonisé"
+    # COLONY_OFF : le chemin ACTUEL, à l'identique — ruine consommée, on_ruin True, pas de `site`,
+    # personne en marche. Le sous-interrupteur doit rendre le bloc rigoureusement inerte.
+    import engine.simulation as _S
+    w4 = World(width=220, height=160, seed=424242)
+    sim4 = Simulation(w4); sim4.populate()
+    m4, _far4 = _g2_ready_mother(sim4, w4, COLONY_MIN_SCORE)
+    ruin4 = Building(id=90002, clan_id=None, x=int(m4.cx) + 3, y=int(m4.cy) + 3, btype="ruin")
+    sim4.buildings.append(ruin4)
+    _saved = _S._COLONY_ON
+    try:
+        _S._COLONY_ON = False
+        evs4 = []
+        sim4._swarm_split(m4.id, evs4)
+    finally:
+        _S._COLONY_ON = _saved
+    sw4 = next(e for e in evs4 if e["type"] == "clan_swarm")
+    assert "site" not in sw4, "COLONY_OFF : aucune clé `site` ne doit apparaître au payload"
+    assert sw4["on_ruin"] is True and ruin4 not in sim4.buildings, \
+        "COLONY_OFF : le chemin actuel (ruine consommée) doit être repris à l'identique"
+    assert all(e.colonist_dest is None for e in sim4.entities), "COLONY_OFF : personne en marche"
+    print("  test_p7_g2_directed_colony_founding_and_filters OK (ruine préservée, site/on_ruin "
+          "exclusifs, colons en marche, filtres renoncé et occupé, COLONY_OFF inerte)")
+
+
+def test_p7_g2_colonist_march_is_persistent_and_bounded():
+    """P7 G2 : la marche des colons tient dans un slot PERSISTANT — elle survit à l'écrasement
+    de target_x par les besoins vitaux (54 endroits dans le moteur) — s'arrête à l'arrivée,
+    et ne peut pas zombifier (timeout). Le slot survit au save/load, vieux save → pas en route."""
+    from engine.simulation import _beh_colonist, COLONIST_TIMEOUT, COLONY_MIN_SCORE, State
+    w = World(width=220, height=160, seed=424242)
+    sim = Simulation(w); sim.populate()
+    mother, far = _g2_ready_mother(sim, w, COLONY_MIN_SCORE)
+    sim._swarm_split(mother.id, [])
+    colon = next(e for e in sim.entities if e.colonist_dest is not None)
+    dest = colon.colonist_dest
+
+    class _Ctx: pass
+    ctx = _Ctx(); ctx.world = w; ctx.events = []; ctx.tick = sim.tick_count
+    for _ in range(30):                       # 30 ticks de marche, cible SABOTÉE à chaque tick
+        colon.target_x, colon.target_y = colon.x + 99, colon.y - 99   # un besoin vital détourne
+        assert _beh_colonist(colon, ctx, {}, 0.3), "la marche doit reprendre la main chaque tick"
+        assert (colon.target_x, colon.target_y) == (float(dest[0]), float(dest[1])), \
+            "cible non RE-POSÉE : une cible écrite une seule fois ne survit pas aux détours vitaux"
+    assert colon.state == State.EXPLORING
+    colon.x, colon.y = float(dest[0]), float(dest[1])      # arrivé
+    _beh_colonist(colon, ctx, {}, 0.3)
+    assert colon.colonist_dest is None and colon.colonist_t0 == 0, "arrivée : le slot doit être vidé"
+
+    colon2 = next(e for e in sim.entities if e.colonist_dest is not None)
+    ctx.tick = colon2.colonist_t0 + COLONIST_TIMEOUT + 1
+    _beh_colonist(colon2, ctx, {}, 0.3)
+    assert colon2.colonist_dest is None, "timeout : le colon s'installe où il est, pas de zombie"
+
+    marcheur = next(e for e in sim.entities if e.colonist_dest is not None)
+    mid, mdest, mt0 = marcheur.id, marcheur.colonist_dest, marcheur.colonist_t0
+    sim2 = Simulation(World(width=220, height=160, seed=424242)); sim2.load_state(sim.save_state())
+    m2 = next(e for e in sim2.entities if e.id == mid)
+    assert (m2.colonist_dest, m2.colonist_t0) == (mdest, mt0), "marche des colons perdue au load"
+    st = sim.save_state()
+    for ed in st["entities"]:
+        ed.pop("colonist_dest", None); ed.pop("colonist_t0", None)
+    sim3 = Simulation(World(width=220, height=160, seed=424242)); sim3.load_state(st)
+    assert all(e.colonist_dest is None for e in sim3.entities), "vieux save → personne en route"
+    print("  test_p7_g2_colonist_march_is_persistent_and_bounded OK (cible re-posée sous "
+          "sabotage, arrivée, timeout, save/load, vieux save)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -2280,6 +2407,8 @@ if __name__ == "__main__":
             test_p7_g1_expedition_dispatch_and_discovery,
             test_p7_g1_known_sites_bound_inherit_and_save_load,
             test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
+            test_p7_g2_directed_colony_founding_and_filters,
+            test_p7_g2_colonist_march_is_persistent_and_bounded,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,

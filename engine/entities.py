@@ -353,6 +353,7 @@ class Entity:
         "war_kills", "built_count", "hero_name",   # P5 E4 : héros & annales
         "gold_dest",                                # P6 F1 : destination du dépôt d'or (church|market)
         "expedition_site", "expedition_t0", "expedition_phase",   # P7 G1 : mission d'exploration (état PERSISTANT)
+        "colonist_dest", "colonist_t0",             # P7 G2 : marche des colons vers la terre promise
     ]
 
     def __init__(self, etype: EntityType, x: float, y: float, sex: Sex = None):
@@ -421,6 +422,10 @@ class Entity:
         self.expedition_site: Optional[int] = None   # site_id visé (None = pas en mission)
         self.expedition_t0: int = 0                  # tick de DÉPART (timeout absolu, cf. _beh_expedition)
         self.expedition_phase: Optional[str] = None  # None | "out" (vers le site) | "home" (retour au feu)
+        # P7 G2 — même discipline que la mission d'exploration : la destination vit dans un
+        # slot PERSISTANT re-posé chaque tick, jamais dans target_x (écrasé par les besoins vitaux).
+        self.colonist_dest: Optional[tuple] = None   # (x, y) de l'ancre du site, None = pas en route
+        self.colonist_t0: int = 0                    # tick de départ (timeout absolu)
         self._build_target_x: Optional[float] = None   # destination planifiée pour construction
         self._build_target_y: Optional[float] = None
         self._build_target_type: Optional[str] = None
@@ -536,6 +541,8 @@ class Entity:
             "expedition_site": self.expedition_site,     # P7 G1
             "expedition_t0": self.expedition_t0,
             "expedition_phase": self.expedition_phase,
+            "colonist_dest": list(self.colonist_dest) if self.colonist_dest else None,  # P7 G2
+            "colonist_t0": self.colonist_t0,
         }
 
     @classmethod
@@ -595,6 +602,9 @@ class Entity:
         e.expedition_site = d.get("expedition_site", None)   # P7 G1 (vieux save → pas en mission)
         e.expedition_t0 = d.get("expedition_t0", 0)
         e.expedition_phase = d.get("expedition_phase", None)
+        _cd = d.get("colonist_dest", None)                    # P7 G2 (vieux save → pas en route)
+        e.colonist_dest = (int(_cd[0]), int(_cd[1])) if _cd else None
+        e.colonist_t0 = d.get("colonist_t0", 0)
         e._etype_str = etype.value; e._sex_str = e.sex.value
         return e
 

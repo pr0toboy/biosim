@@ -658,6 +658,15 @@ SCOUT_THIRST_MAX = 55
 EXPLORE_MARK_PERIOD = 25       # ticks entre deux marquages de la carte explorée (cosmétique)
 EXPLORE_MARK_R      = 2        # rayon de marquage autour d'un humain
 EXPLORE_MARK_R_SCOUT = 4       # rayon de marquage autour d'un éclaireur en mission (il regarde loin)
+# G2 colonies lointaines. Le seuil de distance est RELATIF au monde (arbitrage A6) : « lointain »
+# n'a pas le même sens sur un gabarit de test et sur la carte servie, et un absolu ne peut pas être
+# juste sur les deux. Mesuré avant de câbler (leçon des contenus morts E2/E3) : l'éclaireur vise
+# toujours le site inconnu LE PLUS PROCHE, donc la carte d'un clan se remplit du proche vers le
+# lointain (médiane 22, max 41 sur 220x160 en 12000 t) pendant que l'essaimage part TÔT — un seuil
+# absolu à 60 n'aurait jamais firé. Division ENTIÈRE : aucun flottant dans un seuil.
+COLONY_MIN_SCORE = 9    # une colonie lointaine se fonde sur une BONNE terre (médiane du catalogue)
+SITE_OCCUPIED_R  = 6    # un site est OCCUPÉ si un feu de camp vivant est à cette distance
+COLONIST_TIMEOUT = 3600 # budget de marche des colons (même échelle que l'expédition, plat)
 _TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
 _GRANARY_ON = _ECON_ON and os.environ.get("GRANARY_OFF") != "1"  # F4 : moulin L2 = grenier + famine par les réserves
 MILL_L2_BREAD_MULT = 3   # F4 : cap de pains du moulin L2 (5 → 15) — il STOCKE, il n'accélère pas
@@ -1618,6 +1627,30 @@ def _beh_expedition(entity: Entity, ctx, _cb, _eff_speed) -> bool:
     return True
 
 
+def _beh_colonist(entity: Entity, ctx, _cb, _eff_speed) -> bool:
+    """Marche des colons (P7 G2). Le drapeau est planté au départ — la colonie EXISTE dès le
+    tick de l'essaimage — mais ses hommes, eux, doivent traverser la carte : sans ça le clan
+    serait téléporté (`_found_clan` réassigne clan_id sans déplacer personne). La destination
+    vit dans un slot PERSISTANT re-posé à chaque tick, comme la caravane et le pèlerin : une
+    cible posée une seule fois ne survivrait pas au premier arrêt pour boire. La survie reste
+    prioritaire — le colon mange en chemin, puis REPREND sa route, c'est le comportement voulu.
+    Aucun tirage. Rien n'est porté, donc aucun chemin d'échec ne peut faire fuir de ressource."""
+    world = ctx.world
+    if ctx.tick - entity.colonist_t0 > COLONIST_TIMEOUT:
+        entity.colonist_dest = None      # filet anti-zombie : il s'installe où il en est
+        entity.colonist_t0 = 0
+        return False
+    dx, dy = entity.colonist_dest
+    if _dist(entity.x, entity.y, dx, dy) <= 2.0:
+        entity.colonist_dest = None      # arrivé sur sa terre : il reprend une vie normale
+        entity.colonist_t0 = 0
+        return False
+    entity.state = State.EXPLORING
+    entity.target_x = float(dx); entity.target_y = float(dy)
+    _move_toward(entity, entity.target_x, entity.target_y, _eff_speed, world)
+    return True
+
+
 def _try_forge_upgrade(entity: Entity, forge, events: list) -> bool:
     """Bloc B : à la forge, upgrade un outil PIERRE → FER en consommant le fer
     stocké. Pioche pierre → pioche fer, puis hache pierre → hache fer."""
@@ -2158,6 +2191,10 @@ def _beh_work(entity, ctx, _cb, _eff_speed):
     # pas happé par un chantier. Slot toujours None sous CARTO_OFF → garde gratuite.
     if entity.expedition_phase is not None:
         if _beh_expedition(entity, ctx, _cb, _eff_speed):
+            return True
+    # 3.4quater Marche des colons (P7 G2) — la colonne qui traverse la carte vers sa terre.
+    if entity.colonist_dest is not None:
+        if _beh_colonist(entity, ctx, _cb, _eff_speed):
             return True
     # 3.45 OFFICE (C1) : la cloche a sonné → procession vers l'église du clan puis
     # prière (PRAY_DURATION agenouillé) → bénédiction. Collectif, gratuit, borné à
@@ -4902,10 +4939,41 @@ class Simulation:
         members.sort(key=lambda e: (-((e.x - mother.cx) ** 2 + (e.y - mother.cy) ** 2), e.id))
         colonists = members[:K]
         leader = colonists[0]
+        # G2 — FONDATION DIRIGÉE : si la mère connaît une belle terre au loin, la colonie s'y fonde
+        # plutôt que sur la ruine d'à côté. Réordonnancement PUR d'une décision existante (pattern
+        # de l'envie F2) : les conditions d'entrée de l'essaimage ne bougent pas, seul (fx, fy) change.
+        site_pick = None
+        if _COLONY_ON and mother.known_sites:
+            _cat = self.world.site_catalogue()
+            _comp = self.world.land_component(int(mother.cx), int(mother.cy))
+            _min_d = min(self.world.width, self.world.height) // 4   # A6 : relatif au monde
+            _fires = [b for b in self.buildings if b.btype == "campfire"]
+            _cands = []
+            for _sid, _sx, _sy, _sc in _cat:
+                if _sid not in mother.known_sites or _sid in mother.failed_sites:
+                    continue                     # A5 : jamais une terre où nos hommes ont renoncé
+                if _sc < COLONY_MIN_SCORE:
+                    continue
+                if (_sx - mother.cx) ** 2 + (_sy - mother.cy) ** 2 < _min_d ** 2:
+                    continue                     # trop près : c'est un essaimage local, pas une colonie
+                if _comp >= 0 and self.world.land_component(_sx, _sy) != _comp:
+                    continue                     # A3 : pas de colonie au-delà d'une mer
+                if not self.world.is_walkable(_sx, _sy):
+                    continue                     # ceinture : un feu ne tombe JAMAIS dans l'eau
+                if any((f.x - _sx) ** 2 + (f.y - _sy) ** 2 <= SITE_OCCUPIED_R ** 2 for f in _fires):
+                    continue                     # déjà habité (occupation DÉRIVÉE, aucun état stocké)
+                _cands.append((_sid, _sx, _sy, _sc))
+            if _cands:                           # la meilleure terre, la plus proche à score égal
+                site_pick = max(_cands, key=lambda c: (c[3],
+                                                       -((c[1] - mother.cx) ** 2 + (c[2] - mother.cy) ** 2),
+                                                       -c[0]))
         # Recolonisation : la ruine la plus proche du feu-mère (tie-break id bâtiment) si elle existe.
         ruins = [b for b in self.buildings if b.btype == "ruin"]
         on_ruin = False
-        if ruins:
+        if site_pick is not None:
+            # La ruine n'est PAS consommée : elle reste disponible pour le prochain essaimage local.
+            fx, fy = float(site_pick[1]), float(site_pick[2])
+        elif ruins:
             ruin = min(ruins, key=lambda b: ((b.x - mother.cx) ** 2 + (b.y - mother.cy) ** 2, b.id))
             fx, fy = ruin.x, ruin.y
             self.buildings.remove(ruin)   # consommée → le feu de la colonie prend sa place
@@ -4920,8 +4988,14 @@ class Simulation:
         k = _rel_key(mother_id, nc.id)
         self.relations[k] = min(REL_MAX, self.relations.get(k, 0) + REL_D_COLONY)
         self._ally_state.add(k)
-        tick_events.append({"type": "clan_swarm", "clan_id": mother_id, "new_clan": nc.id,
-                            "members": K, "x": int(fx), "y": int(fy), "on_ruin": on_ruin})
+        _ev = {"type": "clan_swarm", "clan_id": mother_id, "new_clan": nc.id,
+               "members": K, "x": int(fx), "y": int(fy), "on_ruin": on_ruin}
+        if site_pick is not None:      # discipline golden : clé ABSENTE hors fondation dirigée
+            _ev["site"] = site_pick[0]   # (site et on_ruin sont mutuellement exclusifs)
+            for _e in colonists:         # la colonne se met en marche vers sa terre promise
+                _e.colonist_dest = (int(site_pick[1]), int(site_pick[2]))
+                _e.colonist_t0 = self.tick_count
+        tick_events.append(_ev)
 
     def _clans_wire(self):
         """Sérialise les clans + wire politique P2 (gated _POL_ON, DISCIPLINE GOLDEN : une clé
