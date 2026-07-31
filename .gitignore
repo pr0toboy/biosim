@@ -47,3 +47,10 @@ logs/
 *.tar.gz
 *.zip
 save.json.prev
+
+# Travail local (probes, maquettes, revues de sprites) — hors publication
+scratchpad/
+static/sprite-review*.html
+static/preview-*.html
+save*.json*
+archive-*.json*
