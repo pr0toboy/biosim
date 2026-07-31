@@ -46,7 +46,12 @@ from engine.entities import EntityType
 
 
 # ── Init simulation ──────────────────────────────────────────────────────────
-world = World(width=220, height=160)
+# Gabarit du monde DÉPLOYÉ, configurable sans toucher au code (le gabarit de TEST du
+# determinism_guard reste 220x160 et ne suit PAS cette variable : le monde servi peut
+# différer du monde des goldens, comme depuis toujours).
+_W = int(os.environ.get("BIOSIM_WORLD_W", "220"))
+_H = int(os.environ.get("BIOSIM_WORLD_H", "160"))
+world = World(width=_W, height=_H)
 sim   = Simulation(world)
 sim.populate()
 
