@@ -13,6 +13,8 @@ pilgrimages, wars with conquest and tribute, coups, secessions, colonies — a f
 **Stack:** Python · FastAPI + uvicorn · NumPy · HTML Canvas 2D + WebSocket. Runs on a
 Raspberry Pi.
 
+![A BioSim village in winter: villagers with per-job sprites, houses, wheat fields, a monument, and the live chronicle of the world](docs/screenshot.png)
+
 ---
 
 ## Why this is an agent sandbox
