@@ -144,6 +144,19 @@ async def _broadcast(msg: str):
     dead = {ws for ws in results if ws is not None}
     if dead:
         clients.difference_update(dead)
+        # ... et on FERME vraiment la socket (finding d'audit) : la retirer du set ne la ferme
+        # pas. Un client lent restait connecté sans plus rien recevoir, et surtout HORS QUOTA —
+        # il ne comptait plus dans MAX_WS_CLIENTS alors que sa socket vivait toujours, donc en
+        # accumulant on contournait le plafond anti-DoS. Best-effort : une socket déjà morte
+        # lève à la fermeture, ce n'est pas une erreur.
+        await asyncio.gather(*[_close_quietly(ws) for ws in dead])
+
+
+async def _close_quietly(ws: WebSocket):
+    try:
+        await ws.close(code=1011)      # 1011 = Internal Error : le serveur abandonne ce client
+    except Exception:
+        pass
 
 
 async def simulation_loop():
@@ -415,9 +428,12 @@ async def websocket_endpoint(websocket: WebSocket):
         # plafond atteint → on refuse proprement (anti-DoS par accumulation de sockets)
         await websocket.close(code=1013)  # 1013 = Try Again Later
         return
-    clients.add(websocket)
-    # Envoie l'état complet au nouveau client. Le snapshot est pris sous state_lock
-    # (cohérent vs step()), puis sérialisé/envoyé hors verrou (I/O réseau).
+    # Envoie l'état complet AVANT d'entrer dans `clients` (finding d'audit) : inscrit d'abord,
+    # le nouveau venu pouvait recevoir un delta de tick AVANT son init — le front travaillait
+    # alors sur un `worldData` inexistant. On accepte en échange de manquer au plus UN payload
+    # de tick (le suivant arrive 500 ms après, et chaque payload se suffit) : rater un tick est
+    # bénin, en recevoir un avant l'init ne l'est pas.
+    # Le snapshot est pris sous state_lock (cohérent vs step()), sérialisé et envoyé hors verrou.
     try:
         async with state_lock:
             init_state = sim.full_state()
@@ -425,6 +441,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "init",
             "data": init_state
         }))
+        clients.add(websocket)
         while True:
             # Garde la connexion ouverte, attend des messages (ping/pong)
             await websocket.receive_text()
