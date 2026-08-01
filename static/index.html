@@ -3193,6 +3193,10 @@ const SILENT_EVENTS = new Set([
   "build_wheatfield",
   // défection (S2a) : fréquente pendant une guerre → la carte raconte l'absorption (couleurs)
   "clan_defect",
+  // P7 G3 (finding d'audit F5) : on ne raconte pas une INTENTION de partir ni un renoncement —
+  // seule l'arrivée fait date, et elle a son propre handler. Sans cette entrée les deux
+  // tombaient dans le JSON.stringify final et s'affichaient en brut dans le feed.
+  "clan_migration_start", "clan_migration_failed",
   // assignation des métiers (P1) : périodique → pas de spam (le tooltip montre les rôles)
   "clan_jobs",
   // succession du chef (P2) : la couronne 👑 se déplace sur la carte → pas de spam feed
@@ -3507,6 +3511,19 @@ function addEvent(ev) {
   } else if (ev.type === "hero_fallen") {      // P5 E4 mort d'un héros
     div.textContent = `†  ${ev.name} tombe — le clan ${ev.clan_id + 1} pleure son héros`;
     div.style.color = "#cbb58a";
+  } else if (ev.type === "clan_migration") {   // P7 G3 — l'exode ABOUTI (finding d'audit F5)
+    // Le nom du lieu vient de /api/sites quand il est déjà connu du front ; sinon la phrase
+    // reste vraie sans lui. Départ et échec sont SILENCIEUX (cf. SILENT_EVENTS) : on ne raconte
+    // pas une intention, on raconte ce qui a eu lieu — même parti pris qu'en G1 pour les
+    // expéditions, où seule la découverte se racontait.
+    const _s = sitesList.find(s => s.id === ev.site);
+    div.textContent = _s
+      ? `🏚️ Clan ${ev.clan_id + 1} lève le camp et rallume son feu — ${_s.name}`
+      : `🏚️ Clan ${ev.clan_id + 1} lève le camp et rallume son feu au loin`;
+    div.style.color = "#e8c170";
+  } else if (ev.type === "money_dawn") {       // P6 F1 — l'or devient monnaie (une seule fois)
+    div.textContent = `🪙 L'or devient monnaie : les marchands l'acceptent en paiement`;
+    div.style.color = "#fcd34d";
   } else {
     div.textContent = JSON.stringify(ev);
   }
@@ -3970,6 +3987,13 @@ canvas.addEventListener("touchend", (ev) => {
   isDragging    = false;
   lastPinchDist = null;
   if (ev.changedTouches.length !== 1 || !worldData) return;
+
+  // Un PAN n'est pas un tap (finding d'audit F4) : sans cette garde — que `mouseup` applique
+  // depuis toujours — deux balayages rapides passaient pour un double-tap et faisaient sauter
+  // la vue par fitWorld(), et chaque fin de pan laissait une infobulle fantôme.
+  // On sort AVANT `lastTapTime = now` : un pan ne doit pas non plus armer le double-tap.
+  const _t = ev.changedTouches[0];
+  if (Math.hypot(_t.clientX - dragSX, _t.clientY - dragSY) > 4) return;
 
   // Double-tap → recentrer
   const now = Date.now();
