@@ -712,6 +712,13 @@ class World:
         d'origine."""
         if getattr(self, "_conv_cache", None) is not None:
             return self._conv_cache
+        self._conv_cache = self._compute_conv()
+        return self._conv_cache
+
+    def _compute_conv(self):
+        """Le calcul lui-même, sur les grilles TELLES QU'ELLES SONT à l'instant de l'appel.
+        Un seul juge de la valeur d'une terre, deux usages : figé à la construction pour le
+        catalogue (dérivé du seed), frais pour constater qu'un terroir s'est épuisé."""
         fert_n  = self._box_sum(self.fertility_grid >= 1, 8)          # tuiles fertiles r=8
         fert_s  = self._box_sum(np.minimum(self.fertility_grid, 100).astype(np.int64), 8)
         trees   = self._box_sum(self.tree_grid >= TREE_STUMP_THRESHOLD, 8)   # arbres debout r=8
@@ -722,8 +729,16 @@ class World:
                 + trees // 10                                  # couvert forestier
                 + 2 * (plain >= 12))                           # plaine constructible
         conv[~self._walkable] = 0                              # un site s'ancre sur du sol foulable
-        self._conv_cache = conv
         return conv
+
+    def conv_fresh(self):
+        """Convenance des terres MAINTENANT (P7 G3) — mêmes composantes que `conv_grid()`, mais
+        relues sur les grilles du moment : c'est le seul juge capable de voir un terroir
+        s'effondrer (forêt rasée, fertilité épuisée), donc le seul admissible pour le PUSH de
+        migration. Coûteux (~19 ms sur 320x232) : à appeler à cadence lente, jamais par tick,
+        et surtout PAS à mémoriser dans `_conv_cache` — ce serait re-figer ce qu'on veut voir
+        bouger, et corrompre au passage le catalogue de sites qui vit dans ce cache."""
+        return self._compute_conv()
 
     def site_catalogue(self, lattice: int = 16, keep: int = 24, exclusion: int = 20):
         """Catalogue DÉRIVÉ (seed) des meilleurs sites : maxima locaux de conv() sur une

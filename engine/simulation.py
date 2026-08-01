@@ -67,6 +67,28 @@ class Clan:
     last_deed: str = "sa fondation"  # P5 E3 : dernier jalon majeur (dédicace d'un futur monument)
     known_sites: list = field(default_factory=list)  # P7 G1 : site_id connus, triés, bornés KNOWN_SITES_MAX
     failed_sites: list = field(default_factory=list)  # P7 G1 : sites où un éclaireur a échoué (renoncement)
+    # P7 G3 : l'état d'une migration en cours. Champs de dataclass → sérialisés gratuitement par
+    # asdict, et un vieux save les reconstruit aux défauts ci-dessous (pattern G1 known_sites).
+    migrating_to: int = -1        # site_id visé, chantier en cours (-1 = aucune migration)
+    migration_t0: int = -1        # tick de POSE du chantier — timeout ABSOLU, jamais un compteur
+                                  # incrémenté dans un bloc comportemental (leçon G1 : un compteur
+                                  # cesse de tourner dès que le porteur est figé par la faim ou le
+                                  # combat, et le clan resterait « en migration » à vie)
+    migration_bread: int = 0      # vivres emportés (les MATÉRIAUX sont perdus, pas les vivres)
+    push_evals: int = 0           # évals consécutives en terroir épuisé (hystérésis MIGRATE_PUSH_EVALS)
+    last_migration_tick: int = -1  # -1 = n'a JAMAIS migré (le cooldown ne s'applique pas). Un
+                                   # sentinelle plutôt qu'un `-MIGRATION_COOLDOWN` : la constante
+                                   # est définie bien plus bas dans le module, et surtout « jamais
+                                   # migré » n'est pas « a migré il y a longtemps » — sans ça, un
+                                   # clan fondé tard hériterait d'un cooldown déjà purgé par le
+                                   # seul écoulement du monde, et un clan fondé tôt non.
+    founded_tick: int = 0          # A10 — tick de FONDATION, distinct de last_migration_tick.
+                                   # « Délai après une fondation » et « délai après une migration »
+                                   # sont deux sémantiques : les faire tenir dans un seul champ
+                                   # écrasait la sentinelle « jamais migré » et rendait les deux
+                                   # délais indiscernables. Défaut 0 : les clans de la genèse
+                                   # sédentarisent aussi (un monde ne commence pas par un exode),
+                                   # et un vieux save — donc un monde déjà mûr — est libre d'emblée.
 
     def to_dict(self):
         d = {"id": self.id, "cx": self.cx, "cy": self.cy,
@@ -577,6 +599,18 @@ def _dist(ax, ay, bx, by) -> float:
     return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
 
 
+def _terroir_epuise(frais: int, fige: int) -> bool:
+    """G3 PUSH — le terroir s'est-il VRAIMENT effondré ? (arbitrage A8, constantes plus haut)
+    `frais` = conv d'AUJOURD'HUI au feu (seule capable de voir un terroir s'épuiser),
+    `fige`  = conv du monde VIERGE au même point (ce que cette terre valait à l'origine).
+    Les DEUX gardes sont exigées, et chacune veto une famille que l'autre laisserait passer :
+    la chute relative écarte le clan NÉ pauvre (2 sur une terre qui vaut 2 : rien ne s'est
+    épuisé), le plancher écarte le clan RICHE qui se dégrade (21 après 34 : encore le double
+    de la médiane du catalogue). Produit croisé ENTIER — aucun flottant dans un seuil."""
+    return (frais * MIGRATE_PUSH_RATIO_D <= fige * MIGRATE_PUSH_RATIO_N
+            and frais <= MIGRATE_PUSH_FLOOR)
+
+
 def _tile_near_water(world, x: int, y: int) -> bool:
     """True s'il existe une tuile d'eau dans un rayon de MILL_WATER_RADIUS autour de
     (x,y). Condition de cuisson d'un moulin (production) — réutilisée au placement (C3)
@@ -673,6 +707,68 @@ COLONIST_TIMEOUT = 3600 # budget de marche des colons (même échelle que l'exp�
 # sur deux gabarits, et la recolonisation des ruines (E8) devenait du contenu mort, alors
 # que le cycle des empires a besoin que les ruines se repeuplent.
 SWARM_DIRECT_MARGIN = 4  # provisoire, calibré par sonde : il faut les DEUX contenus vivants
+# G3 migration de village. DEUX exodes qui racontent deux histoires différentes (arbitrage A8) :
+# le PULL est l'appel d'une terre bien meilleure, le PUSH la fuite d'une terre épuisée.
+# PULL — gain ABSOLU, pas de ratio (arbitrage a2eaf725) : le coût d'une migration est FIXE (tout
+# rebâtir, matériaux perdus, cooldown), donc son déclencheur doit l'être. Un ratio comparerait un
+# gain proportionnel à un coût qui ne l'est pas — un clan à 6 déménagerait pour +4 points.
+# Le site est jugé sur la conv FIGÉE (le potentiel que l'éclaireur a rapporté), le local sur la
+# conv FRAÎCHE (la réalité vécue) : asymétrie ASSUMÉE et MESURÉE — sur le monde live à 64800 t,
+# les 23 sites inoccupés n'ont perdu que 1,65 point en moyenne (pire cas 4), donc la promesse du
+# figé est surestimée d'environ 2 points et la marge de 10 tient largement.
+MIGRATE_MIN_DIST = 40   # en deçà, ce n'est pas une migration : le village bougerait pour rien
+MIGRATE_MIN_GAIN = 10   # le site connu doit valoir CELA de plus que le terroir vécu
+# PUSH — un COUPLE, pas un seuil (arbitrage A8) : chute relative ET plancher de misère, les DEUX
+# exigés. Chaque garde veto une famille que l'autre laisserait passer, et les deux sont mesurées :
+#  - sans le PLANCHER, un clan RICHE qui se dégrade fuirait une terre encore excellente
+#    (sonde seed 7 : c5 tombe de 34 à 21 — 21 reste le double de la médiane du catalogue) ;
+#  - sans le RATIO, un clan NÉ pauvre fuirait sa naissance et non son épuisement
+#    (sonde déployée : c1 et c2 vivent à 2 sur une terre qui VAUT 2 — rien ne s'est épuisé).
+# Les clans nés pauvres relèvent du PULL, pas du PUSH : le PUSH réserve l'exode-nécessité aux
+# terres qui se sont VRAIMENT effondrées.
+# ARITHMÉTIQUE ENTIÈRE OBLIGATOIRE (même discipline que le //4 d'A6) : le ratio s'écrit en PRODUIT
+# CROISÉ, jamais en flottant — `frais <= figé x N/D` devient `frais * D <= figé * N`.
+# CALIBRÉ sur 48000 ticks-monde (sonde probe_depletion.py, 24000 t x 2 gabarits, relevé /1500 t).
+# Le couple retenu se lit en une phrase : « une terre qui valait au moins le DOUBLE, et qui est
+# tombée au niveau du PIRE site du monde ». Il isole l'unique effondrement authentique des deux
+# sondes (seed 7 c2 : 10 -> 4, soit -60 %) et n'attrape rien d'autre.
+# Pourquoi 1/2 et pas 2/3, qui donnerait pourtant un taux plus proche de la cible : à 2/3 le
+# gabarit déployé fait déclencher c6 (6/9), un clan NÉ sur une terre à 9 — le minimum mesuré du
+# catalogue — et qui a perdu 3 points. Rien ne s'y est effondré, il n'a jamais rien eu ; sur une
+# base figée aussi basse, une perte absolue minuscule suffit à tromper un ratio lâche. C'est
+# précisément la famille qu'A8 réserve au PULL. Le ratio serré préfère MANQUER un cas douteux
+# plutôt que d'exiler un clan de sa naissance.
+MIGRATE_PUSH_RATIO_N = 1   # numérateur   \  frais * D <= figé * N
+MIGRATE_PUSH_RATIO_D = 2   # dénominateur /  (1/2 : le terroir a perdu au moins la moitié)
+MIGRATE_PUSH_FLOOR   = 6   # ... ET il faut être tombé dans la misère (min du catalogue mesuré : 6-9)
+MIGRATE_PUSH_EVALS   = 2   # évals consécutives (hystérésis P2) : un creux passager n'exile personne
+MIGRATION_COOLDOWN   = 3000  # budget de DISTANCE/rythme, PLAT (règle A4 : seules les périodes de
+                             # calendrier suivent TIME_SCALE) — délai APRÈS UNE MIGRATION
+# A10 — délai APRÈS UNE FONDATION, sémantique DIFFÉRENTE du cooldown (les confondre écrasait la
+# sentinelle « jamais migré » et rendait les deux délais indiscernables). Calibré, pas inventé :
+# le churn mesuré part à 240-480 ticks de vie, les départs légitimes à 3120-5040. On CALE BAS dans
+# le trou, pas au milieu : le coût est ASYMÉTRIQUE — trop long stérilise un monde entier (mesuré :
+# 0 départ sur 40000 t du gabarit déployé), trop court ne coûte qu'un départ précoce de plus.
+# FIGÉ à 500 = la plus petite valeur ronde STRICTEMENT au-dessus du paquet churn mesuré (max 480),
+# et STRICTEMENT en dessous de la première opportunité RÉELLE du gabarit déployé (720 : c6 né
+# t=15840 parti t=16560, c8 né t=20880 parti t=21600). Le trou utile est [480, 720] — étroit, d'où
+# le calage bas. 750 aurait re-stérilisé le déployé en emportant ses seules opportunités.
+# NB : un clan ne peut PAS migrer le jour de sa naissance — `due` est calculé avant les scissions,
+# donc la première éval d'un clan neuf tombe au plus tôt un déphasage plus tard.
+MIGRATION_SETTLE     = 500
+# Le feu de camp a build_time=0 (il est POSÉ à la fondation, jamais bâti) : la spec fixe donc le
+# coût du chantier de migration au temps d'une MAISON x2 — le village doit peiner pour renaître.
+MIGRATION_WORK    = 80    # = BUILDING_SPECS["house"].build_time * 2 (vérifié : 40)
+MIGRATE_MIN_POP   = 8     # un hameau ne déménage pas : il n'a pas les bras pour rebâtir
+MIGRATION_BREAD_MAX = 5   # vivres emportés (arbitrage ffafb37e) — assez pour ne pas tomber en
+                          # famine à l'arrivée (le verrou de sortie F4 exige pain>=2), pas assez
+                          # pour que l'exode soit gratuit
+# Budget de trajet, donc PLAT (règle A4, précédent TRADE_TIMEOUT/EXPEDITION_TIMEOUT). Il doit
+# couvrir la marche gloutonne d'un village entier PUIS 80 ticks de travail ; mesuré côté G1 : des
+# trajets de 237 tuiles aboutissent, et 20,5 % échouent pour cause de TERRAIN, pas de distance.
+# Sans ce timeout, un clan visant une terre greedy-inatteignable resterait paralysé À VIE — tous
+# ses bâtisseurs happés par le bloc 4.1 vers un chantier qu'ils n'atteindront jamais.
+MIGRATION_TIMEOUT = 5400
 _TRAILS_ON = _ECON_ON and os.environ.get("TRAILS_OFF") != "1"  # F3 : sentiers d'usure (cosmétique pur)
 _GRANARY_ON = _ECON_ON and os.environ.get("GRANARY_OFF") != "1"  # F4 : moulin L2 = grenier + famine par les réserves
 MILL_L2_BREAD_MULT = 3   # F4 : cap de pains du moulin L2 (5 → 15) — il STOCKE, il n'accélère pas
@@ -3782,6 +3878,10 @@ class Simulation:
                     new_this_tick.append(site)
         self.buildings.extend(new_this_tick)
 
+        # P7 G3 : achèvement/abandon des migrations AVANT la promotion générique — un
+        # `site_campfire` promu en `campfire` ordinaire donnerait DEUX feux au clan.
+        self._update_migrations(tick_events)
+
         # Promouvoir les chantiers terminés en bâtiments réels
         for b in self.buildings:
             if b.btype.startswith("site_") and b.work_done >= b.work_needed > 0:
@@ -4318,6 +4418,10 @@ class Simulation:
                 self._swarm_split(mid, tick_events)
         if _CULTS_ON:   # P5 E1 : conversion & schisme (après les mutations de clans du tick)
             self._update_cults(due, pop, tick_events)
+        # P7 G3 : la décision de migrer se prend APRÈS les mutations de clans du tick (absorptions,
+        # scissions, essaimages) — un clan absorbé entre-temps n'a plus de terre à quitter, et un
+        # clan tout juste fondé lit un `_reservation_ctx` à jour.
+        self._decide_migrations(due, pop, tick_events)
 
     def _cult_guardian(self, cult_id, pop):
         """P5 E1 — gardien d'un culte, DÉRIVÉ de l'état vivant (rien à sérialiser) : le clan
@@ -4894,6 +4998,15 @@ class Simulation:
             # de la mère (même pattern que l'héritage de culte E1). Copie, pas partage : les
             # deux clans exploreront ensuite chacun de leur côté.
             nc.known_sites = list(known_sites)
+        # A10 — un clan neuf doit VIVRE quelque part avant de conclure qu'il s'est trompé.
+        # MESURÉ sans cette garde (sonde g3-live seed 7) : c5, fondé à t=10800, levait le camp à
+        # t=11160 — 360 ticks sur place, une demi-saison ; 6 des 7 départs du run étaient de cette
+        # nature. La cause est structurelle : le clan hérite des `known_sites` de sa mère, donc il
+        # connaît d'emblée les belles terres et n'a aucun passé de migration à purger.
+        # Le champ est posé HORS de `_MIGRATE_ON` : c'est un fait d'état civil du clan, pas une
+        # décision de migration — le gater rendrait la valeur dépendante d'un switch et le
+        # round-trip d'un save incohérent d'un lancement à l'autre.
+        nc.founded_tick = self.tick_count
         self.clans.append(nc)
         for e in members:
             e.clan_id = nid                       # gardent leur rôle jusqu'au prochain _update_jobs
@@ -4931,6 +5044,186 @@ class Simulation:
         tick_events.append({"type": "clan_rebellion", "clan_id": mother_id,
                             "new_clan": nc.id, "members": K, "chief_id": leader.id})
 
+    def _decide_migrations(self, due, pop, tick_events):
+        """P7 G3 — le chef regarde sa terre et décide, à la cadence des modes (AUCUNE période
+        neuve). Deux exodes qui racontent deux histoires : le PULL est l'appel d'une terre bien
+        meilleure, le PUSH la fuite d'une terre épuisée.
+        A9 (a) : on itère en ORDRE D'ID CROISSANT et la réservation est écrite AU MOMENT de la
+        décision — c'est cet ordre, déterministe et rejouable, qui départage deux clans que la
+        même terre appelle le même tick (mesuré : c14 et c17 visaient tous deux s8)."""
+        if not _MIGRATE_ON or not due:
+            return
+        cat = self.world.site_catalogue()
+        if not cat:
+            return
+        fresh = None                       # conv FRAÎCHE : ~19 ms, calculée au plus une fois/tick
+        frozen = self.world.conv_grid()
+        for c in sorted(due, key=lambda c: c.id):
+            if c.migrating_to >= 0:        # déjà en route : on ne redécide pas sous ses pieds
+                continue
+            fx, fy = int(c.cx), int(c.cy)
+            if not (0 <= fx < self.world.width and 0 <= fy < self.world.height):
+                continue
+            if fresh is None:
+                fresh = self.world.conv_fresh()
+            local = int(fresh[fy, fx])
+            # L'hystérésis compte l'état du TERROIR, pas la permission de partir : elle s'accumule
+            # même quand la guerre ou la tension ferment la porte (sinon un clan en crise longue
+            # devrait re-souffrir 2 évals après chaque accalmie).
+            c.push_evals = (c.push_evals + 1) if _terroir_epuise(local, int(frozen[fy, fx])) else 0
+            if c.mode != "peace" or c.tension >= 30 or pop.get(c.id, 0) < MIGRATE_MIN_POP:
+                continue
+            # A10 — DEUX délais aux sémantiques distinctes, jamais confondus :
+            # SÉDENTARISATION depuis la fondation (court : la fenêtre d'opportunité d'un clan est
+            # PRÉCOCE et périssable — mesuré, guerre et tension ferment 54 à 67 % des évals
+            # ensuite, donc un délai long ne reporte pas un départ, il le SUPPRIME) ...
+            if self.tick_count - c.founded_tick < MIGRATION_SETTLE:
+                continue
+            # ... et COOLDOWN depuis la dernière migration (long : on ne déménage pas en boucle).
+            # La sentinelle -1 « n'a JAMAIS migré » reste intacte et opposable.
+            if c.last_migration_tick >= 0 and \
+                    self.tick_count - c.last_migration_tick < MIGRATION_COOLDOWN:
+                continue
+            comp = self.world.land_component(fx, fy)
+            ctx = self._reservation_ctx()      # relu par clan : la réservation du précédent COMPTE
+            best = None
+            for sid, sx, sy, _sc in cat:
+                if sid not in c.known_sites or sid in c.failed_sites:
+                    continue                   # A5 : jamais une terre où nos hommes ont renoncé
+                if (sx - fx) ** 2 + (sy - fy) ** 2 < MIGRATE_MIN_DIST ** 2:
+                    continue                   # trop près : le village bougerait pour rien
+                if comp >= 0 and self.world.land_component(sx, sy) != comp:
+                    continue                   # A3 : on ne migre pas au-delà d'une mer
+                if not self.world.is_walkable(sx, sy):
+                    continue                   # ceinture : un feu ne tombe JAMAIS dans l'eau
+                if self._site_reserved(sid, sx, sy, ctx, self_clan_id=c.id):
+                    continue                   # A9 : habitée, promise, ou déjà en chemin
+                gain = int(frozen[sy, sx]) - local
+                cand = (gain, -((sx - fx) ** 2 + (sy - fy) ** 2), -sid, sid, sx, sy)
+                if best is None or cand > best:
+                    best = cand                # meilleur gain, puis la plus PROCHE, puis id min
+            if best is None:
+                continue
+            gain = best[0]
+            pousse = c.push_evals >= MIGRATE_PUSH_EVALS and gain >= 1
+            tire = gain >= MIGRATE_MIN_GAIN
+            if not (tire or pousse):
+                continue
+            self._start_migration(c, best[3], best[4], best[5],
+                                  "pull" if tire else "push", gain, tick_events)
+
+    def _start_migration(self, clan, sid, sx, sy, cause, gain, tick_events):
+        """Pose le CHANTIER du nouveau feu et RÉSERVE la terre dans le même souffle (A9 a) : entre
+        la décision et la réservation il ne doit pas s'écouler un seul clan de la boucle."""
+        site = Building(id=self._next_building_id, clan_id=clan.id, x=int(sx), y=int(sy),
+                        btype="site_campfire", work_needed=MIGRATION_WORK, work_done=0)
+        self._next_building_id += 1
+        self.buildings.append(site)
+        clan.migrating_to = sid
+        clan.migration_t0 = self.tick_count
+        clan.push_evals = 0
+        tick_events.append({"type": "clan_migration_start", "clan_id": clan.id, "site": sid,
+                            "cause": cause, "gain": gain, "x": int(sx), "y": int(sy)})
+
+    def _update_migrations(self, tick_events):
+        """P7 G3 — achèvement et abandon, CHAQUE TICK (le chantier se termine quand les bâtisseurs
+        finissent, pas quand le chef réfléchit). Placé AVANT la promotion générique des chantiers :
+        sans ça le `site_campfire` deviendrait un `campfire` ordinaire et le clan porterait DEUX
+        feux jusqu'à sa prochaine éval — territoire, `_cb` et `_site_reserved` verraient double."""
+        if not _MIGRATE_ON:
+            return
+        for clan in sorted([c for c in self.clans if c.migrating_to >= 0], key=lambda c: c.id):
+            site = next((b for b in self.buildings if b.btype == "site_campfire"
+                         and b.clan_id == clan.id), None)
+            if site is None:                      # chantier disparu (ruiné, conquis) → on renonce
+                self._abandon_migration(clan, None, "lost", tick_events)
+                continue
+            if site.work_done >= site.work_needed > 0:
+                self._complete_migration(clan, site, tick_events)
+            elif self.tick_count - clan.migration_t0 >= MIGRATION_TIMEOUT:
+                self._abandon_migration(clan, site, "timeout", tick_events)
+
+    def _abandon_migration(self, clan, site, reason, tick_events):
+        """Renoncement — et le site rejoint `failed_sites` (A5) : une terre que le village entier
+        n'a pas su atteindre ne doit plus JAMAIS être proposée à ce clan, ni en migration, ni en
+        colonie, ni en expédition. Sans quoi il la reviserait à chaque éval, à vie."""
+        sid = clan.migrating_to
+        if site is not None and site in self.buildings:
+            self.buildings.remove(site)           # le chantier avorté s'efface (rien n'a été bâti)
+        if sid >= 0 and sid not in clan.failed_sites:
+            clan.failed_sites.append(sid)
+            clan.failed_sites.sort()
+        clan.migrating_to = -1
+        clan.migration_t0 = -1
+        clan.push_evals = 0                       # A9 (c) : la réservation tombe AVEC l'abandon
+        tick_events.append({"type": "clan_migration_failed", "clan_id": clan.id,
+                            "site": sid, "reason": reason})
+
+    def _complete_migration(self, clan, site, tick_events):
+        """BASCULE ATOMIQUE — le village enjambe : pas de mode neuf, pas de phase sans-abri.
+        Dans le MÊME tick : le nouveau feu s'allume, tout l'ancien clan tombe en ruines, le centre
+        suit. A9 (c) : la sentinelle n'est remise QU'APRÈS la pose du feu — il n'existe jamais un
+        tick où la terre n'est ni réservée ni occupée, sinon un voisin s'y glisserait."""
+        from_x, from_y = int(clan.cx), int(clan.cy)
+        sid = clan.migrating_to
+        # Les VIVRES suivent (plafonnés), les MATÉRIAUX sont perdus : on abandonne les murs, c'est
+        # la vraie friction de l'exode (arbitrage ffafb37e).
+        bread = 0
+        for b in self.buildings:
+            if b.clan_id == clan.id and b is not site:
+                bread += getattr(b, "bread", 0) or 0
+        clan.migration_bread = min(bread, MIGRATION_BREAD_MAX)
+        for b in list(self.buildings):
+            if b.clan_id != clan.id or b is site:
+                continue
+            _was_monument = b.btype == "monument"  # un monument laisse un vestige durable (E3)
+            b.btype = "ruin"                      # y compris l'ancien feu et les chantiers avortés
+            b.ruin_ticks = RUIN_LIFETIME * (MONUMENT_RUIN_MULT if _was_monument else 1)
+            b.work_needed = 0
+            b.work_done = 0
+        site.btype = "campfire"                   # le feu s'allume : la terre reste occupée sans
+        site.work_needed = 0                      # discontinuité (A9 c)
+        site.work_done = 0
+        if clan.migration_bread:                  # les vivres emportés garnissent le nouveau foyer
+            site.bread = clan.migration_bread
+        clan.cx, clan.cy = float(site.x), float(site.y)
+        clan.migrating_to = -1
+        clan.migration_t0 = -1
+        clan.push_evals = 0
+        clan.last_migration_tick = self.tick_count
+        clan.migration_bread = 0
+        tick_events.append({"type": "clan_migration", "clan_id": clan.id, "site": sid,
+                            "from_x": from_x, "from_y": from_y,
+                            "to_x": site.x, "to_y": site.y})
+
+    def _reservation_ctx(self):
+        """A9 — l'état des engagements sur les terres, calculé UNE fois par décision (le prédicat
+        est appelé pour chaque site du catalogue : sans ce pré-calcul on rebalaierait entités et
+        bâtiments 24 fois). Rien n'est stocké : tout est DÉRIVÉ de l'état courant."""
+        fires = [(b.x, b.y) for b in self.buildings if b.btype == "campfire"]
+        migrating = {c.migrating_to: c.id for c in self.clans if c.migrating_to >= 0}
+        colons = [e.colonist_dest for e in self.entities
+                  if e.alive and e.colonist_dest is not None]
+        return fires, migrating, colons
+
+    def _site_reserved(self, sid, sx, sy, ctx, self_clan_id=None):
+        """A9 — une terre est PRISE dès qu'on s'y engage, pas seulement quand le feu y brûle.
+        Le télescopage est SYMÉTRIQUE, d'où un prédicat unique lu par les DEUX blocs : sans le
+        terme `migrating_to`, une colonie se fonderait sous les pieds d'un village en route ;
+        sans le terme `colonist_dest`, un village migrerait vers la terre où marche une colonie.
+        `self_clan_id` : un clan ne compte JAMAIS sa propre réservation quand il ré-évalue sa
+        cible, sinon il se déclarerait lui-même intrus et renoncerait à son propre chantier."""
+        fires, migrating, colons = ctx
+        r2 = SITE_OCCUPIED_R ** 2
+        if any((fx - sx) ** 2 + (fy - sy) ** 2 <= r2 for fx, fy in fires):
+            return True
+        holder = migrating.get(sid)
+        if holder is not None and holder != self_clan_id:
+            return True
+        # Le colon marche vers l'ANCRE du site : la comparaison est exacte en pratique, mais on la
+        # pose en distance — un colon dérouté reste un engagement sur cette terre.
+        return any((cx - sx) ** 2 + (cy - sy) ** 2 <= r2 for cx, cy in colons)
+
     def _swarm_split(self, mother_id, tick_events):
         """P4.1 essaimage — un clan prospère et à l'étroit envoie K=pop//4 colons (les + éloignés du
         feu, leader = le + éloigné) fonder une COLONIE, de préférence SUR la ruine la plus proche du
@@ -4957,7 +5250,7 @@ class Simulation:
             _cat = self.world.site_catalogue()
             _comp = self.world.land_component(int(mother.cx), int(mother.cy))
             _min_d = min(self.world.width, self.world.height) // 4   # A6 : relatif au monde
-            _fires = [b for b in self.buildings if b.btype == "campfire"]
+            _ctx = self._reservation_ctx()
             _cands = []
             for _sid, _sx, _sy, _sc in _cat:
                 if _sid not in mother.known_sites or _sid in mother.failed_sites:
@@ -4970,8 +5263,10 @@ class Simulation:
                     continue                     # A3 : pas de colonie au-delà d'une mer
                 if not self.world.is_walkable(_sx, _sy):
                     continue                     # ceinture : un feu ne tombe JAMAIS dans l'eau
-                if any((f.x - _sx) ** 2 + (f.y - _sy) ** 2 <= SITE_OCCUPIED_R ** 2 for f in _fires):
-                    continue                     # déjà habité (occupation DÉRIVÉE, aucun état stocké)
+                if self._site_reserved(_sid, _sx, _sy, _ctx, self_clan_id=mother_id):
+                    continue                     # A9 (d) : habité, OU promis à une migration en
+                                                 # cours, OU déjà visé par une colonie en vol —
+                                                 # occupation DÉRIVÉE, aucun état stocké de plus
                 _cands.append((_sid, _sx, _sy, _sc))
             if _cands:                           # la meilleure terre, la plus proche à score égal
                 site_pick = max(_cands, key=lambda c: (c[3],
@@ -5077,6 +5372,17 @@ class Simulation:
             elif et == "clan_absorbed":   # P3a — guerre gagnée = annales
                 add({"t": t, "kind": "war", "cat": "annals", "msg":
                      f"Le clan {ev['by'] + 1} conquiert le clan {ev['clan_id'] + 1} et absorbe ses {ev['members']} survivants"})
+            elif et == "clan_migration":   # P7 G3 — l'exode ABOUTI est un événement d'annales.
+                # Le départ et l'échec restent SILENCIEUX (même parti pris qu'en G1 : seule la
+                # découverte se racontait, pas le départ de l'éclaireur) — on ne raconte pas une
+                # intention, on raconte ce qui a eu lieu.
+                # Formulation VOLONTAIREMENT neutre : l'event d'arrivée ne porte pas la cause, et
+                # l'exode a deux histoires (appel d'une terre meilleure / fuite d'un terroir
+                # épuisé). Écrire « terres épuisées » mentirait sur les PULL, qui sont la majorité
+                # mesurée. La cause reste lisible dans `clan_migration_start` pour qui la veut.
+                add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                     f"Le clan {ev['clan_id'] + 1} lève le camp et rallume son feu sur une terre "
+                     f"lointaine"})
             elif et == "clan_tribute":    # P3
                 add({"t": t, "kind": "war", "msg":
                      f"Vaincu, le clan {ev['from_clan'] + 1} paie tribut au clan {ev['to_clan'] + 1}"})

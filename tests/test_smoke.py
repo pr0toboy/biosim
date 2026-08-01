@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.world import World
 from engine.simulation import (
-    Simulation, Building, tick_entity, MAX_PER_SPECIES, MAX_WOOD_PER_HOUSE,
+    Simulation, Building, Clan, tick_entity, MAX_PER_SPECIES, MAX_WOOD_PER_HOUSE,
     MAX_STONE_CARRY, _dist,
 )
 from engine.entities import EntityType, spawn, Sex, SPECS
@@ -2311,6 +2311,436 @@ def test_p7_g2_colonist_march_is_persistent_and_bounded():
           "sabotage, arrivée, timeout, save/load, vieux save)")
 
 
+def test_p7_g3_conv_fresh_never_touches_the_frozen_grid():
+    """P7 G3 : deux lectures de conv() aux rôles distincts (amendement A2). `conv_grid()` FIGE la
+    convenance du monde vierge — c'est d'elle que sortent le catalogue de sites et les
+    `known_sites` sérialisés ; `conv_fresh()` la relit sur les grilles du moment — c'est le seul
+    juge capable de voir un terroir s'effondrer, donc le seul admissible pour le PUSH.
+    Le piège que ce test verrouille : si `conv_fresh()` mémorisait son résultat dans le même
+    cache, il re-figerait ce qu'on veut voir bouger ET déplacerait le catalogue sous les pieds
+    des sites déjà appris (contrat §0.2 violé, exactement le défaut corrigé avant le commit G1)."""
+    import numpy as np
+    w = World(width=140, height=100, seed=424242)
+    frozen = w.conv_grid()
+    frozen_copy = frozen.copy()
+    cat_before = list(w.site_catalogue())
+    # Le monde se dégrade : forêt rasée, fertilité épuisée (ce qu'une longue partie fait vraiment).
+    w.tree_grid[:] = 0
+    w.fertility_grid[:] = 0
+    fresh = w.conv_fresh()
+    assert np.array_equal(w.conv_grid(), frozen_copy), "conv_fresh() a corrompu la grille FIGÉE"
+    assert w.conv_grid() is frozen, "conv_grid() ne rend plus l'objet mémorisé (cache remplacé)"
+    assert list(w.site_catalogue()) == cat_before, "le catalogue a bougé après un appel frais"
+    # ... et la fraîche, elle, VOIT l'effondrement (sinon le PUSH n'aurait aucun signal).
+    assert (fresh < frozen_copy).any(), "conv_fresh() ne voit pas les grilles mutées"
+    assert int(fresh.max()) < int(frozen_copy.max()), "un monde rasé devrait valoir strictement moins"
+    # Deux appels frais successifs sur un monde inchangé restent égaux (pas d'état caché).
+    assert np.array_equal(w.conv_fresh(), fresh), "conv_fresh() n'est pas une fonction pure"
+    # Sur un monde INTACT, la fraîche est byte-identique à la figée (même juge, mêmes composantes).
+    w2 = World(width=140, height=100, seed=424242)
+    assert np.array_equal(w2.conv_fresh(), w2.conv_grid()), "figée et fraîche divergent à t=0"
+    print(f"  test_p7_g3_conv_fresh_never_touches_the_frozen_grid OK (figée intacte + catalogue "
+          f"{len(cat_before)} sites stable ; fraîche {int(frozen_copy.max())}→{int(fresh.max())})")
+
+
+def test_p7_g3_push_couple_discriminates_measured_cases():
+    """P7 G3 : le PUSH est un COUPLE (chute relative ET plancher de misère — arbitrage A8), et
+    chaque garde veto une famille que l'autre laisserait passer. Ce test rejoue les implantations
+    RÉELLEMENT mesurées par la sonde de déplétion (48000 ticks-monde, 2 gabarits) : si quelqu'un
+    desserre le couple un jour, ce sont ces clans-là qui se mettront à s'exiler à tort.
+    Rappel de la lecture : « une terre qui valait au moins le double, tombée au niveau du pire
+    site du monde »."""
+    from engine.simulation import (_terroir_epuise, MIGRATE_PUSH_RATIO_N, MIGRATE_PUSH_RATIO_D,
+                                   MIGRATE_PUSH_FLOOR, MIGRATE_PUSH_EVALS)
+    # (nom, frais, figé, doit_pousser)
+    cas = [("seed7 c2 effondré 10→4", 4, 10, True),      # l'UNIQUE effondrement authentique
+           ("seed7 c2 effondré 10→5", 5, 10, True),
+           ("seed7 c2 pas encore 10→6", 6, 10, False),   # -40 % : pas encore la moitié perdue
+           ("seed7 c5 riche dégradé 34→21", 21, 34, False),   # le PLANCHER le sauve : 21 >> misère
+           ("seed7 c4 né pauvre 9→7", 7, 9, False),           # le RATIO le sauve : rien d'effondré
+           ("déployé c6 né pauvre 9→6", 6, 9, False),         # idem, au plancher pile
+           ("déployé c8 moyen dégradé 19→12", 12, 19, False),
+           ("déployé c1 né pauvre 2→2", 2, 2, False),         # le RATIO seul l'écarte (ratio 1,0)
+           ("déployé c0 sain 29→22", 22, 29, False),
+           ("déployé c0 rétabli 29→26", 26, 29, False)]       # le terroir GUÉRIT quand la pop tombe
+    for nom, frais, fige, attendu in cas:
+        assert _terroir_epuise(frais, fige) is attendu, f"PUSH mal calibré sur « {nom} »"
+    # Chaque garde est INDISPENSABLE — on le prouve en la retirant.
+    ratio_seul = lambda fr, fz: fr * MIGRATE_PUSH_RATIO_D <= fz * MIGRATE_PUSH_RATIO_N
+    plancher_seul = lambda fr, _fz: fr <= MIGRATE_PUSH_FLOOR
+    assert plancher_seul(2, 2) and not _terroir_epuise(2, 2), \
+        "sans le ratio, le clan né pauvre (2 sur une terre qui vaut 2) s'exilerait de sa naissance"
+    assert ratio_seul(21, 42) and not _terroir_epuise(21, 42), \
+        "sans le plancher, un clan riche fuirait une terre valant le double de la médiane"
+    # Arithmétique ENTIÈRE (discipline du //4 d'A6) : aucun flottant ne doit toucher le seuil.
+    assert all(isinstance(v, int) for v in (MIGRATE_PUSH_RATIO_N, MIGRATE_PUSH_RATIO_D,
+                                            MIGRATE_PUSH_FLOOR, MIGRATE_PUSH_EVALS)), \
+        "un seuil de PUSH en flottant → comparaison non reproductible entre machines"
+    print(f"  test_p7_g3_push_couple_discriminates_measured_cases OK ({len(cas)} implantations "
+          f"mesurées, ratio {MIGRATE_PUSH_RATIO_N}/{MIGRATE_PUSH_RATIO_D} plancher "
+          f"{MIGRATE_PUSH_FLOOR} ; les deux gardes prouvées indispensables)")
+
+
+def _g3_scene(seed=424242, w=220, h=160):
+    """Un monde mûr artificiel : deux clans qui connaissent TOUT le catalogue, en paix, assez
+    peuplés pour déménager. Le décor commun des tests A9."""
+    from engine.simulation import MIGRATE_MIN_POP, MIGRATION_SETTLE, MIGRATION_COOLDOWN
+    sim = Simulation(World(width=w, height=h, seed=seed))
+    sim.populate()
+    for _ in range(30):
+        sim.step()
+    # Le décor doit représenter un monde DÉJÀ INSTALLÉ : sans ça la garde A10 de sédentarisation
+    # retient tous les clans de la genèse (`founded_tick = 0`) et les tests de décision ne
+    # prouvent plus rien. On avance l'horloge plutôt que de rétro-dater `founded_tick`, qui
+    # produirait des ticks négatifs — la forme même du piège signalé sur la sentinelle.
+    sim.tick_count = MIGRATION_SETTLE + MIGRATION_COOLDOWN
+    cat = sim.world.site_catalogue()
+    assert len(cat) >= 4, "catalogue trop pauvre pour la scène"
+    for c in sim.clans:
+        c.known_sites = [s[0] for s in cat]
+        c.failed_sites = []
+        c.mode, c.tension = "peace", 0
+        c.last_migration_tick, c.migrating_to, c.migration_t0 = -1, -1, -1
+    pop = {c.id: MIGRATE_MIN_POP + 4 for c in sim.clans}
+    return sim, cat, pop
+
+
+def test_p7_g3_a9_reservation_is_written_at_decision_time():
+    """A9 (a) — deux clans que la MÊME terre appelle le même tick ne peuvent pas partir tous les
+    deux : la réservation s'écrit AU MOMENT de la décision, pas en lot en fin de tick. C'est
+    l'ordre d'itération par id CROISSANT qui départage — déterministe et rejouable.
+    Cas réel qui a motivé l'arbitrage : sur le monde live, c14 et c17 visaient tous deux s8."""
+    sim, cat, pop = _g3_scene()
+    if len(sim.clans) < 2:
+        print("  test_p7_g3_a9_reservation_is_written_at_decision_time SKIP (un seul clan)")
+        return
+    # On force les deux premiers clans sur la MÊME tuile : mêmes distances, mêmes gains, donc
+    # le même meilleur site — la collision est certaine, ce n'est plus une coïncidence de seed.
+    a, b = sorted(sim.clans, key=lambda c: c.id)[:2]
+    b.cx, b.cy = a.cx, a.cy
+    # DÉNOMINATEUR D'ABORD (leçon des 6 essaimages : un ratio ne vaut rien sans ce qu'il divise).
+    # Seul, le clan b convoite une terre PRÉCISE — c'est celle-là qu'il doit perdre ensuite.
+    seul = [k for k in (a, b) if k.id == b.id]
+    sim._decide_migrations(seul, pop, [])
+    convoite = b.migrating_to
+    assert convoite >= 0, "la scène ne prouve rien : b ne voulait migrer nulle part"
+    b.migrating_to, b.migration_t0 = -1, -1
+    for _b in [x for x in sim.buildings if x.btype == "site_campfire" and x.clan_id == b.id]:
+        sim.buildings.remove(_b)
+    ev = []
+    sim._decide_migrations([a, b], pop, ev)
+    assert a.migrating_to == convoite, "le plus petit id doit emporter la terre disputée"
+    assert b.migrating_to != convoite, (
+        f"les deux clans partent sur s{convoite} — la réservation de c{a.id} n'a pas été lue par "
+        "c{b.id} : elle est donc écrite en lot en fin de tick, pas à la décision")
+    # b n'est pas puni : il se rabat sur son second choix (ou renonce s'il n'en a pas).
+    sid = a.migrating_to
+    ctx = sim._reservation_ctx()
+    x, y = next((s[1], s[2]) for s in cat if s[0] == sid)
+    assert sim._site_reserved(sid, x, y, ctx, self_clan_id=b.id), "la terre n'est pas réservée"
+    # Rejouable : la même scène rejouée donne EXACTEMENT le même gagnant.
+    sim2, _cat2, pop2 = _g3_scene()
+    a2, b2 = sorted(sim2.clans, key=lambda c: c.id)[:2]
+    b2.cx, b2.cy = a2.cx, a2.cy
+    sim2._decide_migrations([a2, b2], pop2, [])
+    assert (a2.migrating_to, b2.migrating_to) == (a.migrating_to, b.migrating_to), "non rejouable"
+    print(f"  test_p7_g3_a9_reservation_is_written_at_decision_time OK (les deux convoitaient "
+          f"s{convoite} ; c{a.id} l'emporte, c{b.id} se rabat sur s{b.migrating_to} ; rejouable)")
+
+
+def test_p7_g3_a9_self_exclusion_and_three_releases():
+    """A9 (b) et (c) — un clan ne compte JAMAIS sa propre réservation (sinon il se déclarerait
+    lui-même intrus et renoncerait à son propre chantier), et la terre se libère aux TROIS
+    sorties : arrivée, timeout, mort du clan. À l'arrivée la sentinelle ne tombe qu'APRÈS la pose
+    du feu — il n'existe jamais un tick où la terre n'est ni réservée ni occupée."""
+    from engine.simulation import MIGRATION_TIMEOUT, MIGRATION_WORK
+    sim, cat, pop = _g3_scene()
+    c = sorted(sim.clans, key=lambda k: k.id)[0]
+    sid, sx, sy = next((s[0], s[1], s[2]) for s in cat
+                       if (s[1] - c.cx) ** 2 + (s[2] - c.cy) ** 2 > 40 ** 2)
+    ev = []
+    sim._start_migration(c, sid, sx, sy, "pull", 20, ev)
+    ctx = sim._reservation_ctx()
+    # (b) auto-exclusion
+    assert not sim._site_reserved(sid, sx, sy, ctx, self_clan_id=c.id), \
+        "le clan compte sa PROPRE réservation → il renoncerait à son propre chantier"
+    assert sim._site_reserved(sid, sx, sy, ctx, self_clan_id=c.id + 999), \
+        "la réservation doit être opposable aux AUTRES clans"
+    # (c1) ARRIVÉE : le chantier s'achève → bascule ; la terre reste prise SANS discontinuité
+    site = next(b for b in sim.buildings if b.btype == "site_campfire" and b.clan_id == c.id)
+    vieux = [b for b in sim.buildings if b.clan_id == c.id and b is not site]
+    site.work_done = MIGRATION_WORK
+    sim._update_migrations(ev)
+    assert c.migrating_to == -1 and c.last_migration_tick >= 0, "bascule non enregistrée"
+    assert site.btype == "campfire", "le feu ne s'est pas allumé"
+    assert (int(c.cx), int(c.cy)) == (sx, sy), "le centre du clan n'a pas suivi le feu"
+    assert all(b.btype == "ruin" for b in vieux), "l'ancien village n'est pas tombé en ruines"
+    assert sim._site_reserved(sid, sx, sy, sim._reservation_ctx(), self_clan_id=c.id + 999), \
+        "trou d'un tick : la terre n'est ni réservée ni occupée après la bascule"
+    assert any(e["type"] == "clan_migration" for e in ev), "event de migration manquant"
+    # (c2) TIMEOUT : le chantier avorte, la terre se libère, et le site est RENONCÉ (A5)
+    sim2, cat2, pop2 = _g3_scene()
+    c2 = sorted(sim2.clans, key=lambda k: k.id)[0]
+    sid2, sx2, sy2 = next((s[0], s[1], s[2]) for s in cat2
+                          if (s[1] - c2.cx) ** 2 + (s[2] - c2.cy) ** 2 > 40 ** 2)
+    ev2 = []
+    sim2._start_migration(c2, sid2, sx2, sy2, "push", 3, ev2)
+    c2.migration_t0 = sim2.tick_count - MIGRATION_TIMEOUT
+    sim2._update_migrations(ev2)
+    assert c2.migrating_to == -1, "le timeout ne libère pas le clan"
+    assert sid2 in c2.failed_sites, "A5 : une terre que le village n'a pas su atteindre doit être renoncée"
+    assert not any(b.btype == "site_campfire" and b.clan_id == c2.id for b in sim2.buildings), \
+        "le chantier avorté n'a pas été effacé"
+    assert not sim2._site_reserved(sid2, sx2, sy2, sim2._reservation_ctx()), "terre encore réservée"
+    assert any(e["type"] == "clan_migration_failed" for e in ev2), "event d'échec manquant"
+    # (c3) MORT DU CLAN : le prédicat n'itère que les clans VIVANTS — gratuit, mais on le prouve
+    sim3, cat3, pop3 = _g3_scene()
+    c3 = sorted(sim3.clans, key=lambda k: k.id)[0]
+    sid3, sx3, sy3 = next((s[0], s[1], s[2]) for s in cat3
+                          if (s[1] - c3.cx) ** 2 + (s[2] - c3.cy) ** 2 > 40 ** 2)
+    sim3._start_migration(c3, sid3, sx3, sy3, "pull", 20, [])
+    for b in [b for b in sim3.buildings if b.clan_id == c3.id]:
+        sim3.buildings.remove(b)                     # le clan s'éteint : plus rien ne lui reste
+    sim3.clans = [k for k in sim3.clans if k.id != c3.id]
+    assert not sim3._site_reserved(sid3, sx3, sy3, sim3._reservation_ctx()), \
+        "un clan mort garde sa terre en otage"
+    print("  test_p7_g3_a9_self_exclusion_and_three_releases OK (auto-exclusion ; arrivée sans "
+          "trou, timeout+A5, mort du clan)")
+
+
+def test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration():
+    """A9 (d) — le télescopage est SYMÉTRIQUE : sans usage du prédicat côté G2, une colonie se
+    fonderait sous les pieds d'un village en route. On vérifie que `_swarm_split` écarte un site
+    promis à une migration, et qu'il l'acceptait AVANT la réservation (sinon le test ne prouve
+    rien : c'est le dénominateur qu'on mesure, pas l'absence)."""
+    sim, cat, pop = _g3_scene()
+    mere = sorted(sim.clans, key=lambda k: k.id)[0]
+    ctx = sim._reservation_ctx()
+    libres = [s for s in cat
+              if not sim._site_reserved(s[0], s[1], s[2], ctx, self_clan_id=mere.id)]
+    assert libres, "aucun site libre : la scène ne prouverait rien"
+    sid, sx, sy = libres[0][0], libres[0][1], libres[0][2]
+    # Un AUTRE clan (ou un clan fantôme) promet cette terre à sa migration.
+    autre = next((k for k in sim.clans if k.id != mere.id), None)
+    if autre is None:
+        print("  test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration SKIP (un seul clan)")
+        return
+    autre.migrating_to = sid
+    ctx2 = sim._reservation_ctx()
+    assert sim._site_reserved(sid, sx, sy, ctx2, self_clan_id=mere.id), \
+        "G2 ne voit pas la promesse de migration → une colonie se fonderait sur la terre promise"
+    # ... et la promesse tombée, la terre redevient offerte (preuve que c'est BIEN ce terme).
+    autre.migrating_to = -1
+    assert not sim._site_reserved(sid, sx, sy, sim._reservation_ctx(), self_clan_id=mere.id), \
+        "la terre reste bloquée alors que plus personne ne la promet"
+    # Symétrique : un colon en vol réserve aussi, côté G3.
+    colon = next((e for e in sim.entities if e.alive and e.clan_id == mere.id), None)
+    assert colon is not None
+    colon.colonist_dest = (sx, sy)
+    assert sim._site_reserved(sid, sx, sy, sim._reservation_ctx(), self_clan_id=mere.id), \
+        "un colon en marche ne réserve pas → un village migrerait sur sa terre"
+    print(f"  test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration OK (s{sid} : promesse "
+          "de migration ET colon en vol réservent, des deux côtés)")
+
+
+def test_p7_g3_a10_settle_and_cooldown_are_two_different_delays():
+    """A10 (e) et (f) — DEUX délais aux sémantiques distinctes, qu'un champ unique ne pouvait pas
+    porter : la SÉDENTARISATION court depuis la FONDATION (courte : la fenêtre d'opportunité d'un
+    clan est précoce et périssable), le COOLDOWN depuis la dernière MIGRATION (long : on ne
+    déménage pas en boucle). Les confondre écrasait la sentinelle `last_migration_tick == -1`
+    (« n'a JAMAIS migré ») et rendait les deux délais indiscernables.
+    (e) fondation à t → bloqué avant t+SETTLE, permis après. (f) après une MIGRATION c'est bien le
+    COOLDOWN, plus long, qui s'applique — pas le SETTLE."""
+    from engine.simulation import (MIGRATION_SETTLE, MIGRATION_COOLDOWN, MIGRATE_MIN_POP)
+    assert MIGRATION_SETTLE < MIGRATION_COOLDOWN, \
+        "un clan neuf attendrait plus longtemps qu'un clan qui vient de déménager"
+    sim, cat, pop = _g3_scene()
+    c = sorted(sim.clans, key=lambda k: k.id)[0]
+    c.known_sites = [s[0] for s in cat]
+    pop1 = {c.id: MIGRATE_MIN_POP + 4}
+    t = sim.tick_count
+    # (e) — la sentinelle « jamais migré » est INTACTE ; seule la sédentarisation retient.
+    c.founded_tick, c.last_migration_tick = t, -1
+    sim._decide_migrations([c], pop1, [])
+    assert c.migrating_to == -1, "un clan fondé à l'instant lève déjà le camp"
+    c.founded_tick = t - MIGRATION_SETTLE
+    sim._decide_migrations([c], pop1, [])
+    assert c.migrating_to >= 0, "la sédentarisation purgée, le clan doit pouvoir partir"
+    assert c.last_migration_tick == -1, \
+        "la sentinelle « jamais migré » a été écrasée par la garde de fondation"
+    # (f) — il vient de MIGRER : c'est le COOLDOWN qui court, pas le SETTLE. À une durée comprise
+    # entre les deux, un clan sédentarisé de longue date doit RESTER bloqué.
+    sim2, cat2, pop2 = _g3_scene()
+    c2 = sorted(sim2.clans, key=lambda k: k.id)[0]
+    c2.known_sites = [s[0] for s in cat2]
+    entre = (MIGRATION_SETTLE + MIGRATION_COOLDOWN) // 2
+    # PIÈGE VÉRIFIÉ ICI, PAS SEULEMENT ÉVITÉ : rétro-dater sur un tick_count petit produit un
+    # `last_migration_tick` NÉGATIF, indiscernable de la sentinelle -1 « jamais migré » — la garde
+    # sauterait et le test passerait pour de mauvaises raisons. On avance donc l'horloge d'abord.
+    sim2.tick_count = 12 * MIGRATION_COOLDOWN
+    c2.founded_tick = sim2.tick_count - 10 * MIGRATION_COOLDOWN      # clan très ancien
+    c2.last_migration_tick = sim2.tick_count - entre                 # mais fraîchement migré
+    assert c2.last_migration_tick > 0, "montage invalide : un tick négatif singerait la sentinelle"
+    sim2._decide_migrations([c2], {c2.id: MIGRATE_MIN_POP + 4}, [])
+    assert c2.migrating_to == -1, \
+        "après une migration, c'est le COOLDOWN qui doit courir — le SETTLE seul ne suffit pas"
+    c2.last_migration_tick = sim2.tick_count - MIGRATION_COOLDOWN
+    sim2._decide_migrations([c2], {c2.id: MIGRATE_MIN_POP + 4}, [])
+    assert c2.migrating_to >= 0, "cooldown purgé, le clan doit pouvoir repartir"
+    print(f"  test_p7_g3_a10_settle_and_cooldown_are_two_different_delays OK "
+          f"(SETTLE={MIGRATION_SETTLE} depuis la fondation, COOLDOWN={MIGRATION_COOLDOWN} depuis "
+          f"la migration ; sentinelle -1 préservée)")
+
+
+def test_p7_g3_a10_settle_survives_save_load():
+    """A10 (g) — une partie sauvegardée EN PLEIN DÉLAI de sédentarisation doit rouvrir sur le
+    MÊME tick de première éval. `founded_tick` est un tick ABSOLU : s'il se perdait, un clan
+    rechargé repartirait à zéro de sédentarisation (ou serait libéré d'un coup). Le serveur
+    recharge son monde à chaque redémarrage — ce chemin est emprunté pour de vrai."""
+    from engine.simulation import MIGRATION_SETTLE, MIGRATE_MIN_POP
+    sim, cat, pop = _g3_scene()
+    c = sorted(sim.clans, key=lambda k: k.id)[0]
+    c.known_sites = [s[0] for s in cat]
+    c.founded_tick = sim.tick_count - MIGRATION_SETTLE // 2      # à mi-sédentarisation
+    c.last_migration_tick = -1
+    attendu = c.founded_tick + MIGRATION_SETTLE
+    st = sim.save_state()
+    sim2 = Simulation(World(width=220, height=160, seed=424242))
+    sim2.load_state(st)
+    c2 = next(x for x in sim2.clans if x.id == c.id)
+    assert c2.founded_tick == c.founded_tick, "founded_tick perdu au rechargement"
+    assert c2.founded_tick + MIGRATION_SETTLE == attendu, "le tick de libération a bougé"
+    # Encore retenu au rechargement...
+    sim2._decide_migrations([c2], {c2.id: MIGRATE_MIN_POP + 4}, [])
+    assert c2.migrating_to == -1, "le rechargement a libéré le clan trop tôt"
+    # ... et libéré exactement au tick attendu, pas avant.
+    c2.founded_tick = sim2.tick_count - MIGRATION_SETTLE
+    sim2._decide_migrations([c2], {c2.id: MIGRATE_MIN_POP + 4}, [])
+    assert c2.migrating_to >= 0, "le clan n'est jamais libéré après rechargement"
+    # Vieux save (sans le champ) : monde déjà mûr → libre, jamais bloqué à vie.
+    for cd in st["clans"]:
+        cd.pop("founded_tick", None)
+    sim3 = Simulation(World(width=220, height=160, seed=424242))
+    sim3.load_state(st)
+    assert all(x.founded_tick == 0 for x in sim3.clans), \
+        "vieux save : founded_tick doit retomber à 0 (monde mûr, pas de sédentarisation rétroactive)"
+    print("  test_p7_g3_a10_settle_survives_save_load OK (founded_tick absolu round-trip, "
+          "même tick de libération, vieux save → libre)")
+
+
+def test_p7_g3_migration_survives_save_load_mid_flight():
+    """P7 G3 — une partie sauvegardée PENDANT une migration doit reprendre exactement où elle en
+    était : le chantier est un bâtiment (sérialisé), mais le lien clan→chantier tient à
+    `migrating_to`, et le timeout à `migration_t0` qui est un tick ABSOLU. Si l'un des deux se
+    perdait, le clan se réveillerait soit avec un chantier orphelin que personne ne finira, soit
+    avec un timeout qui ne tomberait jamais — paralysé à vie dans les deux cas.
+    Le serveur recharge son monde à chaque redémarrage : ce chemin est emprunté pour de vrai."""
+    from engine.simulation import MIGRATION_WORK, MIGRATION_TIMEOUT
+    sim, cat, pop = _g3_scene()
+    c = sorted(sim.clans, key=lambda k: k.id)[0]
+    sid, sx, sy = next((s[0], s[1], s[2]) for s in cat
+                       if (s[1] - c.cx) ** 2 + (s[2] - c.cy) ** 2 > 40 ** 2)
+    sim._start_migration(c, sid, sx, sy, "pull", 20, [])
+    t0_avant = c.migration_t0
+    st = sim.save_state()
+    sim2 = Simulation(World(width=220, height=160, seed=424242))
+    sim2.load_state(st)
+    c2 = next(x for x in sim2.clans if x.id == c.id)
+    assert c2.migrating_to == sid, "la cible de migration s'est perdue au rechargement"
+    assert c2.migration_t0 == t0_avant, "le t0 du timeout s'est perdu → il ne tomberait jamais"
+    site2 = next((b for b in sim2.buildings if b.btype == "site_campfire"
+                  and b.clan_id == c2.id), None)
+    assert site2 is not None, "le chantier n'a pas survécu au round-trip"
+    assert (site2.x, site2.y) == (sx, sy), "le chantier a bougé"
+    assert site2.work_needed == MIGRATION_WORK, "le coût du chantier s'est perdu"
+    # ... et la migration s'ACHÈVE normalement après le rechargement.
+    site2.work_done = MIGRATION_WORK
+    ev = []
+    sim2._update_migrations(ev)
+    assert c2.migrating_to == -1 and (int(c2.cx), int(c2.cy)) == (sx, sy), \
+        "la migration rechargée ne bascule pas"
+    # Le chemin du TIMEOUT survit lui aussi (t0 absolu vs tick_count rechargé).
+    sim3 = Simulation(World(width=220, height=160, seed=424242))
+    sim3.load_state(st)
+    c3 = next(x for x in sim3.clans if x.id == c.id)
+    c3.migration_t0 = sim3.tick_count - MIGRATION_TIMEOUT
+    sim3._update_migrations([])
+    assert c3.migrating_to == -1 and sid in c3.failed_sites, \
+        "le timeout ne tombe pas après un rechargement"
+    print("  test_p7_g3_migration_survives_save_load_mid_flight OK (cible+t0+chantier round-trip, "
+          "bascule ET timeout fonctionnels après rechargement)")
+
+
+def test_p7_g3_a_new_clan_must_live_somewhere_before_leaving():
+    """P7 G3 — un clan neuf doit VIVRE quelque part avant de conclure qu'il s'est trompé.
+    AUCUN scénario golden ne fonde de clan (mesuré : BASE 4→4, CIV 4→2 par absorption, PROD 4→4)
+    — ce chemin n'est donc couvert QUE par ce test.
+    Le défaut qu'il verrouille, MESURÉ sur la sonde g3-live seed 7 : c5, fondé à t=10800, levait
+    le camp à t=11160 — 360 ticks sur place, une demi-saison. Cause structurelle : le clan hérite
+    des `known_sites` de sa mère (il connaît d'emblée les belles terres) et n'a aucun passé de
+    migration à purger. Sans garde, essaimages et scissions enchaînent fondation → exode : du
+    churn, pas du contenu."""
+    from engine.simulation import MIGRATION_SETTLE, MIGRATE_MIN_POP, _MIGRATE_ON
+    sim, cat, pop = _g3_scene()
+    mere = sorted(sim.clans, key=lambda k: k.id)[0]
+    membres = [e for e in sim.entities if e.alive and e.clan_id == mere.id][:4]
+    assert membres, "pas de membre pour fonder"
+    for _ in range(500):                    # on avance pour fonder à un tick NON nul
+        sim.step()
+    t_fond = sim.tick_count
+    neuf = sim._found_clan(membres[0], membres[1:], int(mere.cx), int(mere.cy),
+                           cult_id=-1, tick_events=[], known_sites=mere.known_sites,
+                           failed_sites=[])
+    assert _MIGRATE_ON, "scène invalide sous MIGRATE_OFF"
+    assert neuf.founded_tick == t_fond, \
+        "un clan neuf doit mémoriser sa FONDATION (A10 : slot propre, sentinelle intacte)"
+    assert neuf.last_migration_tick == -1, \
+        "la sentinelle « jamais migré » ne doit PAS être écrasée par la fondation"
+    # Il connaît les belles terres (héritage G1) et il est assez peuplé : seule la garde le retient.
+    neuf.known_sites = [s[0] for s in cat]
+    neuf.mode, neuf.tension = "peace", 0
+    pop2 = {neuf.id: MIGRATE_MIN_POP + 4}
+    sim._decide_migrations([neuf], pop2, [])
+    assert neuf.migrating_to == -1, "un clan fondé à l'instant lève déjà le camp (churn)"
+    # ... et la garde LÈVE bien après le cooldown (sinon on aurait tué le contenu, pas le churn).
+    neuf.founded_tick = sim.tick_count - MIGRATION_SETTLE
+    sim._decide_migrations([neuf], pop2, [])
+    assert neuf.migrating_to >= 0, \
+        "le cooldown purgé, le clan doit pouvoir migrer — sinon la garde a tué le contenu"
+    print(f"  test_p7_g3_a_new_clan_must_live_somewhere_before_leaving OK (fondé t={t_fond} → "
+          f"retenu ; sédentarisation {MIGRATION_SETTLE} purgée → part sur s{neuf.migrating_to})")
+
+
+def test_p7_g3_migration_slots_round_trip():
+    """P7 G3 : les 4 slots d'état d'une migration traversent le save/load, et un VIEUX save (qui
+    ne les connaît pas) reconstruit les défauts. `last_migration_tick = -1` signifie « n'a JAMAIS
+    migré » et non « a migré au tick -1 » : sans ce sentinelle, un clan fondé tard hériterait d'un
+    cooldown déjà purgé par le seul écoulement du monde pendant qu'un clan fondé tôt l'attendrait."""
+    sim = Simulation(World(width=60, height=40, seed=5))
+    sim.populate()
+    for _ in range(60):
+        sim.step()
+    c = sim.clans[0]
+    neuf = Clan(id=99, cx=1.0, cy=1.0, color="#fff", chief_id=1)
+    assert (neuf.migrating_to, neuf.migration_bread, neuf.push_evals, neuf.last_migration_tick) \
+        == (-1, 0, 0, -1), "défauts G3 d'un clan neuf"
+    c.migrating_to, c.migration_bread, c.push_evals, c.last_migration_tick = 7, 4, 1, 42
+    st = sim.save_state()
+    sim2 = Simulation(World(width=60, height=40, seed=5)); sim2.load_state(st)
+    c2 = next(x for x in sim2.clans if x.id == c.id)
+    assert (c2.migrating_to, c2.migration_bread, c2.push_evals, c2.last_migration_tick) \
+        == (7, 4, 1, 42), "round-trip des slots de migration"
+    for cd in st["clans"]:
+        for k in ("migrating_to", "migration_bread", "push_evals", "last_migration_tick"):
+            cd.pop(k, None)
+    sim3 = Simulation(World(width=60, height=40, seed=5)); sim3.load_state(st)
+    c3 = next(x for x in sim3.clans if x.id == c.id)
+    assert (c3.migrating_to, c3.migration_bread, c3.push_evals, c3.last_migration_tick) \
+        == (-1, 0, 0, -1), "vieux save → défauts G3"
+    print("  test_p7_g3_migration_slots_round_trip OK (4 slots round-trip, vieux save → défauts, "
+          "sentinelle « jamais migré »)")
+
+
 def test_audit_ally_hysteresis_survives_save_load():
     """Audit #1 : l'hystérésis allié/rival (entrée ±40, sortie ±35) doit survivre au save/load.
     Une paire alliée décayée dans [35,40) est encore alliée en run continu ; la recalculer au
@@ -2434,6 +2864,16 @@ if __name__ == "__main__":
             test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
             test_p7_g2_directed_colony_founding_and_filters,
             test_p7_g2_colonist_march_is_persistent_and_bounded,
+            test_p7_g3_conv_fresh_never_touches_the_frozen_grid,
+            test_p7_g3_push_couple_discriminates_measured_cases,
+            test_p7_g3_migration_slots_round_trip,
+            test_p7_g3_a_new_clan_must_live_somewhere_before_leaving,
+            test_p7_g3_migration_survives_save_load_mid_flight,
+            test_p7_g3_a10_settle_and_cooldown_are_two_different_delays,
+            test_p7_g3_a10_settle_survives_save_load,
+            test_p7_g3_a9_reservation_is_written_at_decision_time,
+            test_p7_g3_a9_self_exclusion_and_three_releases,
+            test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration,
             test_harden_load_state_transactional,
             test_harden_from_state_bounds,
             test_harden_load_rejects_nan,
