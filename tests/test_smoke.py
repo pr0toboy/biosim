@@ -2773,21 +2773,21 @@ def test_p7_g3_migration_slots_round_trip():
         sim.step()
     c = sim.clans[0]
     neuf = Clan(id=99, cx=1.0, cy=1.0, color="#fff", chief_id=1)
-    assert (neuf.migrating_to, neuf.migration_bread, neuf.push_evals, neuf.last_migration_tick) \
-        == (-1, 0, 0, -1), "défauts G3 d'un clan neuf"
-    c.migrating_to, c.migration_bread, c.push_evals, c.last_migration_tick = 7, 4, 1, 42
+    assert (neuf.migrating_to, neuf.migration_t0, neuf.push_evals, neuf.last_migration_tick) \
+        == (-1, -1, 0, -1), "défauts G3 d'un clan neuf"
+    c.migrating_to, c.migration_t0, c.push_evals, c.last_migration_tick = 7, 4, 1, 42
     st = sim.save_state()
     sim2 = Simulation(World(width=60, height=40, seed=5)); sim2.load_state(st)
     c2 = next(x for x in sim2.clans if x.id == c.id)
-    assert (c2.migrating_to, c2.migration_bread, c2.push_evals, c2.last_migration_tick) \
+    assert (c2.migrating_to, c2.migration_t0, c2.push_evals, c2.last_migration_tick) \
         == (7, 4, 1, 42), "round-trip des slots de migration"
     for cd in st["clans"]:
-        for k in ("migrating_to", "migration_bread", "push_evals", "last_migration_tick"):
+        for k in ("migrating_to", "migration_t0", "push_evals", "last_migration_tick"):
             cd.pop(k, None)
     sim3 = Simulation(World(width=60, height=40, seed=5)); sim3.load_state(st)
     c3 = next(x for x in sim3.clans if x.id == c.id)
-    assert (c3.migrating_to, c3.migration_bread, c3.push_evals, c3.last_migration_tick) \
-        == (-1, 0, 0, -1), "vieux save → défauts G3"
+    assert (c3.migrating_to, c3.migration_t0, c3.push_evals, c3.last_migration_tick) \
+        == (-1, -1, 0, -1), "vieux save → défauts G3"
     print("  test_p7_g3_migration_slots_round_trip OK (4 slots round-trip, vieux save → défauts, "
           "sentinelle « jamais migré »)")
 
@@ -2809,6 +2809,75 @@ def test_audit_ally_hysteresis_survives_save_load():
     sim3 = Simulation(World(width=60, height=45, seed=7)); sim3.load_state(st_old)
     assert (0, 1) not in sim3._ally_state, "vieux save → fallback recalcul au seuil"
     print("  test_audit_ally_hysteresis_survives_save_load OK (hystérésis sérialisée ; fallback vieux save)")
+
+
+def test_audit_f1_removed_slot_does_not_break_old_saves():
+    """Retrait du slot `migration_bread` (F1). PREMIER retrait de champ du projet — le chemin
+    n'avait jamais été exercé, et il est piégé : une partie EXISTANTE porte la clé, or `Clan(**d)`
+    lève TypeError sur une clé inconnue. Sans garde, le monde d'Alexis ne rechargeait plus.
+    Le filtre est GÉNÉRAL (il vaut pour tout retrait futur) et NON SILENCIEUX : il avale aussi
+    les typos et les renommages, et sans trace un champ renommé repartirait à sa valeur par
+    défaut sans un mot."""
+    from engine.simulation import Clan, Building, _depuis_dict
+    sim = Simulation(World(width=60, height=40, seed=5))
+    sim.populate()
+    for _ in range(40):
+        sim.step()
+    st = sim.save_state()
+    # Un save d'AVANT le retrait : on réinjecte la clé disparue (et une autre, pour montrer que
+    # la garde n'est pas taillée pour un champ précis).
+    for cd in st["clans"]:
+        cd["migration_bread"] = 3
+        cd["un_champ_qui_n_existe_plus"] = "x"
+    # DÉNOMINATEUR : sans filtre, ce save fait bien LEVER — sinon le test ne prouverait rien.
+    try:
+        Clan(**st["clans"][0])
+        raise AssertionError("Clan(**d) accepte une clé inconnue → le test ne prouve rien")
+    except TypeError:
+        pass
+    ignorees = set()
+    c = _depuis_dict(Clan, dict(st["clans"][0]), ignorees)
+    assert c.id == st["clans"][0]["id"], "le clan reconstruit a perdu ses vraies valeurs"
+    assert ignorees == {"migration_bread", "un_champ_qui_n_existe_plus"}, \
+        f"les clés écartées ne sont pas remontées à l'appelant : {ignorees}"
+    assert not hasattr(c, "migration_bread"), "le slot est censé avoir disparu"
+    # ... et le chargement complet aboutit, sentinelles propres.
+    sim2 = Simulation(World(width=60, height=40, seed=5))
+    sim2.load_state(st)
+    assert len(sim2.clans) == len(sim.clans), "clans perdus au rechargement"
+    assert all(x.migrating_to == -1 and x.migration_t0 == -1 for x in sim2.clans), \
+        "sentinelles de migration corrompues par le filtre"
+    # Le filtre vaut AUSSI pour Building (même construction par **dict).
+    ig2 = set()
+    bd = dict(st["buildings"][0]); bd["colonne_fantome"] = 1
+    b = _depuis_dict(Building, bd, ig2)
+    assert ig2 == {"colonne_fantome"} and b.id == st["buildings"][0]["id"], "filtre Building KO"
+    print("  test_audit_f1_removed_slot_does_not_break_old_saves OK (dénominateur : Clan(**d) "
+          "lève bien ; filtre Clan+Building, clés remontées, sentinelles propres)")
+
+
+def test_audit_f1_real_live_save_still_loads():
+    """Le test qui protège VRAIMENT la partie d'Alexis : on recharge une COPIE du save LIVE réel,
+    pas un save fabriqué. Un save de laboratoire ne porte pas les mêmes clés résiduelles ni les
+    mêmes valeurs limites qu'un monde qui tourne depuis 200000 ticks.
+    Sauté proprement si le save n'est pas là (poste sans partie en cours)."""
+    import json
+    chemin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "save.json")
+    if not os.path.exists(chemin):
+        print("  test_audit_f1_real_live_save_still_loads SKIP (pas de save live ici)")
+        return
+    with open(chemin) as f:
+        st = json.load(f)
+    porte_la_cle = any("migration_bread" in c for c in st.get("clans", []))
+    sim = Simulation(World.from_state(st["world"]))
+    sim.load_state(st)
+    assert sim.clans, "le save live s'est chargé sans aucun clan"
+    t0 = sim.tick_count
+    for _ in range(20):
+        sim.step()                       # il doit aussi TOURNER, pas seulement se charger
+    assert sim.tick_count == t0 + 20, "le monde rechargé n'avance pas"
+    print(f"  test_audit_f1_real_live_save_still_loads OK (tick {t0}, {len(sim.clans)} clans, "
+          f"clé migration_bread résiduelle : {porte_la_cle} ; 20 ticks rejoués)")
 
 
 def test_audit_f3_exodus_ruins_are_orphaned():

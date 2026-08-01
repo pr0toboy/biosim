@@ -9,7 +9,7 @@ import os
 import time
 import numpy as np
 from collections import deque
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields as _dc_fields
 from typing import TYPE_CHECKING
 from .entities import (Entity, EntityType, Sex, State, SPECS, spawn, BUILDING_SPECS,
                        get_id_counter, set_id_counter, _JOBS_ON)
@@ -74,7 +74,6 @@ class Clan:
                                   # incrémenté dans un bloc comportemental (leçon G1 : un compteur
                                   # cesse de tourner dès que le porteur est figé par la faim ou le
                                   # combat, et le clan resterait « en migration » à vie)
-    migration_bread: int = 0      # vivres emportés (les MATÉRIAUX sont perdus, pas les vivres)
     push_evals: int = 0           # évals consécutives en terroir épuisé (hystérésis MIGRATE_PUSH_EVALS)
     last_migration_tick: int = -1  # -1 = n'a JAMAIS migré (le cooldown ne s'applique pas). Un
                                    # sentinelle plutôt qu'un `-MIGRATION_COOLDOWN` : la constante
@@ -761,12 +760,12 @@ MIGRATION_SETTLE     = 500
 # sous des « découvertes » situées à une promenade du feu.
 TOPO_ANNAL_DIST   = 100
 # Le feu de camp a build_time=0 (il est POSÉ à la fondation, jamais bâti) : la spec fixe donc le
-# coût du chantier de migration au temps d'une MAISON x2 — le village doit peiner pour renaître.
-MIGRATION_WORK    = 80    # = BUILDING_SPECS["house"].build_time * 2 (vérifié : 40)
+# coût du chantier au temps d'une MAISON x2 — le village doit peiner pour renaître.
+# CORRIGÉ (finding d'ultra-audit) : je lisais BUILDING_SPECS["house"].build_time à la DÉFINITION
+# (40), or entities.py le scale par TIME_SCALE APRÈS — la valeur réelle est 240. Mon 80 valait
+# donc un SIXIÈME de la friction voulue, et la constante avait été calibrée sur cet écart.
+MIGRATION_WORK    = 480   # = 2 x build_time RÉEL de la maison (240), vérifié à l'exécution
 MIGRATE_MIN_POP   = 8     # un hameau ne déménage pas : il n'a pas les bras pour rebâtir
-MIGRATION_BREAD_MAX = 5   # vivres emportés (arbitrage ffafb37e) — assez pour ne pas tomber en
-                          # famine à l'arrivée (le verrou de sortie F4 exige pain>=2), pas assez
-                          # pour que l'exode soit gratuit
 # Budget de trajet, donc PLAT (règle A4, précédent TRADE_TIMEOUT/EXPEDITION_TIMEOUT). Il doit
 # couvrir la marche gloutonne d'un village entier PUIS 80 ticks de travail ; mesuré côté G1 : des
 # trajets de 237 tuiles aboutissent, et 20,5 % échouent pour cause de TERRAIN, pas de distance.
@@ -782,6 +781,27 @@ TRAIL_MAX = 65535                      # saturation uint16 (jamais de wrap : un 
 MARKET_GOLD_MAX = 8   # F1 : cap du coffre d'or du marché (débordement → dorure de l'église du clan)
 MONEY_RESTOCK   = 3   # F1 : le marché tire une expédition d'or si son coffre < ce seuil (demande-pull)
 MONEY_PAY_VALUE = 4   # F1 : préférence de l'or en paiement (> max _scarcity bois/pierre = 3 → toujours préféré)
+
+
+_CHAMPS_CONNUS: dict = {}          # cls -> frozenset des noms de champs (mémorisé)
+
+
+def _depuis_dict(cls, d: dict, ignorees: set):
+    """Construit une dataclass depuis un save en ÉCARTANT les clés qu'elle ne connaît plus.
+    Sans ce filtre, retirer un champ casse le chargement des parties existantes : `cls(**d)`
+    lève TypeError sur la clé résiduelle et le monde ne rouvre plus. C'est une garde GÉNÉRALE
+    (elle vaut pour tout retrait futur), pas un pansement pour un champ précis.
+    Les clés écartées sont REMONTÉES à l'appelant : le filtre avale aussi les typos et les
+    renommages, et sans trace un champ renommé se réinitialiserait aux défauts EN SILENCE."""
+    champs = _CHAMPS_CONNUS.get(cls)
+    if champs is None:
+        champs = frozenset(f.name for f in _dc_fields(cls))
+        _CHAMPS_CONNUS[cls] = champs
+    inconnues = [k for k in d if k not in champs]
+    if inconnues:
+        ignorees.update(inconnues)
+        d = {k: v for k, v in d.items() if k in champs}
+    return cls(**d)
 
 
 def _clan_wealth(cb: dict) -> int:
@@ -5213,13 +5233,14 @@ class Simulation:
         tick où la terre n'est ni réservée ni occupée, sinon un voisin s'y glisserait."""
         from_x, from_y = int(clan.cx), int(clan.cy)
         sid = clan.migrating_to
-        # Les VIVRES suivent (plafonnés), les MATÉRIAUX sont perdus : on abandonne les murs, c'est
-        # la vraie friction de l'exode (arbitrage ffafb37e).
-        bread = 0
-        for b in self.buildings:
-            if b.clan_id == clan.id and b is not site:
-                bread += getattr(b, "bread", 0) or 0
-        clan.migration_bread = min(bread, MIGRATION_BREAD_MAX)
+        # RIEN NE SUIT — ni les matériaux, ni les vivres : la friction de l'exode est TOTALE.
+        # L'arbitrage d'origine (ffafb37e) faisait suivre min(pain, 5) ; RETIRÉ après mesure,
+        # le mécanisme était mort trois fois. (1) Illisible : tous les lecteurs de `bread` sont
+        # mill-only (repas, verrou de famine F4, tribut, wire), or on versait sur le FEU.
+        # (2) Toujours vide : ceux qui migrent sont les clans PAUVRES, sans moulin — mesuré 0
+        # pain sur 12 bascules ; les clans riches (30 et 120 pains au monde live) ne migrent
+        # jamais. (3) Sans objet : 0 tick de famine sur ces 12 bascules à friction RÉELLE, faim
+        # moyenne à l'arrivée 12-22 pour un seuil à 55, soit plus du double de marge.
         for b in list(self.buildings):
             if b.clan_id != clan.id or b is site:
                 continue
@@ -5237,14 +5258,11 @@ class Simulation:
         site.btype = "campfire"                   # le feu s'allume : la terre reste occupée sans
         site.work_needed = 0                      # discontinuité (A9 c)
         site.work_done = 0
-        if clan.migration_bread:                  # les vivres emportés garnissent le nouveau foyer
-            site.bread = clan.migration_bread
         clan.cx, clan.cy = float(site.x), float(site.y)
         clan.migrating_to = -1
         clan.migration_t0 = -1
         clan.push_evals = 0
         clan.last_migration_tick = self.tick_count
-        clan.migration_bread = 0
         tick_events.append({"type": "clan_migration", "clan_id": clan.id, "site": sid,
                             "from_x": from_x, "from_y": from_y,
                             "to_x": site.x, "to_y": site.y})
@@ -5691,8 +5709,9 @@ class Simulation:
             # ── Phase 1 : construire (peut lever) — self n'est PAS touché ──────
             world     = World.from_state(d["world"])
             entities  = [Entity.from_state(e) for e in d["entities"]]
-            clans     = [Clan(**c) for c in d["clans"]]
-            buildings = [Building(**b) for b in d["buildings"]]
+            _cles_ignorees: set = set()
+            clans     = [_depuis_dict(Clan, c, _cles_ignorees) for c in d["clans"]]
+            buildings = [_depuis_dict(Building, b, _cles_ignorees) for b in d["buildings"]]
             tick_count          = d["tick_count"]
             raining             = d["raining"]; storming = d["storming"]
             rain_ticks_left     = d["rain_ticks_left"]
@@ -5700,6 +5719,13 @@ class Simulation:
             heatwave_ticks_left = d["heatwave_ticks_left"]
             next_building_id    = d["_next_building_id"]
             entity_id_counter   = d["entity_id_counter"]
+            if _cles_ignorees:
+                # Visibilité SANS échec (le chargement doit aboutir) : un champ retiré est
+                # attendu, un champ RENOMMÉ ne l'est pas et se réinitialiserait aux défauts
+                # sans un mot. Une ligne au journal serveur, une seule fois par chargement.
+                print(f"[load] clés de save inconnues, ignorées : {sorted(_cles_ignorees)} "
+                      f"— normal après un retrait de champ ; SUSPECT après un renommage "
+                      f"(le champ repartirait à sa valeur par défaut).", flush=True)
             # Types des compteurs validés en phase 1 (gate F3) : un compteur non-int (save
             # trafiqué) passerait le commit puis lèverait TypeError au 1er spawn/bâtiment —
             # crash DIFFÉRÉ qu'aucune sonde bornée ne voit → vecteur crash-loop résiduel.
