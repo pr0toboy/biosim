@@ -3805,7 +3805,13 @@ canvas.addEventListener("mousemove", (ev) => {
     }
   }
 });
-canvas.addEventListener("mouseleave", () => tooltip.style.display = "none");
+canvas.addEventListener("mouseleave", () => {
+  tooltip.style.display = "none";
+  // P7 G4 (finding de gate) : le survol d'un site n'a pas de « sortie » naturelle — mousemove ne
+  // tire plus une fois le curseur hors du canvas, et siteHoverUntil=0 (mode souris) empêche
+  // l'auto-effacement du mode tactile. Sans ça le cartouche resterait collé à l'écran.
+  siteHover = null; siteHoverUntil = 0;
+});
 
 // ── Zoom (limites) ────────────────────────────────────────────────────────────
 const ZOOM_MIN = 0.5;   // vue dézoomée max (monde entier visible)
