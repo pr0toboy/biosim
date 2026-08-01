@@ -1220,6 +1220,100 @@ async function refreshTrails() {
 }
 setInterval(refreshTrails, 6000);   // les sentiers bougent lentement → poll plus espacé
 
+// ── Sites nommés (P7 G4) — RENDU DESSINÉ PAR REGIGIGAS (params exacts : forme, couleurs,
+// z-order, cartouche ; je ne fais que les câbler). Principe : c'est une couche CARTOGRAPHIQUE
+// (le savoir du monde), pas un objet du monde → taille FIXE À L'ÉCRAN, indépendante du zoom,
+// dessin canvas pixel-perfect, aucun asset, aucune couleur de clan (le territoire la porte déjà).
+// /api/sites ne renvoie QUE les sites découverts → la couche ne peut rien trahir, aucune garde
+// front supplémentaire à écrire.
+let sitesList = [];                 // [{id,x,y,name,score,occupied}]
+let siteHover = null;               // site survolé (souris) ou tapé (mobile)
+let siteHoverUntil = 0;             // mobile : le cartouche s'efface tout seul après 2 s
+const SITE_MARK = {
+  half: 3,                          // losange 7×7 px écran : demi-largeur 3 → marches 1-3-5-7-5-3-1
+  hit: 8,                           // rayon de la zone de hit, en pixels ÉCRAN
+  libre:   { fill: "#E8C170", edge: "#8A6134" },   // or-parchemin : terre repérée, encore à prendre
+  occupe:  { fill: "#A89984", edge: "#6B5D4F" },   // pierre estompée : le village se voit déjà seul
+  label:   { bg: "rgba(38,38,38,0.85)", fg: "#EDE0C8", pad: 6, padV: 4, radius: 3, size: 12 },
+};
+async function refreshSites() {
+  try {
+    const r = await fetch("/api/sites");
+    const d = await r.json();
+    sitesList = (d && d.available && Array.isArray(d.sites)) ? d.sites : [];
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+// Centre ÉCRAN de l'ancre d'un site (la transform caméra est déjà refermée quand on dessine).
+function siteScreenPos(s) {
+  return { sx: (s.x * TILE_SIZE + TILE_SIZE / 2) * scale + offX,
+           sy: (s.y * TILE_SIZE + TILE_SIZE / 2) * scale + offY };
+}
+// Le losange est tracé en MARCHES PLEINES, ligne à ligne — jamais par rotation vectorielle, qui
+// anti-aliase et fait baver le contour à cette taille.
+function drawSiteDiamond(ctx, cx, cy, col) {
+  const h = SITE_MARK.half;
+  cx = Math.round(cx); cy = Math.round(cy);
+  for (let dy = -h; dy <= h; dy++) {
+    const w = h - Math.abs(dy);                     // demi-largeur de la marche
+    const y = cy + dy;
+    ctx.fillStyle = col.edge;                       // contour 1 px par la même technique
+    ctx.fillRect(cx - w - 1, y, 2 * w + 3, 1);
+  }
+  for (let dy = -h; dy <= h; dy++) {
+    const w = h - Math.abs(dy);
+    if (w <= 0) continue;                           // pointes : laissées au contour seul
+    ctx.fillStyle = col.fill;
+    ctx.fillRect(cx - w + 1, cy + dy, 2 * w - 1, 1);
+  }
+}
+function drawSites(ctx) {
+  if (!sitesList.length) return;
+  // On dessine TOUS les losanges même s'ils se chevauchent (24 max au monde) : pas de clustering,
+  // complexité non payée. C'est le survol qui départage.
+  for (const s of sitesList) {
+    const { sx, sy } = siteScreenPos(s);
+    if (sx < -16 || sy < -16 || sx > canvas.width + 16 || sy > canvas.height + 16) continue;
+    drawSiteDiamond(ctx, sx, sy, s.occupied ? SITE_MARK.occupe : SITE_MARK.libre);
+  }
+  // Cartouche : le nom SEUL, une ligne — le losange dit déjà libre/occupé. Un seul à la fois.
+  if (siteHover && (!siteHoverUntil || performance.now() < siteHoverUntil)) {
+    const s = sitesList.find(x => x.id === siteHover.id) || siteHover;
+    const { sx, sy } = siteScreenPos(s);
+    const L = SITE_MARK.label;
+    ctx.save();
+    ctx.font = `${L.size}px ${getComputedStyle(document.body).fontFamily}`;
+    ctx.textBaseline = "top";
+    const tw = ctx.measureText(s.name).width;
+    const bw = tw + L.pad * 2, bh = L.size + L.padV * 2;
+    let bx = sx - bw / 2;                            // centré sur le losange ...
+    let by = sy - SITE_MARK.half - 10 - bh;          // ... 10 px au-dessus de sa pointe haute
+    bx = Math.max(2, Math.min(canvas.width - bw - 2, bx));   // clampé : jamais coupé aux bords
+    by = Math.max(2, Math.min(canvas.height - bh - 2, by));
+    ctx.fillStyle = L.bg;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, L.radius);
+    else ctx.rect(bx, by, bw, bh);
+    ctx.fill();
+    ctx.fillStyle = L.fg;
+    ctx.fillText(s.name, bx + L.pad, by + L.padV);
+    ctx.restore();
+  } else if (siteHoverUntil && performance.now() >= siteHoverUntil) {
+    siteHover = null; siteHoverUntil = 0;
+  }
+}
+// Résolution du survol : candidat le PLUS PROCHE du curseur dans les zones de hit, tie-break id
+// MIN (déterministe). Coordonnées en ESPACE ÉCRAN — surtout PAS de division par TILE_SIZE ici,
+// tout le marqueur vit à l'écran (piège relevé à l'audit du tactile).
+function siteAtScreen(px, py) {
+  let best = null, bestD = SITE_MARK.hit;
+  for (const s of sitesList) {
+    const { sx, sy } = siteScreenPos(s);
+    const d = Math.hypot(px - sx, py - sy);
+    if (d < bestD || (d === bestD && best && s.id < best.id)) { bestD = d; best = s; }
+  }
+  return best;
+}
+
 // ── Carte explorée (P7 G1) : /api/explored sert un uint8 (1 = tuile déjà vue). On peint le
 // NÉGATIF — un voile froid sur ce que personne n'a encore parcouru — dans un canvas offscreen
 // 1 px/tuile, blitté au-dessus du sol et SOUS les bâtiments/créatures (rien n'est caché :
@@ -1251,6 +1345,8 @@ async function refreshExplored() {
 }
 setInterval(refreshExplored, 6000);   // la connaissance progresse lentement → poll espacé
 refreshExplored();
+setInterval(refreshSites, 6000);      // P7 G4 : même cadence — un site se découvre rarement
+refreshSites();
 
 function updateSeasonBadge() {
   const s = SEASONS[currentSeason] || SEASONS.spring;
@@ -2656,6 +2752,12 @@ function drawAll() {
   // → remplit le viewport uniformément, densité constante quel que soit le zoom/pan.
   // Dessinée par-dessus la nuit → un éclair illumine bien le monde assombri.
   drawWeatherSky(ctx);
+
+  // Sites nommés (P7 G4) : DERNIÈRE couche monde, au-dessus de tout ce qui se dessine dans la
+  // carte et sous tout le HUD. Dessinée APRÈS la météo-ciel : une couche cartographique doit
+  // rester lisible sous la pluie (la liste de z-order de Regigigas ne mentionnait pas la météo —
+  // choix signalé au gate). En espace ÉCRAN, donc taille fixe quel que soit le zoom.
+  drawSites(ctx);
 }
 
 // Fête des moissons (P5 E2) — rendu DESSINÉ PAR REGIGIGAS (params exacts : positions/couleurs/
@@ -3546,6 +3648,11 @@ const tooltip = document.getElementById("tooltip");
 canvas.addEventListener("mousemove", (ev) => {
   if (!worldData) return;
   const rect = canvas.getBoundingClientRect();
+  // P7 G4 — survol d'un site : ESPACE ÉCRAN pur (le marqueur ne vit pas dans le monde).
+  // À la souris le cartouche suit le curseur, il ne s'auto-efface pas (c'est le mobile qui a
+  // besoin d'un délai, faute de « sortie de survol »).
+  siteHover = siteAtScreen(ev.clientX - rect.left, ev.clientY - rect.top);
+  siteHoverUntil = 0;
   const mx = (ev.clientX - rect.left - offX) / scale / TILE_SIZE;
   const my = (ev.clientY - rect.top  - offY) / scale / TILE_SIZE;
 
@@ -3808,6 +3915,12 @@ canvas.addEventListener("touchstart", (ev) => {
       ev.touches[0].clientY - ev.touches[1].clientY
     );
   } else if (ev.touches.length === 1) {
+    // P7 G4 — tap sur un site : coordonnées ÉCRAN, aucune division par TILE_SIZE (le marqueur
+    // ne vit pas dans le monde). Au doigt il n'existe pas de « sortie de survol » → le cartouche
+    // s'efface seul après 2 s.
+    const _r = canvas.getBoundingClientRect();
+    const _s = siteAtScreen(ev.touches[0].clientX - _r.left, ev.touches[0].clientY - _r.top);
+    if (_s) { siteHover = _s; siteHoverUntil = performance.now() + 2000; }
     isDragging = true;
     dragSX = ev.touches[0].clientX;
     dragSY = ev.touches[0].clientY;

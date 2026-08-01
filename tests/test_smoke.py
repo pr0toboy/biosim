@@ -2311,6 +2311,57 @@ def test_p7_g2_colonist_march_is_persistent_and_bounded():
           "sabotage, arrivée, timeout, save/load, vieux save)")
 
 
+def test_p7_g4_site_names_are_derived_and_grammatical():
+    """P7 G4 — un toponyme est DÉRIVÉ de (seed, site_id) et de rien d'autre, comme les cultes E1 :
+    aucun état, donc aucun save ne peut porter un nom qui ne correspond plus à son lieu — c'est
+    exactement le défaut qu'on avait dû corriger sur le catalogue lui-même en G1, où `conv()`
+    lisait des grilles mutables.
+    Et le français doit tenir : « de le Silence » n'existe pas. On balaie TOUTES les combinaisons
+    plutôt que d'échantillonner — 288 cas, c'est gratuit, et un nom fautif se verrait à l'écran."""
+    from engine.simulation import site_name, _SITE_FORMS, _SITE_ROOTS
+    assert site_name(7, 3) == site_name(7, 3), "nom non déterministe"
+    assert site_name(7, 3) != site_name(958420, 3), "le seed ne change pas les noms"
+    fautifs = []
+    for f in _SITE_FORMS:
+        for r in _SITE_ROOTS:
+            n = f.format(r=r).replace(" de le ", " du ")
+            if " de le " in n or " de l' " in n or "  " in n:
+                fautifs.append(n)
+    assert not fautifs, f"toponymes non grammaticaux : {fautifs[:3]}"
+    assert any(" du " in site_name(s, i) for s in range(40) for i in range(24)), \
+        "la contraction « du » n'est jamais exercée → le test ne prouve rien"
+    # Distinction en pratique sur les gabarits SERVIS (une collision ferait deux lieux homonymes).
+    for seed, w, h in ((958420, 320, 232), (7, 220, 160)):
+        cat = World(width=w, height=h, seed=seed).site_catalogue()
+        noms = [site_name(seed, sid) for sid, _x, _y, _s in cat]
+        assert len(set(noms)) == len(noms), f"noms en collision sur seed {seed}"
+    # Aucun état : le nom ne dépend NI des grilles mutables NI du tick.
+    w2 = World(width=140, height=100, seed=424242)
+    avant = [site_name(424242, sid) for sid, _x, _y, _s in w2.site_catalogue()]
+    w2.tree_grid[:] = 0
+    w2.fertility_grid[:] = 0
+    assert [site_name(424242, sid) for sid, _x, _y, _s in w2.site_catalogue()] == avant, \
+        "le toponyme suit les grilles mutables"
+    # « à » + toponyme : les noms portent leur article, donc la contraction doit suivre — sans
+    # elle les annales écrivaient « fonde une colonie à les Rives » (constaté sur un run réel de
+    # 14000 t, pas déduit). Toutes les combinaisons, encore : c'est ce que le joueur LIT.
+    from engine.simulation import a_lieu
+    fautifs_a = []
+    for f in _SITE_FORMS:
+        for r in _SITE_ROOTS:
+            a = a_lieu(f.format(r=r).replace(" de le ", " du "))
+            if a.startswith("à les ") or a.startswith("à le ") or "  " in a:
+                fautifs_a.append(a)
+    assert not fautifs_a, f"contraction de « à » fautive : {fautifs_a[:3]}"
+    assert a_lieu("les Rives de la Mousse").startswith("aux "), "« à les » non contracté"
+    assert a_lieu("le Val de la Brume").startswith("au "), "« à le » non contracté"
+    assert a_lieu("la Combe du Vent").startswith("à la "), "féminin altéré à tort"
+    assert a_lieu("l'Aube").startswith("à l'"), "élision altérée à tort"
+    print(f"  test_p7_g4_site_names_are_derived_and_grammatical OK "
+          f"({len(_SITE_FORMS)}×{len(_SITE_ROOTS)} combinaisons grammaticales, "
+          f"ex. « {site_name(7, 0)} », « {site_name(958420, 2)} »)")
+
+
 def test_p7_g3_conv_fresh_never_touches_the_frozen_grid():
     """P7 G3 : deux lectures de conv() aux rôles distincts (amendement A2). `conv_grid()` FIGE la
     convenance du monde vierge — c'est d'elle que sortent le catalogue de sites et les
@@ -2864,6 +2915,7 @@ if __name__ == "__main__":
             test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
             test_p7_g2_directed_colony_founding_and_filters,
             test_p7_g2_colonist_march_is_persistent_and_bounded,
+            test_p7_g4_site_names_are_derived_and_grammatical,
             test_p7_g3_conv_fresh_never_touches_the_frozen_grid,
             test_p7_g3_push_couple_discriminates_measured_cases,
             test_p7_g3_migration_slots_round_trip,

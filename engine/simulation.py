@@ -756,6 +756,10 @@ MIGRATION_COOLDOWN   = 3000  # budget de DISTANCE/rythme, PLAT (règle A4 : seul
 # NB : un clan ne peut PAS migrer le jour de sa naissance — `due` est calculé avant les scissions,
 # donc la première éval d'un clan neuf tombe au plus tôt un déphasage plus tard.
 MIGRATION_SETTLE     = 500
+# G4 — une découverte ne fait date que si elle est LOINTAINE. Mesuré en G1 : la carte d'un clan se
+# remplit du proche vers le lointain (médiane 22 tuiles) ; sans ce filtre les annales se noieraient
+# sous des « découvertes » situées à une promenade du feu.
+TOPO_ANNAL_DIST   = 100
 # Le feu de camp a build_time=0 (il est POSÉ à la fondation, jamais bâti) : la spec fixe donc le
 # coût du chantier de migration au temps d'une MAISON x2 — le village doit peiner pour renaître.
 MIGRATION_WORK    = 80    # = BUILDING_SPECS["house"].build_time * 2 (vérifié : 40)
@@ -846,6 +850,42 @@ def _hash2(seed: int, x: int) -> int:
 def _cult_name(seed: int, cult_id: int) -> str:
     h = _hash2(seed, cult_id)
     return _CULT_FORMS[h % len(_CULT_FORMS)].format(r=_NAME_ROOTS[(h >> 8) % len(_NAME_ROOTS)])
+
+# P7 G4 — toponymes. Un lieu se nomme par sa FORME et par ce qui y pousse : le relief vient du
+# nom, la nature de ce que la conv() a effectivement trouvé sur place. Pure arithmétique de
+# (seed, site_id) comme les cultes E1 — AUCUN état, donc rien à sérialiser, rien à faire dériver
+# au rechargement, et deux processus qui ouvrent la même partie lisent les mêmes noms.
+_SITE_FORMS = ["les Hauts de {r}", "la Combe de {r}", "le Val de {r}", "les Rives de {r}",
+               "le Plateau de {r}", "la Clairière de {r}", "les Terres de {r}", "le Passage de {r}",
+               "la Butte de {r}", "les Sources de {r}", "le Creux de {r}", "la Pointe de {r}"]
+_SITE_ROOTS = ["l'Aube", "l'Ombre", "la Brume", "l'Écho", "la Pierre-Grise", "l'Orme", "la Sente",
+               "la Corneille", "l'Ambre", "la Bruyère", "le Silence", "la Loutre", "l'Ardoise",
+               "la Fougère", "le Vent", "la Marge", "l'Aulne", "la Cendre", "le Renard", "la Mousse",
+               "l'Ajonc", "la Genèse", "le Cerf", "la Ronce"]
+
+
+def site_name(seed: int, site_id: int) -> str:
+    """P7 G4 — nom d'un site, DÉRIVÉ de (seed, site_id) et de rien d'autre. Même patron que
+    `_cult_name` : aucun état, donc aucun risque qu'un save porte un nom qui ne correspond plus
+    à son lieu (le défaut qu'on avait déjà corrigé sur le catalogue lui-même en G1)."""
+    h = _hash2(seed, site_id * 7 + 1)
+    nom = _SITE_FORMS[h % len(_SITE_FORMS)].format(r=_SITE_ROOTS[(h >> 8) % len(_SITE_ROOTS)])
+    # Contraction : « de le Silence » n'existe pas en français. Les racines féminines (« la ») et
+    # élidées (« l' ») se composent seules, seul le masculin demande « du ».
+    return nom.replace(" de le ", " du ")
+
+
+def a_lieu(nom: str) -> str:
+    """« à » + un toponyme, contracté. Les noms de lieux portent leur article (« les Rives »,
+    « le Val », « la Combe », « l'Aube ») : sans ça les annales écriraient « à les Rives ».
+    Séparé de `site_name` parce que TOUTES les tournures ne contractent pas — « quitte ses terres
+    POUR les Rives » est correct tel quel, et seule la tournure en « à » doit être traitée."""
+    if nom.startswith("les "):
+        return "aux " + nom[4:]
+    if nom.startswith("le "):
+        return "au " + nom[3:]
+    return "à " + nom                     # « la … » et « l'… » se composent seuls
+
 
 def _hero_name(seed: int, entity_id: int, via: str) -> str:
     h = _hash2(seed, entity_id)
@@ -5376,13 +5416,32 @@ class Simulation:
                 # Le départ et l'échec restent SILENCIEUX (même parti pris qu'en G1 : seule la
                 # découverte se racontait, pas le départ de l'éclaireur) — on ne raconte pas une
                 # intention, on raconte ce qui a eu lieu.
-                # Formulation VOLONTAIREMENT neutre : l'event d'arrivée ne porte pas la cause, et
+                # Formulation neutre quant à la CAUSE : l'event d'arrivée ne la porte pas, et
                 # l'exode a deux histoires (appel d'une terre meilleure / fuite d'un terroir
-                # épuisé). Écrire « terres épuisées » mentirait sur les PULL, qui sont la majorité
-                # mesurée. La cause reste lisible dans `clan_migration_start` pour qui la veut.
+                # épuisé). Écrire « terres épuisées » mentirait sur les PULL, majoritaires.
+                # G4 : sous TOPO le lieu se NOMME ; sans lui la phrase reste vraie, juste anonyme.
+                _lieu = (site_name(self.world.seed, ev["site"])
+                         if _TOPO_ON and ev.get("site") is not None else None)
                 add({"t": t, "kind": "explo", "cat": "annals", "msg":
-                     f"Le clan {ev['clan_id'] + 1} lève le camp et rallume son feu sur une terre "
-                     f"lointaine"})
+                     (f"Le clan {ev['clan_id'] + 1} quitte ses terres pour {_lieu}" if _lieu else
+                      f"Le clan {ev['clan_id'] + 1} lève le camp et rallume son feu sur une terre "
+                      f"lointaine")})
+            elif et == "site_discovered" and _TOPO_ON and ev.get("dist", 0) >= TOPO_ANNAL_DIST:
+                # G4 — seule la découverte LOINTAINE fait date. Un site à deux pas du feu n'est pas
+                # une expédition, c'est une promenade : sans ce filtre les annales se noieraient
+                # sous les découvertes de proximité (mesuré en G1 : médiane 22 tuiles).
+                _k = ("site_annal", ev["site"])
+                if _k not in self._chronicle_seen:      # une terre ne se découvre qu'UNE fois
+                    self._chronicle_seen.add(_k)
+                    add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                         f"Les éclaireurs du clan {ev['clan_id'] + 1} atteignent "
+                         f"{site_name(self.world.seed, ev['site'])}"})
+            elif et == "clan_swarm" and _TOPO_ON and ev.get("site") is not None:
+                # G4 — la fondation DIRIGÉE se raconte (la clé `site` est absente d'un essaimage
+                # local, donc ce test suffit à les distinguer sans drapeau supplémentaire).
+                add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                     f"Le clan {ev['clan_id'] + 1} fonde une colonie "
+                     f"{a_lieu(site_name(self.world.seed, ev['site']))}"})
             elif et == "clan_tribute":    # P3
                 add({"t": t, "kind": "war", "msg":
                      f"Vaincu, le clan {ev['from_clan'] + 1} paie tribut au clan {ev['to_clan'] + 1}"})

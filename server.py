@@ -41,7 +41,7 @@ def _get_sysinfo() -> dict:
     return {"cpu": cpu, "ram": ram, "temp": temp}
 
 from engine.world import World, _grid_to_b64
-from engine.simulation import Simulation
+from engine.simulation import Simulation, site_name, SITE_OCCUPIED_R, _TOPO_ON
 from engine.entities import EntityType
 
 
@@ -347,6 +347,33 @@ async def explored():
         if g is None:
             return {"available": False}
         return {"available": True, "grid": _grid_to_b64(g)}
+
+
+@app.get("/api/sites")
+async def sites():
+    """Sites DÉCOUVERTS (P7 G4) : union des `known_sites` des clans VIVANTS — donc dérivé, jamais
+    stocké, et il rétrécit si les clans qui savaient s'éteignent. Un site jamais atteint n'est pas
+    listé : le joueur voit ce que son monde a appris, pas ce que le catalogue contient.
+    Hors hash, poll léger comme les sentiers et la carte explorée. `occupied` est dérivé des feux
+    vivants (même rayon que le moteur) et sert au front à distinguer une terre prise d'une terre
+    offerte — il ne remplace PAS le prédicat de réservation, qui reste interne."""
+    async with state_lock:
+        if not _TOPO_ON:
+            return {"available": False}
+        cat = sim.world.site_catalogue()
+        connus = set()
+        for c in sim.clans:
+            connus.update(getattr(c, "known_sites", []) or [])
+        feux = [(b.x, b.y) for b in sim.buildings if b.btype == "campfire"]
+        r2 = SITE_OCCUPIED_R ** 2
+        out = []
+        for sid, x, y, score in cat:
+            if sid not in connus:
+                continue
+            out.append({"id": sid, "x": x, "y": y,
+                        "name": site_name(sim.world.seed, sid), "score": int(score),
+                        "occupied": any((fx - x) ** 2 + (fy - y) ** 2 <= r2 for fx, fy in feux)})
+        return {"available": True, "sites": out}
 
 
 @app.post("/api/pause")
