@@ -2811,6 +2811,87 @@ def test_audit_ally_hysteresis_survives_save_load():
     print("  test_audit_ally_hysteresis_survives_save_load OK (hystérésis sérialisée ; fallback vieux save)")
 
 
+def test_audit_f3_exodus_ruins_are_orphaned():
+    """Ultra-audit F3 — les ruines d'un exode doivent être ORPHELINES (`clan_id = -1`), comme sur
+    le chemin d'extinction. Sinon le village abandonné reste attaché à son clan et : (a) ANCRE SON
+    TERRITOIRE 15000 ticks depuis une terre qu'il a quittée (`_compute_territory` prend pour ancre
+    tout bâtiment à clan_id >= 0), (b) ses stocks comptent encore dans `_clan_wealth`, donc dans
+    l'envie F2, (c) à une extinction ultérieure il serait SUPPRIMÉ au lieu de vieillir.
+    Aucun scénario golden n'atteint ce chemin (aucun ne fait migrer un clan) — il n'est couvert
+    que par ce test."""
+    from engine.simulation import MIGRATION_WORK, _clan_wealth
+    sim, cat, pop = _g3_scene()
+    c = sorted(sim.clans, key=lambda k: k.id)[0]
+    sid, sx, sy = next((s[0], s[1], s[2]) for s in cat
+                       if (s[1] - c.cx) ** 2 + (s[2] - c.cy) ** 2 > 40 ** 2)
+    vieux = [b for b in sim.buildings if b.clan_id == c.id]
+    assert vieux, "la scène ne prouve rien : le clan n'a aucun bâtiment à abandonner"
+    vieux[0].wood = 40                       # de quoi rendre le biais de richesse MESURABLE
+    avant = _clan_wealth({c.id: [b for b in sim.buildings if b.clan_id == c.id]})
+    assert avant > 0, "richesse nulle : le test ne prouverait pas le point (b)"
+    sim._start_migration(c, sid, sx, sy, "pull", 20, [])
+    site = next(b for b in sim.buildings if b.btype == "site_campfire" and b.clan_id == c.id)
+    site.work_done = MIGRATION_WORK
+    sim._update_migrations([])
+    ruines = [b for b in sim.buildings if b.btype == "ruin" and b in vieux]
+    assert ruines, "l'ancien village n'est pas tombé en ruines"
+    assert all(b.clan_id == -1 for b in ruines), \
+        "ruines d'exode encore attachées au clan → territoire fantôme + richesse biaisée"
+    # (a) le territoire ne s'ancre plus sur la terre quittée
+    ancres = [(b.clan_id, b.y, b.x) for b in sim.buildings if b.clan_id is not None and b.clan_id >= 0]
+    assert all(not (b.btype == "ruin") for b in sim.buildings if b.clan_id == c.id), \
+        "une ruine ancre encore le territoire du clan"
+    assert any(cid == c.id for cid, _y, _x in ancres), "le clan n'ancre plus RIEN (nouveau feu perdu)"
+    # (b) la richesse ne compte plus les stocks abandonnés
+    apres = _clan_wealth({c.id: [b for b in sim.buildings if b.clan_id == c.id]})
+    assert apres < avant, f"la richesse n'a pas baissé ({avant} → {apres}) : stocks fantômes comptés"
+    print(f"  test_audit_f3_exodus_ruins_are_orphaned OK ({len(ruines)} ruines orphelines, "
+          f"richesse {avant} → {apres})")
+
+
+def test_audit_f2_a_migrating_clan_does_not_swarm():
+    """Ultra-audit F2 — trou résiduel d'A9. `_swarm_split` passe `self_clan_id=mother_id` à
+    `_site_reserved`, ce qui EXEMPTE la mère de sa propre réservation. L'exemption est juste quand
+    un clan ré-évalue SA cible, mais elle n'a aucun cas légitime ici : une mère EN MIGRATION
+    pouvait fonder une colonie sur sa PROPRE terre de destination et y planter un second feu.
+    On mesure le DÉNOMINATEUR d'abord : sans migration en cours, la mère essaime bien — sinon le
+    test passerait au vert en ne prouvant rien."""
+    from engine.simulation import Clan, N_CLANS, SWARM_MIN_POP
+    def _scene():
+        w = World(width=120, height=90, seed=7); sim = Simulation(w)
+        ents = []
+        for i in range(SWARM_MIN_POP + 4):
+            far = i >= SWARM_MIN_POP
+            e = spawn(EntityType.HUMAN, 20 + (20 if far else (i % 3)), 20 + (i // 3), Sex.MALE)
+            e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e)
+        sim.entities = ents
+        m = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id); m.tension = 10
+        sim.clans = [m]; sim._next_clan_id = N_CLANS
+        sim.buildings = [Building(id=99, clan_id=-1, x=45, y=20, btype="ruin", ruin_ticks=1000)]
+        return sim, m
+    # ⚠️ AUCUN appel de `_swarm_split` AVANT les mesures : `spawn()` incrémente un compteur d'ids
+    # de MODULE, et un essaimage préalable décale les ids au point de rendre les deux mesures
+    # non comparables — constaté ici même, le test passait alors garde RETIRÉE. Même piège que la
+    # variation d'entités de `test_smoke_runs`.
+    # La garde vit à l'ÉLIGIBILITÉ, dans `_update_society` — c'est donc CE chemin qu'on exerce,
+    # et surtout PAS une reproduction de la condition dans le test, qui passerait au vert même
+    # garde retirée du moteur.
+    from engine.simulation import MODE_PERIOD
+    def _essaime_via_societe(migrating):
+        sim, m = _scene()
+        m.migrating_to = migrating
+        sim.tick_count = MODE_PERIOD          # 1 clan, id 0 -> due quand tick % MODE_PERIOD == 0
+        avant = len(sim.clans)
+        sim._update_society({}, [])           # aucune maison -> cap 0 -> la condition p > cap tient
+        return len(sim.clans) - avant
+    assert _essaime_via_societe(-1) == 1, \
+        "denominateur : sans migration, le chemin d'eligibilite doit bien fonder une colonie"
+    assert _essaime_via_societe(3) == 0, \
+        "un clan EN MIGRATION a essaime — il pouvait fonder sur sa propre terre de destination"
+    print("  test_audit_f2_a_migrating_clan_does_not_swarm OK (via _update_society ; denominateur "
+          ": essaime si libre, bloque en migration)")
+
+
 def test_p41_swarm_recolonizes_ruin():
     """P4.1 essaimage : un clan prospère à l'étroit envoie K=pop//4 colons fonder une colonie SUR
     la ruine la plus proche (consommée), alliée +50 SANS event clan_allies (pas de mariage auto)."""

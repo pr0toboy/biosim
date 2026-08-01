@@ -4339,7 +4339,14 @@ class Simulation:
                     # En multi-clan, le coup reste la soupape (churn politique) qui préempte la scission.
                     self._coup(c, tick_events)       # inline : renverse le chef, tension −40
                 elif (_SWARM_ON and c.tension < SWARM_TENSION_MAX and p >= SWARM_MIN_POP
-                      and p > cap and len(self.clans) < MAX_CLANS):
+                      and p > cap and len(self.clans) < MAX_CLANS
+                      # A9, trou résiduel (finding d'audit F2) : un clan DÉJÀ en migration ne
+                      # doit pas essaimer. `_swarm_split` passe self_clan_id=mother_id à
+                      # `_site_reserved`, ce qui EXEMPTE sa propre réservation — l'exemption est
+                      # juste quand un clan ré-évalue SA cible, elle n'a aucun cas légitime ici :
+                      # la mère pouvait fonder une colonie sur sa PROPRE terre de destination et
+                      # y planter un second feu.
+                      and c.migrating_to < 0):
                     colonies.append(c.id)            # P4.1 essaimage pacifique (fondation différée)
             # Cible de guerre : SANS P2, rival le + peuplé (tie-break id). AVEC P2 (P2b) : jamais
             # un ALLIÉ, puis la relation la plus BASSE (le + rival, tie-break id min).
@@ -5218,6 +5225,12 @@ class Simulation:
                 continue
             _was_monument = b.btype == "monument"  # un monument laisse un vestige durable (E3)
             b.btype = "ruin"                      # y compris l'ancien feu et les chantiers avortés
+            # ORPHELINE, comme sur le chemin d'extinction (finding d'audit F3) : sans ça la ruine
+            # reste attachée au clan et (a) ANCRE SON TERRITOIRE 15000 ticks depuis une terre qu'il
+            # a quittée — `_compute_territory` prend pour ancre tout bâtiment à clan_id >= 0 —,
+            # (b) ses stocks comptent encore dans `_clan_wealth`, ce qui biaise l'envie F2, et
+            # (c) à une extinction ultérieure elle serait SUPPRIMÉE au lieu de vieillir.
+            b.clan_id = -1
             b.ruin_ticks = RUIN_LIFETIME * (MONUMENT_RUIN_MULT if _was_monument else 1)
             b.work_needed = 0
             b.work_done = 0
