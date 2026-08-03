@@ -9,6 +9,7 @@ import asyncio
 import json
 import sys
 import os
+import collections
 import threading
 import time
 import traceback
@@ -82,6 +83,11 @@ state_lock = asyncio.Lock()
 # ── Vitesse : ticks par seconde ──────────────────────────────────────────────
 tick_interval = 0.5   # secondes entre chaque tick (modifiable via API)
 sim_running   = True
+
+# Fenêtre glissante des fins de cycle → cadence RÉELLE. Le bug de cadence (période =
+# step + intervalle, cf. e7903c6) a vécu sans signal depuis le passage au monde x2 : on
+# mesurait step_ms, jamais le RYTHME effectif. Un curl doit désormais le montrer.
+_cycle_stamps: "collections.deque[float]" = collections.deque(maxlen=120)
 
 MAX_WS_CLIENTS         = 64   # plafond de connexions WebSocket simultanées (anti-DoS)
 MAX_CONSECUTIVE_ERRORS = 20   # au-delà, on laisse la boucle crasher (systemd redémarre)
@@ -166,6 +172,10 @@ async def simulation_loop():
     loop = asyncio.get_running_loop()
     while True:
         _t_cycle = time.perf_counter()   # cadence COMPENSÉE, cf. le sleep en fin de boucle
+        # Marque prise en TÊTE de cycle : deux marques consécutives valent exactement la
+        # PÉRIODE. Marquée en fin de boucle, l'écart mélangeait le sommeil et le travail du
+        # cycle suivant — mesure juste en moyenne, mais bruitée et trompeuse à froid.
+        _cycle_stamps.append(_t_cycle)
         # La sim avance qu'il y ait des spectateurs ou non : le monde vit et s'écrit
         # tout seul (chronique, autosave). Seul le broadcast dépend des clients.
         if sim_running:
@@ -322,7 +332,18 @@ async def sysinfo():
 @app.get("/api/metrics")
 async def metrics():
     async with state_lock:
-        return sim.metrics()
+        m = sim.metrics()
+    # Cadence RÉELLE sur la fenêtre glissante, à côté de step_ms : `step_ms` dit combien de
+    # temps le calcul PREND, `tick_rate` dit à quel rythme le monde AVANCE — les deux ont
+    # divergé pendant des semaines sans que rien ne l'affiche. `target` rend l'écart lisible
+    # sans avoir à connaître tick_interval.
+    if len(_cycle_stamps) >= 2:
+        _span = _cycle_stamps[-1] - _cycle_stamps[0]
+        m["tick_rate"] = round((len(_cycle_stamps) - 1) / _span, 2) if _span > 0 else None
+    else:
+        m["tick_rate"] = None
+    m["tick_rate_target"] = round(1.0 / tick_interval, 2) if tick_interval > 0 else None
+    return m
 
 
 @app.get("/api/chronicle")
