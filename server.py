@@ -10,6 +10,7 @@ import json
 import sys
 import os
 import threading
+import time
 import traceback
 from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -164,6 +165,7 @@ async def simulation_loop():
     consecutive_errors = 0
     loop = asyncio.get_running_loop()
     while True:
+        _t_cycle = time.perf_counter()   # cadence COMPENSÉE, cf. le sleep en fin de boucle
         # La sim avance qu'il y ait des spectateurs ou non : le monde vit et s'écrit
         # tout seul (chronique, autosave). Seul le broadcast dépend des clients.
         if sim_running:
@@ -196,7 +198,16 @@ async def simulation_loop():
                 async with state_lock:
                     snap = sim.save_state()
                 await loop.run_in_executor(None, _write_save, snap)
-        await asyncio.sleep(tick_interval)
+        # Cadence COMPENSÉE : on dort ce qui RESTE de l'intervalle, pas l'intervalle entier.
+        # Avant, la période valait `travail + tick_interval` — le monde servi tournait donc à
+        # 1,32 tick/s pour une cible de 2 (mesuré : step 236 ms + 500 ms = 736 ms de période),
+        # et la dérive s'aggravait avec la population sans que rien ne le signale. Le serveur
+        # n'était pourtant pas saturé (21 % d'un cœur) : ce n'était pas un manque de puissance,
+        # c'était de la comptabilité.
+        # Plancher de 10 ms quand le travail déborde l'intervalle : sans lui, un tick plus long
+        # que `tick_interval` ferait tourner la boucle à plein régime et affamerait l'event-loop
+        # (WS, API, nouvelles connexions) au lieu de dégrader proprement la cadence.
+        await asyncio.sleep(max(0.01, tick_interval - (time.perf_counter() - _t_cycle)))
 
 
 def _sim_task_done(task: "asyncio.Task"):
