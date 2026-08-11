@@ -2842,6 +2842,184 @@ def _h2_scene(tension, last_coup, tick, npop=14):
     return sim, c, {0: {"house": maisons}}
 
 
+def test_p8_h1_envy_formula_is_not_a_truism():
+    """P8 H1 — LE test qui existe à cause d'un finding pré-code : la spec écrivait la garde
+    `pauvre*N <= riche*D` (N/D=1/3) avec déclenchement sur FAUX. Or `pauvre*1 <= riche*3` est un
+    TRUISME dès que riche >= pauvre : « FAUX » n'arrive jamais, l'érosion n'aurait JAMAIS tiré, et
+    le bloc censé relancer l'Histoire serait né mort — une inertie totale, invisible autrement
+    qu'à la sonde d'acceptation.
+    Ce test transforme le finding en garde-fou PERMANENT : si quelqu'un ré-inverse le produit
+    croisé un jour, il échoue immédiatement."""
+    from engine.simulation import (ENVY_ALLY_RATIO_N as N, ENVY_ALLY_RATIO_D as D,
+                                   ENVY_ALLY_MIN as MIN, ENVY_ALLY_EROSION)
+    def erode(lo, hi):
+        return hi >= MIN and lo * D <= hi * N
+    # La forme SPEC (inversée) appliquée aux mêmes cas : elle ne discrimine rien.
+    def erode_spec_inversee(lo, hi):
+        return hi >= MIN and not (lo * N <= hi * D)
+    cas = [("live 12,2x", 5972, 72604, True),      # duopole installé : DOIT éroder
+           ("injuste 5x", 40, 200, True),
+           ("frontière exacte x3", 100, 300, True),
+           ("juste sous x3", 100, 299, False),     # 100*3=300 > 299 → pas d'érosion
+           ("équitable 1,2x", 100, 120, False),
+           ("misère 0 contre 74", 0, 74, False),   # le PLANCHER l'écarte : rien à envier
+           ("riche pile au plancher", 0, MIN, True)]
+    for nom, lo, hi, attendu in cas:
+        assert erode(lo, hi) is attendu, f"garde H1 fausse sur « {nom} »"
+    # DÉNOMINATEUR : la forme de la spec n'érode JAMAIS, y compris là où elle le devrait.
+    assert not any(erode_spec_inversee(lo, hi) for _n, lo, hi, _a in cas), \
+        "la forme inversée déclenche : le finding serait caduc, revérifier le raisonnement"
+    assert any(erode(lo, hi) for _n, lo, hi, _a in cas), \
+        "la forme corrigée ne déclenche jamais non plus → le test ne prouve rien"
+    # Frontière du PLANCHER, au point exact.
+    assert not erode(0, MIN - 1) and erode(0, MIN), f"frontière du plancher fausse autour de {MIN}"
+    assert ENVY_ALLY_EROSION > 0, "l'érosion doit RONGER la relation, pas l'augmenter"
+    print(f"  test_p8_h1_envy_formula_is_not_a_truism OK ({len(cas)} cas, frontières x{D}/{N} et "
+          f"plancher {MIN} ; la forme inversée de la spec n'érode aucun cas)")
+
+
+def test_p8_h1_erosion_replaces_neighbourhood():
+    """P8 H1 — l'injustice OCCUPE la relation : l'érosion REMPLACE le bonus de voisinage, elle ne
+    s'y ajoute pas. Sans ça, une paire alliée ET voisine ferait +2−4 = −2 au lieu de −4, le
+    réglage deviendrait illisible et la cadence mesurée (17 évals pour rompre depuis 100) serait
+    fausse d'un facteur 2. On l'exerce sur le VRAI chemin (`_update_society`), pas sur une copie
+    de la condition."""
+    from engine.simulation import (Clan, N_CLANS, MODE_PERIOD, ENVY_ALLY_EROSION, REL_ALLY,
+                                   REL_D_NEIGHBOR, _rel_key, _ENVYALLY_ON)
+    assert _ENVYALLY_ON, "scène invalide sous ENVYALLY_OFF"
+    def scene(riche_stock):
+        sim = Simulation(World(width=120, height=90, seed=7))
+        ents = []
+        for i in range(6):
+            e = spawn(EntityType.HUMAN, 20 + i % 3, 20, Sex.MALE)
+            e.age = _adult_age(0.5); e.clan_id = 0 if i < 3 else 1; ents.append(e)
+        sim.entities = ents
+        a = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id)
+        b = Clan(id=1, cx=25.0, cy=20.0, color="#0f0", chief_id=ents[3].id)   # VOISINS (dist 5)
+        sim.clans = [a, b]; sim._next_clan_id = N_CLANS
+        # Le riche porte son stock dans une maison ; le pauvre n'a rien.
+        maison = Building(id=1, clan_id=1, x=25, y=21, btype="house", iron=riche_stock)
+        sim.buildings = [maison]
+        sim.relations = {_rel_key(0, 1): REL_ALLY + 40}
+        sim._ally_state = {_rel_key(0, 1)}
+        sim.tick_count = MODE_PERIOD
+        return sim, _rel_key(0, 1)
+    # Écart DURABLE : le riche a de quoi (fer ×6 → largement au-dessus du plancher).
+    sim, k = scene(200)
+    avant = sim.relations[k]
+    sim._update_society({1: {"house": [sim.buildings[0]]}}, [])
+    apres = sim.relations[k]
+    assert apres == avant - ENVY_ALLY_EROSION, (
+        f"érosion attendue {-ENVY_ALLY_EROSION}, obtenu {apres - avant} — le voisinage s'est "
+        f"AJOUTÉ au lieu d'être remplacé (aurait donné {REL_D_NEIGHBOR - ENVY_ALLY_EROSION})")
+    # DÉNOMINATEUR : sans écart de richesse, la même paire voisine gagne bien son bonus.
+    sim2, k2 = scene(0)
+    avant2 = sim2.relations[k2]
+    sim2._update_society({1: {"house": [sim2.buildings[0]]}}, [])
+    assert sim2.relations[k2] > avant2, \
+        "sans injustice, la paire voisine doit CONSTRUIRE — sinon le test ne prouve rien"
+    print(f"  test_p8_h1_erosion_replaces_neighbourhood OK (érosion {-ENVY_ALLY_EROSION} seule, "
+          f"pas {REL_D_NEIGHBOR - ENVY_ALLY_EROSION} ; dénominateur : voisinage +{REL_D_NEIGHBOR} "
+          f"sans écart)")
+
+
+def test_p8_h1_marriage_cannot_outpace_envy():
+    """P8 H1 — LE contre-pouvoir du bloc : le mariage P3c cimente une alliance de +10 au
+    franchissement. Deux façons de rater H1, opposées, et le test les ferme toutes les deux :
+      · le mariage ANNULE l'érosion → l'alliance injuste ne rompt jamais, H1 est mort une seconde
+        fois (après avoir failli l'être par la formule inversée) ;
+      · le cycle rupture → voisinage → re-franchissement → nouveau mariage tourne en MOULIN →
+        annales spammées et une entité transférée à chaque tour.
+    On MESURE donc la période du cycle sur le vrai chemin au lieu de la déduire : le mariage n'agit
+    qu'UNE fois par franchissement (+10) quand l'érosion agit à CHAQUE éval (−4) — mais c'est la
+    mesure qui doit le dire, pas l'arithmétique de tête."""
+    from engine.simulation import (Clan, N_CLANS, MODE_PERIOD, ENVY_ALLY_EROSION, REL_ALLY,
+                                   REL_ALLY_OFF, REL_D_MARRIAGE, REL_D_NEIGHBOR, _rel_key,
+                                   _ENVYALLY_ON, WAR_MIN_POP)
+    assert _ENVYALLY_ON, "scène invalide sous ENVYALLY_OFF"
+    NPC = WAR_MIN_POP + 4          # pop par clan : le donneur doit dépasser WAR_MIN_POP, sinon
+                                   # « alliance sans mariage » et le test ne verrait aucun mariage
+    def scene(riche_stock):
+        sim = Simulation(World(width=120, height=90, seed=7))
+        ents = []
+        for i in range(2 * NPC):
+            e = spawn(EntityType.HUMAN, 20 + i % 4, 20 + i // 8, Sex.MALE)
+            e.age = _adult_age(0.5); e.clan_id = 0 if i < NPC else 1; ents.append(e)
+        sim.entities = ents
+        a = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id)
+        b = Clan(id=1, cx=25.0, cy=20.0, color="#0f0", chief_id=ents[NPC].id)   # VOISINS
+        sim.clans = [a, b]; sim._next_clan_id = N_CLANS
+        # Logement des DEUX clans : sans toit la surpopulation ferait monter la tension et un
+        # coup/une scission viendrait polluer la mesure (piège de montage déjà payé en H2).
+        bl = [Building(id=500 + i, clan_id=i // 3, x=22 + i, y=22, btype="house") for i in range(6)]
+        riche = Building(id=1, clan_id=1, x=25, y=21, btype="house", iron=riche_stock)
+        bl.append(riche)
+        sim.buildings = bl
+        cb = {0: {"house": [b for b in bl if b.clan_id == 0]},
+              1: {"house": [b for b in bl if b.clan_id == 1]}}
+        sim.relations = {_rel_key(0, 1): REL_ALLY}      # à l'instant du franchissement
+        sim._ally_state = {_rel_key(0, 1)}
+        sim.tick_count = MODE_PERIOD
+        return sim, cb, _rel_key(0, 1)
+
+    def parcours(riche_stock, n_evals=40):
+        """Déroule n_evals évaluations réelles et rend (ruptures, mariages, allié_à_la_fin).
+        Le tick avance de MODE_PERIOD//2 : les deux clans sont déphasés, donc la paire est vue
+        une fois par pas — la cadence RÉELLE du moteur, pas une cadence inventée pour le test."""
+        sim, cb, k = scene(riche_stock)
+        ruptures, mariages, ally_avant = [], [], True
+        for i in range(n_evals):
+            evs = []
+            # LES DEUX MOITIÉS DE LA CHAÎNE, dans l'ordre de `step()` (3913 puis 4190) : l'érosion
+            # vit dans _update_society, le MARIAGE dans _update_relations. N'appeler que la
+            # première rendait le test muet sur le duel qu'il prétend arbitrer — zéro mariage
+            # observé, et l'assertion « mariages <= ruptures+1 » passait sur du vide.
+            sim._update_society(cb, evs)
+            sim._update_relations(evs)
+            mariages += [i for ev in evs if ev.get("type") == "clan_marriage"]
+            ally_now = k in sim._ally_state
+            if ally_avant and not ally_now:
+                ruptures.append(i)
+            ally_avant = ally_now
+            assert all(c.mode != "war" for c in sim.clans), (
+                f"scène polluée : une guerre a éclaté à l'éval {i} — la mesure ne porterait plus "
+                f"sur le duel mariage/érosion")
+            sim.tick_count += MODE_PERIOD // 2
+        return ruptures, mariages, k in sim._ally_state
+
+    # ── ÉCART DURABLE : l'érosion doit l'emporter, et le cycle doit rester LENT.
+    ruptures, mariages, _fin = parcours(200)
+    assert ruptures, ("aucune rupture en 40 évals d'injustice : le mariage annule l'érosion, "
+                      "H1 ne casse aucune alliance")
+    # CONTRÔLE POSITIF — sans lui, un mariage qui ne tire JAMAIS (chaîne incomplète, donneur trop
+    # petit, aucun adulte éligible) laisse toutes les autres assertions passer sur du vide : ce
+    # test n'arbitrerait plus rien tout en restant vert. C'est exactement ce qui s'est produit.
+    assert mariages, ("aucun mariage en 40 évals : le contre-pouvoir n'a pas été exercé, ce test "
+                      "ne prouve RIEN sur le duel mariage/érosion")
+    # Le cycle complet : chute REL_ALLY+10 → sous REL_ALLY_OFF à −4/éval, puis remontée à
+    # +REL_D_NEIGHBOR jusqu'au re-franchissement. On EXIGE qu'il soit long — un cycle court
+    # serait le moulin (mariage + annale + entité transférée à chaque tour).
+    cycles = [b - a for a, b in zip(ruptures, ruptures[1:])]
+    theorique = -(-(REL_ALLY + REL_D_MARRIAGE - REL_ALLY_OFF) // ENVY_ALLY_EROSION) \
+                + -(-(REL_ALLY - REL_ALLY_OFF + 1) // REL_D_NEIGHBOR)
+    if cycles:
+        assert min(cycles) >= 6, (f"cycle alliance/rupture de {min(cycles)} évals seulement : "
+                                  f"moulin à mariages, pas du contenu")
+        assert abs(min(cycles) - theorique) <= 2, (
+            f"cycle mesuré {min(cycles)} ≠ théorique {theorique} : le duel ne se joue pas où on "
+            f"le croit (mariage récurrent ? érosion hors alliance ?)")
+    assert len(mariages) <= len(ruptures) + 1, (
+        f"{len(mariages)} mariages pour {len(ruptures)} ruptures : le mariage se redéclenche "
+        f"HORS franchissement et re-pompe la relation")
+    # ── DÉNOMINATEUR : même scène, richesses égales → aucune rupture, l'alliance tient.
+    r0, _m0, fin0 = parcours(0)
+    assert not r0 and fin0, ("sans injustice la paire voisine doit RESTER alliée — sinon les "
+                             "ruptures ci-dessus ne sont pas imputables à l'envie")
+    print(f"  test_p8_h1_marriage_cannot_outpace_envy OK ({len(ruptures)} ruptures / "
+          f"{len(mariages)} mariages en 40 évals, cycle {min(cycles) if cycles else '—'} évals "
+          f"(théorique {theorique}) ; dénominateur sans écart : 0 rupture, alliance intacte)")
+
+
 def test_p8_h2_coup_cooldown_lets_tension_reach_the_split():
     """P8 H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde,
     le coup à 70 préempte ÉTERNELLEMENT la scission à 90 dès n>1 : mesuré sur le monde live,
@@ -3033,7 +3211,7 @@ def test_audit_f2_a_migrating_clan_does_not_swarm():
     pouvait fonder une colonie sur sa PROPRE terre de destination et y planter un second feu.
     On mesure le DÉNOMINATEUR d'abord : sans migration en cours, la mère essaime bien — sinon le
     test passerait au vert en ne prouvant rien."""
-    from engine.simulation import Clan, N_CLANS, SWARM_MIN_POP
+    from engine.simulation import Clan, N_CLANS, SWARM_MIN_POP, MAX_CLANS, SWARM_TENSION_MAX
     def _scene():
         w = World(width=120, height=90, seed=7); sim = Simulation(w)
         ents = []
@@ -3042,7 +3220,16 @@ def test_audit_f2_a_migrating_clan_does_not_swarm():
             e = spawn(EntityType.HUMAN, 20 + (20 if far else (i % 3)), 20 + (i // 3), Sex.MALE)
             e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e)
         sim.entities = ents
-        m = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id); m.tension = 10
+        m = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id)
+        # ⚠️ TENSION DE DÉPART 0, ET C'EST STRUCTUREL — pas un réglage cosmétique. `_update_society`
+        # RECALCULE la tension avant la branche d'essaimage : ici p=24 > cap=0 ajoute +20 d'overpop,
+        # et le TEMPER DU CHEF ajoute ±1 — or ce temper dérive de `chief_id` (`_chief_personality`),
+        # donc du compteur d'ids GLOBAL du module, que n'importe quel test précédent déplace.
+        # Avec l'ancienne valeur 10, la tension recalculée valait 29, 30 ou 31 pour un seuil
+        # `SWARM_TENSION_MAX = 30` : le test ne passait QUE si le chef était pacifique, soit 2 fois
+        # sur 5. Un tirage à pile ou face, jamais vu parce que ce test n'était pas câblé au runner.
+        # À 0, la tension recalculée vaut 19-21 : neuf points de marge, indépendants des ids.
+        m.tension = 0
         sim.clans = [m]; sim._next_clan_id = N_CLANS
         sim.buildings = [Building(id=99, clan_id=-1, x=45, y=20, btype="ruin", ruin_ticks=1000)]
         return sim, m
@@ -3059,12 +3246,32 @@ def test_audit_f2_a_migrating_clan_does_not_swarm():
         m.migrating_to = migrating
         sim.tick_count = MODE_PERIOD          # 1 clan, id 0 -> due quand tick % MODE_PERIOD == 0
         avant = len(sim.clans)
-        sim._update_society(cb, [])           # aucune maison -> cap 0 -> la condition p > cap tient
-        return len(sim.clans) - avant
-    assert _essaime_via_societe(-1) == 1, \
-        "denominateur : sans migration, le chemin d'eligibilite doit bien fonder une colonie"
-    assert _essaime_via_societe(3) == 0, \
-        "un clan EN MIGRATION a essaime — il pouvait fonder sur sa propre terre de destination"
+        # `clan_bldg` VIDE : la scène ne pose aucune maison, donc le cap de logement vaut 0 et la
+        # condition p > cap tient. (Le nom `cb` traînait ici sans exister nulle part : ce test
+        # n'avait jamais été joué — défini le 01/08, jamais câblé au runner, NameError au premier
+        # appel réel. Un test mort ne dit rien sur le code qu'il prétend protéger.)
+        sim._update_society({}, [])
+        # DIAGNOSTIC embarqué : ce test a échoué EN SUITE alors qu'il passait SEUL, et un simple
+        # « le dénominateur ne fonde pas » n'apprend rien sur la condition qui a lâché. On rend
+        # donc l'échec parlant plutôt que de relancer la suite à l'aveugle.
+        etat = (f"p={sum(1 for e in sim.entities if e.alive and e.etype == EntityType.HUMAN and e.clan_id == 0)} "
+                f"tension={m.tension} clans={len(sim.clans)}/{MAX_CLANS} migrating_to={m.migrating_to} "
+                f"ruines={sum(1 for b in sim.buildings if b.btype == 'ruin')} "
+                f"SWARM_MIN_POP={SWARM_MIN_POP} known_sites={len(m.known_sites)}")
+        return len(sim.clans) - avant, etat
+    n, etat = _essaime_via_societe(-1)
+    assert n == 1, ("denominateur : sans migration, le chemin d'eligibilite doit bien fonder une "
+                    f"colonie (obtenu {n}) — etat : {etat}")
+    # La marge de tension est REVÉRIFIÉE ici, sinon la fragilité peut revenir en silence : si un
+    # futur réglage rapproche la tension recalculée du seuil, ce test redeviendrait un coin flip
+    # dépendant de l'id du chef. On exige 5 points de marge, pas seulement « ça passe aujourd'hui ».
+    _tension_apres = int(etat.split("tension=")[1].split()[0])
+    assert _tension_apres <= SWARM_TENSION_MAX - 5, (
+        f"tension recalculee {_tension_apres} trop proche du seuil {SWARM_TENSION_MAX} : ce test "
+        f"redevient un tirage a pile ou face selon le temper du chef (donc selon son id)")
+    n2, etat2 = _essaime_via_societe(3)
+    assert n2 == 0, ("un clan EN MIGRATION a essaime — il pouvait fonder sur sa propre terre de "
+                     f"destination (obtenu {n2}) — etat : {etat2}")
     print("  test_audit_f2_a_migrating_clan_does_not_swarm OK (via _update_society ; denominateur "
           ": essaime si libre, bloque en migration)")
 
@@ -3119,83 +3326,122 @@ def test_p4_save_load_tension_counter():
     print("  test_p4_save_load_tension_counter OK (round-trip + vieux save reconstruit)")
 
 
-if __name__ == "__main__":
-    # Tests unitaires rapides (comportement) + le golden BASE : toujours joués.
-    FAST = (test_deposit_no_crash_when_houses_full,
-            test_preservation_live_counter, test_water_stranded_entity_rescued,
-            test_c1bis_toolless_human_crafts_without_depositing,
-            test_e2_female_seeks_distant_mate,
-            test_e_boar_hunts_and_captures_prey,
-            test_e_hunt_preserves_prey_below_floor,
-            test_c2_hungry_harvester_eats_not_feeds_mill,
-            test_a1_clan_gains_science_and_ages_up,
-            test_b_forge_upgrades_stone_tools_to_iron,
-            test_d1_caravan_roundtrip_conserves_resources,
-            test_d1_no_trade_without_complementary_surplus,
-            test_d1_dest_ruined_merchant_returns_and_replay,
-            test_d2_iron_for_stone_roundtrip_conserves,
-            test_d2_no_flip_and_refusal,
-            test_d2_price_board_and_replay,
-            test_c1_office_procession_blessing_and_hunger,
-            test_c1_pilgrimage_pays_offering_and_conserves,
-            test_c1_dest_ruined_and_replay,
-            test_c2_gold_mine_deposit_hysteresis,
-            test_c2_gold_offering_circulates_and_conserves,
-            test_c2_dest_ruined_gold_recredit_and_replay,
-            test_k_chronicle_records_and_persists,
-            test_e8_dead_clan_leaves_ruins_then_fade,
-            test_p3_tribute_and_surplus_lost,
-            test_p3_conquest_absorption,
-            test_p3_purge_e8_and_save_counters,
-            test_p4_coup,
-            test_p4_rebel_split,
-            test_p4_found_clan_deterministic,
-            test_p41_swarm_recolonizes_ruin,
-            test_p4_save_load_tension_counter,
-            test_audit_ally_hysteresis_survives_save_load,
-            test_p5_cult_founding_and_names_deterministic,
-            test_p5_conversion_and_schism,
-            test_p5_guardian_and_save_load,
-            test_p5_feast_trigger_and_bounds,
-            test_p5_feast_save_load,
-            test_p5_monument_completion_and_ruin,
-            test_p5_monument_save_load,
-            test_p5_hero_naming_and_wire,
-            test_p5_hero_fallen_and_save_load,
-            test_p6_f1_money_dawn_and_save_load,
-            test_p6_f1_gold_leak_refund,
-            test_p6_f2_wealth_formula_and_wire,
-            test_p6_f3_trails_grid,
-            test_p6_f4_granary_and_famine_exit,
-            test_p7_g1_site_catalogue_deterministic,
-            test_p7_g1_expedition_dispatch_and_discovery,
-            test_p7_g1_known_sites_bound_inherit_and_save_load,
-            test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
-            test_p7_g2_directed_colony_founding_and_filters,
-            test_p7_g2_colonist_march_is_persistent_and_bounded,
-            test_p7_g4_site_names_are_derived_and_grammatical,
-            test_p7_g3_conv_fresh_never_touches_the_frozen_grid,
-            test_p7_g3_push_couple_discriminates_measured_cases,
-            test_p7_g3_migration_slots_round_trip,
-            test_p7_g3_a_new_clan_must_live_somewhere_before_leaving,
-            test_p7_g3_migration_survives_save_load_mid_flight,
-            test_p7_g3_a10_settle_and_cooldown_are_two_different_delays,
-            test_p7_g3_a10_settle_survives_save_load,
-            test_p7_g3_a9_reservation_is_written_at_decision_time,
-            test_p7_g3_a9_self_exclusion_and_three_releases,
-            test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration,
-            test_harden_load_state_transactional,
-            test_harden_from_state_bounds,
-            test_harden_load_rejects_nan,
-            test_harden_save_state_chronicle_copy,
-            test_harden_entity_traits_copy,
-            test_determinism_golden,
-            test_save_load_roundtrip_and_resume,
-            test_smoke_runs)
-    # Tests lourds (~90 s cumulés) : endurance invariant #1 + golden CIV Âge-Acier.
-    # Sautés en `--fast` (itération rapide) ; joués par défaut (filet complet).
-    HEAVY = (test_infinite_run, test_determinism_civ_golden)
+def test_meta_every_test_is_wired_into_the_runner():
+    """LE test qui ferme une classe entière de défauts : le runner joue une liste ÉCRITE À LA MAIN,
+    donc un test qu'on oublie d'y inscrire est un test MORT — il existe, il se lit, il rassure, et
+    il ne s'exécute jamais. Ce n'est pas une hypothèse : les 3 tests P8 H2 livrés avec `fee49fc`
+    n'ont jamais tourné dans le filet, et les 3 tests P8 H1 partaient pour le même sort. Un test
+    mort est pire qu'un test absent — on croit le chemin couvert.
+    On compare donc l'inventaire RÉEL du module à la liste jouée, dans le sens qui compte : tout
+    `test_*` défini ici doit être joué (l'inverse est impossible, la liste ne cite que des noms
+    existants). Un futur bloc qui oublie son câblage échoue ICI, immédiatement."""
+    joues = {fn.__name__ for fn in FAST + HEAVY}
+    definis = {n for n, v in sorted(globals().items())
+               if n.startswith("test_") and callable(v) and getattr(v, "__module__", None) == __name__}
+    orphelins = sorted(definis - joues)
+    assert not orphelins, ("test(s) DÉFINI(S) MAIS JAMAIS JOUÉ(S) — ajoute-les à FAST ou HEAVY :\n  "
+                           + "\n  ".join(orphelins))
+    assert len(definis) >= 70, (f"seulement {len(definis)} tests découverts : l'inventaire est "
+                                f"cassé, ce contrôle ne prouverait plus rien")
+    print(f"  test_meta_every_test_is_wired_into_the_runner OK ({len(definis)} tests définis, "
+          f"tous câblés au runner)")
 
+
+# Listes AU NIVEAU MODULE (et non dans `if __name__`) : le test méta ci-dessus doit pouvoir les
+# lire pour vérifier qu'aucun test ne dort hors du filet.
+# Tests unitaires rapides (comportement) + le golden BASE : toujours joués.
+FAST = (test_deposit_no_crash_when_houses_full,
+        test_preservation_live_counter, test_water_stranded_entity_rescued,
+        test_c1bis_toolless_human_crafts_without_depositing,
+        test_e2_female_seeks_distant_mate,
+        test_e_boar_hunts_and_captures_prey,
+        test_e_hunt_preserves_prey_below_floor,
+        test_c2_hungry_harvester_eats_not_feeds_mill,
+        test_a1_clan_gains_science_and_ages_up,
+        test_b_forge_upgrades_stone_tools_to_iron,
+        test_d1_caravan_roundtrip_conserves_resources,
+        test_d1_no_trade_without_complementary_surplus,
+        test_d1_dest_ruined_merchant_returns_and_replay,
+        test_d2_iron_for_stone_roundtrip_conserves,
+        test_d2_no_flip_and_refusal,
+        test_d2_price_board_and_replay,
+        test_c1_office_procession_blessing_and_hunger,
+        test_c1_pilgrimage_pays_offering_and_conserves,
+        test_c1_dest_ruined_and_replay,
+        test_c2_gold_mine_deposit_hysteresis,
+        test_c2_gold_offering_circulates_and_conserves,
+        test_c2_dest_ruined_gold_recredit_and_replay,
+        test_k_chronicle_records_and_persists,
+        test_e8_dead_clan_leaves_ruins_then_fade,
+        test_p3_tribute_and_surplus_lost,
+        test_p3_conquest_absorption,
+        test_p3_purge_e8_and_save_counters,
+        test_p4_coup,
+        test_p4_rebel_split,
+        test_p4_found_clan_deterministic,
+        test_p41_swarm_recolonizes_ruin,
+        test_p4_save_load_tension_counter,
+        test_audit_ally_hysteresis_survives_save_load,
+        test_p5_cult_founding_and_names_deterministic,
+        test_p5_conversion_and_schism,
+        test_p5_guardian_and_save_load,
+        test_p5_feast_trigger_and_bounds,
+        test_p5_feast_save_load,
+        test_p5_monument_completion_and_ruin,
+        test_p5_monument_save_load,
+        test_p5_hero_naming_and_wire,
+        test_p5_hero_fallen_and_save_load,
+        test_p6_f1_money_dawn_and_save_load,
+        test_p6_f1_gold_leak_refund,
+        test_p6_f2_wealth_formula_and_wire,
+        test_p6_f3_trails_grid,
+        test_p6_f4_granary_and_famine_exit,
+        test_p7_g1_site_catalogue_deterministic,
+        test_p7_g1_expedition_dispatch_and_discovery,
+        test_p7_g1_known_sites_bound_inherit_and_save_load,
+        test_p7_g1_arrival_closes_mission_even_when_nothing_to_learn,
+        test_p7_g2_directed_colony_founding_and_filters,
+        test_p7_g2_colonist_march_is_persistent_and_bounded,
+        test_p7_g4_site_names_are_derived_and_grammatical,
+        test_p7_g3_conv_fresh_never_touches_the_frozen_grid,
+        test_p7_g3_push_couple_discriminates_measured_cases,
+        test_p7_g3_migration_slots_round_trip,
+        test_p7_g3_a_new_clan_must_live_somewhere_before_leaving,
+        test_p7_g3_migration_survives_save_load_mid_flight,
+        test_p7_g3_a10_settle_and_cooldown_are_two_different_delays,
+        test_p7_g3_a10_settle_survives_save_load,
+        test_p7_g3_a9_reservation_is_written_at_decision_time,
+        test_p7_g3_a9_self_exclusion_and_three_releases,
+        test_p7_g3_a9_colony_refuses_a_site_promised_to_a_migration,
+        test_harden_load_state_transactional,
+        test_harden_from_state_bounds,
+        test_harden_load_rejects_nan,
+        test_harden_save_state_chronicle_copy,
+        test_harden_entity_traits_copy,
+        # Ultra-audit du 01/08 (F1/F2/F3) : DÉFINIS mais jamais joués non plus — dont celui qui
+        # recharge une COPIE DU SAVE LIVE RÉEL, c'est-à-dire le filet censé protéger la partie
+        # d'Alexis. Trouvés par `test_meta_...` le soir même où il a été écrit.
+        test_audit_f1_real_live_save_still_loads,
+        test_audit_f1_removed_slot_does_not_break_old_saves,
+        test_audit_f2_a_migrating_clan_does_not_swarm,
+        test_audit_f3_exodus_ruins_are_orphaned,
+        # P8 « la relance de l'Histoire ». Les trois H2 étaient DÉFINIS depuis `fee49fc` mais
+        # jamais joués : câblés ici avec les trois H1, et `test_meta_...` interdit la récidive.
+        test_p8_h1_envy_formula_is_not_a_truism,
+        test_p8_h1_erosion_replaces_neighbourhood,
+        test_p8_h1_marriage_cannot_outpace_envy,
+        test_p8_h2_coup_cooldown_lets_tension_reach_the_split,
+        test_p8_h2_blocked_coup_does_not_leak_into_swarm,
+        test_p8_h2_last_coup_tick_round_trip,
+        test_meta_every_test_is_wired_into_the_runner,
+        test_determinism_golden,
+        test_save_load_roundtrip_and_resume,
+        test_smoke_runs)
+# Tests lourds (~90 s cumulés) : endurance invariant #1 + golden CIV Âge-Acier.
+# Sautés en `--fast` (itération rapide) ; joués par défaut (filet complet).
+HEAVY = (test_infinite_run, test_determinism_civ_golden)
+
+if __name__ == "__main__":
     fast = "--fast" in sys.argv
     tests = FAST if fast else FAST + HEAVY
     if fast:

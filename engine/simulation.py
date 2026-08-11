@@ -679,6 +679,27 @@ _TOPO_ON   = _CARTO_ON and os.environ.get("TOPO_OFF")   != "1"   # G4 toponymes 
 # ── P8 « la relance de l'Histoire » : casser les verrous de la fin de partie ────────────
 _P8_ON     = os.environ.get("P8_OFF") != "1"                      # master
 _COUPCD_ON = _P8_ON and os.environ.get("COUPCD_OFF") != "1"       # H2 cooldown du coup d'État
+_ENVYALLY_ON = _P8_ON and os.environ.get("ENVYALLY_OFF") != "1"   # H1 l'envie éteint l'alliance
+# H1 — une alliance ne survit pas à l'INJUSTICE DURABLE. L'envie n'a toujours pas le droit de
+# CRÉER une guerre (principe F2 conservé) : elle ronge la RELATION, et la guerre redevient
+# simplement possible par les canaux existants (sortie d'hystérésis alliée, ciblage P2b inchangé).
+# PRODUIT CROISÉ, sens vérifié : « le riche vaut au moins D/N fois le pauvre » s'écrit
+# `pauvre * D <= riche * N`. La spec l'avait écrit dans l'autre sens (`pauvre * N <= riche * D`,
+# déclenchement sur FAUX) — or c'est un TRUISME dès que riche >= pauvre, donc l'érosion n'aurait
+# JAMAIS tiré et H1 serait né mort. Le bloc censé relancer l'Histoire aurait livré du contenu
+# inerte, invisible autrement qu'à la sonde d'acceptation.
+ENVY_ALLY_RATIO_N = 1    # \  pauvre * D <= riche * N  <=>  riche >= (D/N) * pauvre
+ENVY_ALLY_RATIO_D = 3    # /   ici : le riche vaut au moins le TRIPLE du pauvre
+# Plancher absolu, CALIBRÉ sur la distribution et non a priori : deux clans misérables ne se
+# jalousent pas, il n'y a rien à envier. Mesuré sur les 3 seeds (paires alliées, 24000 t) : la
+# richesse du RICHE a un p10 de 74-110, donc un plancher à 60 — la valeur de départ de la spec —
+# passait SOUS toute la distribution et ne filtrait rien (29->28, 10->10, 6->6 : garde morte).
+# À 200 il mord sur le vrai bruit (des paires à 74 contre 0) et laisse tranquilles les mondes
+# jeunes déjà turbulents ; la cible réelle, le duopole installé du monde servi, le franchit d'un
+# facteur 363 (riche 72604).
+ENVY_ALLY_MIN     = 200  # richesse minimale du RICHE pour qu'il y ait matière à envie
+ENVY_ALLY_EROSION = 4    # points de relation rongés par éval — SEUL levier si c'est trop LENT
+                         # (le ratio et le plancher répondent à d'autres questions : leçon A10)
 # H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde, le coup
 # à 70 préempte éternellement la scission à 90 dès n>1 : la surextension pompe, le coup purge −40,
 # et le cycle 30↔70 tourne à vide (69 coups, 0 scission sur le monde live en 1,77 M de ticks).
@@ -4335,7 +4356,19 @@ class Simulation:
                     # sinon les liens s'estompent (positif→0) ou les rancunes se réconcilient
                     # (négatif→0 si au moins un chef conciliant). Cumuler décay+voisinage donnait
                     # net 0 sur une paire positive → alliance inatteignable (T5 Regigigas).
-                    if _neighbor:
+                    # H1 : l'injustice OCCUPE la relation — l'érosion REMPLACE la cordialité
+                    # de voisinage, elle ne s'y ajoute pas (sinon +2 −4 = −2 et le réglage
+                    # deviendrait illisible). Sur l'ÉTAT d'hystérésis `ally`, pas sur le seuil brut.
+                    _erode = False
+                    if _ENVYALLY_ON and k in ally:
+                        _wc = _clan_wealth(clan_bldg.get(c.id, {}))
+                        _wo = _clan_wealth(clan_bldg.get(o.id, {}))
+                        _lo, _hi = (_wc, _wo) if _wc <= _wo else (_wo, _wc)
+                        _erode = (_hi >= ENVY_ALLY_MIN
+                                  and _lo * ENVY_ALLY_RATIO_D <= _hi * ENVY_ALLY_RATIO_N)
+                    if _erode:
+                        _rel_apply(rel, ally, rival, c.id, o.id, -ENVY_ALLY_EROSION, tick_events)
+                    elif _neighbor:
                         _rel_apply(rel, ally, rival, c.id, o.id, REL_D_NEIGHBOR, tick_events)
                     elif v > 0:
                         _rel_apply(rel, ally, rival, c.id, o.id, -1, tick_events)
