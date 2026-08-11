@@ -81,6 +81,10 @@ class Clan:
                                    # migré » n'est pas « a migré il y a longtemps » — sans ça, un
                                    # clan fondé tard hériterait d'un cooldown déjà purgé par le
                                    # seul écoulement du monde, et un clan fondé tôt non.
+    last_coup_tick: int = -1       # P8 H2 — sentinelle « jamais de coup », sérialisée. Slot PROPRE
+                                   # et non un champ recyclé (leçon A10 : deux délais aux sémantiques
+                                   # distinctes ne tiennent pas dans un seul champ). Vieux save → -1
+                                   # = libre, aucun clan existant n'est puni rétroactivement.
     founded_tick: int = 0          # A10 — tick de FONDATION, distinct de last_migration_tick.
                                    # « Délai après une fondation » et « délai après une migration »
                                    # sont deux sémantiques : les faire tenir dans un seul champ
@@ -672,6 +676,22 @@ _CARTO_ON  = _EXPLO_ON and os.environ.get("CARTO_OFF")  != "1"   # G1 catalogue 
 _COLONY_ON = _CARTO_ON and os.environ.get("COLONY_OFF") != "1"   # G2 colonies lointaines
 _MIGRATE_ON= _CARTO_ON and os.environ.get("MIGRATE_OFF")!= "1"   # G3 migration de village
 _TOPO_ON   = _CARTO_ON and os.environ.get("TOPO_OFF")   != "1"   # G4 toponymes & annales
+# ── P8 « la relance de l'Histoire » : casser les verrous de la fin de partie ────────────
+_P8_ON     = os.environ.get("P8_OFF") != "1"                      # master
+_COUPCD_ON = _P8_ON and os.environ.get("COUPCD_OFF") != "1"       # H2 cooldown du coup d'État
+# H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde, le coup
+# à 70 préempte éternellement la scission à 90 dès n>1 : la surextension pompe, le coup purge −40,
+# et le cycle 30↔70 tourne à vide (69 coups, 0 scission sur le monde live en 1,77 M de ticks).
+# VALEUR CALIBRÉE, PAS CHOISIE. Sur le save live, le clan pauvre et peuplé monte de +9 de tension
+# par éval : après un coup sa tension repart de 30 et fait 39-48-57-66-75-84-93, donc elle repasse
+# 70 à la 5ᵉ éval (3600 t) et n'atteint 90 qu'à la 7ᵉ (5040 t). Une garde de 500·TS = 3000 t serait
+# EXPIRÉE avant le retour à 70 → le coup retirerait, purgerait, et la scission n'arriverait jamais :
+# on aurait reconstruit le verrou avec une étape de plus. 800·TS = 4800 reste SOUS les 5040 requis
+# — le piège du seuil qu'on croit franchi. 1000·TS couvre dt≥7 avec une éval et demie de marge.
+# La sensibilité est ASSUMÉE : un clan à faible pression (dt≤5) garde son churn de coups, c'est le
+# grand clan surétendu qui doit se fracturer.
+COUP_COOLDOWN = 1000 * TIME_SCALE   # période de CALENDRIER (règle A4) : on ne renverse pas un
+                                    # chef deux fois dans la même saison
 SCOUT_PERIOD     = 150 * TIME_SCALE  # période de dispatch d'expédition par clan (déphasée) → durée
 SCOUT_PHASE      = 37   # déphasage par clan (premier avec SCOUT_PERIOD → les clans ne partent pas ensemble)
 KNOWN_SITES_MAX  = 12   # sites mémorisés par clan (on garde les mieux scorés)
@@ -4353,7 +4373,13 @@ class Simulation:
                 c.tension = max(0, min(100, c.tension + dt))
                 if c.tension >= TENSION_SPLIT and p >= REBEL_MIN_POP and len(self.clans) < MAX_CLANS:
                     rebellions.append(c.id)          # fondation différée (mute self.clans hors boucle)
-                elif c.tension >= TENSION_COUP and len(self.clans) > 1:
+                elif (c.tension >= TENSION_COUP and len(self.clans) > 1
+                      # H2 : la branche est SAUTÉE tant que le cooldown court. Elle tombe alors sur
+                      # l'essaimage, qui exige `tension < SWARM_TENSION_MAX` (30) — inatteignable à
+                      # ≥70 : aucune fuite, la garde préexistante ferme le chemin. La tension
+                      # continue donc de monter et la scission à 90 reprend son rôle.
+                      and (not _COUPCD_ON or c.last_coup_tick < 0
+                           or self.tick_count - c.last_coup_tick >= COUP_COOLDOWN)):
                     # Un HÉGÉMON (monoclan) ne fait PAS de coup : sans rival politique, sa seule issue
                     # est la FRAGMENTATION → sa tension grimpe jusqu'à la scission (le cycle des empires).
                     # En multi-clan, le coup reste la soupape (churn politique) qui préempte la scission.
@@ -5035,6 +5061,10 @@ class Simulation:
         young = min(challengers, key=lambda e: (e.age, e.id))
         clan.chief_id = young.id
         clan.tension = max(0, clan.tension - 40)
+        clan.last_coup_tick = self.tick_count      # H2 : arme le cooldown (hors switch — c'est un
+                                                   # fait d'état civil du clan, comme founded_tick ;
+                                                   # le gater rendrait un save incohérent d'un
+                                                   # lancement à l'autre. Seule la GARDE est gatée.)
         tick_events.append({"type": "clan_coup", "clan_id": clan.id, "chief_id": young.id})
 
     def _found_cult(self, founder_clan, tick):

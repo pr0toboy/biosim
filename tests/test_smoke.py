@@ -2811,6 +2811,114 @@ def test_audit_ally_hysteresis_survives_save_load():
     print("  test_audit_ally_hysteresis_survives_save_load OK (hystérésis sérialisée ; fallback vieux save)")
 
 
+def _h2_scene(tension, last_coup, tick, npop=14):
+    """Un clan à l'instant de son éval, tendu mais SOUS le seuil de scission.
+    Deux pièges de montage à éviter, tous deux rencontrés :
+    (1) le clan doit être DÛ — `due` exige `(tick + id*phase) % MODE_PERIOD == 0`, donc un tick
+        multiple de MODE_PERIOD pour le clan 0, sinon rien ne s'évalue et le test « passe » à vide ;
+    (2) la tension est RECALCULÉE avant la branche : sans maisons le cap vaut 0, la surpopulation
+        ajoute jusqu'à +20 et la tension franchit 90 → c'est la SCISSION qui part, pas le coup.
+        On loge donc le clan (cap >= pop) pour que le dt reste petit et la tension dans [70,89].
+    `len(self.clans) > 1` est exigé par la branche coup (règle hégémon) → un second clan figurant."""
+    from engine.simulation import Clan, N_CLANS, MODE_PERIOD, BUILDING_SPECS
+    assert tick % MODE_PERIOD == 0, "montage invalide : le clan 0 ne serait pas dû à ce tick"
+    sim = Simulation(World(width=120, height=90, seed=7))
+    ents = []
+    for i in range(npop):
+        e = spawn(EntityType.HUMAN, 20 + (i % 4), 20 + (i // 4), Sex.MALE)
+        e.age = _adult_age(0.5); e.clan_id = 0; ents.append(e)
+    figurant = spawn(EntityType.HUMAN, 80, 80, Sex.MALE)
+    figurant.age = _adult_age(0.5); figurant.clan_id = 1; ents.append(figurant)
+    sim.entities = ents
+    c = Clan(id=0, cx=20.0, cy=20.0, color="#f00", chief_id=ents[0].id)
+    c.tension, c.last_coup_tick = tension, last_coup
+    autre = Clan(id=1, cx=80.0, cy=80.0, color="#0f0", chief_id=figurant.id)
+    sim.clans = [c, autre]; sim._next_clan_id = N_CLANS
+    # Logement suffisant → aucun terme de surpopulation, le dt reste à quelques points.
+    nh = npop // BUILDING_SPECS["house"].pop_bonus + 2
+    maisons = [Building(id=500 + i, clan_id=0, x=22 + i, y=22, btype="house") for i in range(nh)]
+    sim.buildings = list(maisons)
+    sim.tick_count = tick
+    return sim, c, {0: {"house": maisons}}
+
+
+def test_p8_h2_coup_cooldown_lets_tension_reach_the_split():
+    """P8 H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde,
+    le coup à 70 préempte ÉTERNELLEMENT la scission à 90 dès n>1 : mesuré sur le monde live,
+    69 coups et 0 scission en 1,77 M de ticks.
+    Test BIPOLAIRE aux DEUX frontières exactes du cooldown — c'est là que se joue le bug qu'on
+    évite : une garde trop courte expirerait avant que la tension soit revenue à 70, et le coup
+    re-préempterait (mesuré : sur le live, la tension repasse 70 à 3600 t et n'atteint 90 qu'à
+    5040 t ; une garde de 3000 t aurait reconstruit le verrou avec une étape de plus)."""
+    from engine.simulation import COUP_COOLDOWN, TENSION_COUP, _COUPCD_ON
+    assert _COUPCD_ON, "scène invalide sous COUPCD_OFF"
+    T = 144000                                   # multiple de MODE_PERIOD (720) ET grand
+                                                 # → clan 0 dû, aucun tick négatif possible
+    # DÉNOMINATEUR : sans coup passé (sentinelle -1), le coup DOIT partir — sinon le test
+    # ne prouverait rien de la garde, seulement que rien ne se passe.
+    sim, c, cb = _h2_scene(TENSION_COUP + 5, -1, T)
+    chef0 = c.chief_id
+    sim._update_society(cb, [])
+    assert c.chief_id != chef0, "dénominateur : sans cooldown armé, le coup doit partir"
+    assert c.last_coup_tick == T, "le coup n'a pas armé le cooldown"
+    # FRONTIÈRE BASSE : un tick AVANT l'échéance → la branche coup est sautée.
+    sim, c, cb = _h2_scene(TENSION_COUP + 5, T - COUP_COOLDOWN + 1, T)
+    chef0 = c.chief_id
+    sim._update_society(cb, [])
+    assert c.chief_id == chef0, f"coup à {COUP_COOLDOWN - 1} t du précédent : la garde ne tient pas"
+    # FRONTIÈRE HAUTE : à l'échéance EXACTE → le coup repart.
+    sim, c, cb = _h2_scene(TENSION_COUP + 5, T - COUP_COOLDOWN, T)
+    chef0 = c.chief_id
+    sim._update_society(cb, [])
+    assert c.chief_id != chef0, "cooldown purgé : le coup doit redevenir possible"
+    print(f"  test_p8_h2_coup_cooldown_lets_tension_reach_the_split OK (sentinelle libre, "
+          f"bloqué à {COUP_COOLDOWN - 1}, permis à {COUP_COOLDOWN})")
+
+
+def test_p8_h2_blocked_coup_does_not_leak_into_swarm():
+    """P8 H2 — quand la branche coup est SAUTÉE, l'évaluation tombe sur la branche suivante du
+    elif, qui est l'ESSAIMAGE. C'était le risque évident de la formulation « la branche est
+    sautée » : un clan tendu à ≥70 se mettant à essaimer au lieu de couper.
+    Le chemin est fermé par une garde PRÉEXISTANTE (`tension < SWARM_TENSION_MAX` = 30), mais on
+    le VÉRIFIE au lieu de le supposer — la garde pourrait être desserrée un jour sans que
+    personne ne fasse le lien avec H2."""
+    from engine.simulation import COUP_COOLDOWN, TENSION_COUP, SWARM_TENSION_MAX
+    assert TENSION_COUP > SWARM_TENSION_MAX, \
+        "si le seuil de coup passait SOUS celui d'essaimage, la fuite deviendrait réelle"
+    T = 144000
+    sim, c, cb = _h2_scene(TENSION_COUP + 5, T - 1, T, npop=30)   # cooldown ARMÉ, pop essaimable
+    chef0, nclans = c.chief_id, len(sim.clans)
+    sim._update_society(cb, [])
+    assert c.chief_id == chef0, "le coup a eu lieu malgré le cooldown"
+    assert len(sim.clans) == nclans, "un clan tendu a ESSAIMÉ au lieu de couper (fuite du elif)"
+    print("  test_p8_h2_blocked_coup_does_not_leak_into_swarm OK (branche sautée, aucune fuite "
+          f"vers l'essaimage : seuil coup {TENSION_COUP} > seuil essaimage {SWARM_TENSION_MAX})")
+
+
+def test_p8_h2_last_coup_tick_round_trip():
+    """P8 H2 — `last_coup_tick` est un tick ABSOLU sérialisé. S'il se perdait au rechargement, un
+    clan qui vient de couper repartirait libre et le verrou V2 se reformerait après chaque
+    redémarrage du serveur — qui recharge son monde à chaque fois. Sentinelle -1 = « n'a JAMAIS
+    coupé », donc un vieux save est LIBRE, jamais puni rétroactivement."""
+    from engine.simulation import Clan
+    neuf = Clan(id=9, cx=1.0, cy=1.0, color="#fff", chief_id=1)
+    assert neuf.last_coup_tick == -1, "défaut du slot : sentinelle « jamais coupé »"
+    sim = Simulation(World(width=60, height=40, seed=5))
+    sim.populate()
+    for _ in range(40):
+        sim.step()
+    sim.clans[0].last_coup_tick = 1234
+    st = sim.save_state()
+    sim2 = Simulation(World(width=60, height=40, seed=5)); sim2.load_state(st)
+    assert next(x for x in sim2.clans if x.id == sim.clans[0].id).last_coup_tick == 1234, \
+        "last_coup_tick perdu au rechargement → le verrou V2 se reformerait à chaque redémarrage"
+    for cd in st["clans"]:
+        cd.pop("last_coup_tick", None)
+    sim3 = Simulation(World(width=60, height=40, seed=5)); sim3.load_state(st)
+    assert all(x.last_coup_tick == -1 for x in sim3.clans), "vieux save → doit être LIBRE"
+    print("  test_p8_h2_last_coup_tick_round_trip OK (défaut -1, round-trip, vieux save libre)")
+
+
 def test_audit_f1_removed_slot_does_not_break_old_saves():
     """Retrait du slot `migration_bread` (F1). PREMIER retrait de champ du projet — le chemin
     n'avait jamais été exercé, et il est piégé : une partie EXISTANTE porte la clé, or `Clan(**d)`
@@ -2951,7 +3059,7 @@ def test_audit_f2_a_migrating_clan_does_not_swarm():
         m.migrating_to = migrating
         sim.tick_count = MODE_PERIOD          # 1 clan, id 0 -> due quand tick % MODE_PERIOD == 0
         avant = len(sim.clans)
-        sim._update_society({}, [])           # aucune maison -> cap 0 -> la condition p > cap tient
+        sim._update_society(cb, [])           # aucune maison -> cap 0 -> la condition p > cap tient
         return len(sim.clans) - avant
     assert _essaime_via_societe(-1) == 1, \
         "denominateur : sans migration, le chemin d'eligibilite doit bien fonder une colonie"
