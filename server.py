@@ -411,6 +411,40 @@ async def explored():
         return {"available": True, "grid": _grid_to_b64(g)}
 
 
+@app.get("/api/journeys")
+async def journeys():
+    """Groupes EN VOYAGE (lot UI ②, fil de marche) : villages qui migrent et colonies en vol.
+
+    HORS FLUX DE TICKS, donc hors hash — même plomberie que les sentiers, la carte explorée et
+    les sites. Ajouter `migrating_to` au wire des clans aurait été plus direct, mais ce wire EST
+    dans la sortie de `step()` : une clé de plus et les trois goldens partaient au regold pour un
+    trait décoratif. Le prix ne vaut pas la commodité.
+
+    LE FRONT RECALCULE LES ORIGINES, ON NE LES SERT PAS. Un fil doit partir de la position
+    COURANTE du groupe ; servir cette position ici la figerait au rythme du poll (plusieurs
+    secondes), et le trait sauterait par à-coups. On sert donc ce qui CHANGE LENTEMENT — qui
+    voyage, et vers où — et le front compose avec les positions qu'il reçoit déjà à chaque tick :
+    le feu du clan pour une migration, les colons nommés ici pour une colonie.
+    `members` est volontairement une liste d'ids et non un barycentre pré-calculé, pour la même
+    raison : le barycentre doit vivre au rythme du rendu, pas à celui du poll."""
+    async with state_lock:
+        migrations = [{"clan": c.id, "site": c.migrating_to}
+                      for c in sim.clans if getattr(c, "migrating_to", -1) >= 0]
+        colonies = {}
+        for e in sim.entities:
+            dest = getattr(e, "colonist_dest", None)
+            if not (e.alive and dest and e.clan_id is not None and e.clan_id >= 0):
+                continue
+            # Un clan peut avoir plusieurs colonnes en route vers des terres différentes : la clé
+            # est (clan, destination), pas le clan seul — sinon deux convois n'en feraient qu'un,
+            # avec un barycentre au milieu de nulle part.
+            k = (e.clan_id, int(dest[0]), int(dest[1]))
+            colonies.setdefault(k, []).append(e.id)
+        return {"migrations": migrations,
+                "colonies": [{"clan": k[0], "x": k[1], "y": k[2], "members": m}
+                             for k, m in colonies.items()]}
+
+
 @app.get("/api/sites")
 async def sites():
     """Sites DÉCOUVERTS (P7 G4) : union des `known_sites` des clans VIVANTS — donc dérivé, jamais

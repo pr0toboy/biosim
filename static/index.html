@@ -1338,6 +1338,88 @@ function siteScreenPos(s) {
   return { sx: (s.x * TILE_SIZE + TILE_SIZE / 2) * scale + offX,
            sy: (s.y * TILE_SIZE + TILE_SIZE / 2) * scale + offY };
 }
+// ── Fil de marche (lot UI ②) ─────────────────────────────────────────────────
+// Un trait par groupe EN VOYAGE : position COURANTE → destination. Deux sources, un seul contrat.
+// Le poll ne sert qu'à savoir QUI voyage et VERS OÙ (ça change lentement) ; les ORIGINES sont
+// recalculées à chaque frame depuis les positions déjà reçues au tick — sinon le fil sauterait
+// au rythme du poll au lieu de suivre la colonne.
+const TRAIL = {
+  under: "rgba(58,42,20,0.92)", underW: 5,   // sous-trait #3A2A14 α0.92
+  gold: "#F0CD82", goldW: 2,
+  dash: [8, 7],                              // segments 8 px / trous 7 px, en pixels ÉCRAN
+  headLen: 13, headHalf: 4.5, headGap: 3,    // pointe 13×9 posée à 3 px de l'ancre
+  ringR: 4, ringW: 2,
+};
+let journeys = { migrations: [], colonies: [] };
+async function refreshJourneys() {
+  try {
+    const r = await fetch("/api/journeys");
+    const d = await r.json();
+    journeys = { migrations: d.migrations || [], colonies: d.colonies || [] };
+  } catch (e) { /* serveur occupé → retentera au prochain poll */ }
+}
+function worldToScreen(wx, wy) {
+  return { sx: (wx * TILE_SIZE + TILE_SIZE / 2) * scale + offX,
+           sy: (wy * TILE_SIZE + TILE_SIZE / 2) * scale + offY };
+}
+// Trait + pointe + anneau, en espace ÉCRAN et à largeurs FIXES : un fil ne doit pas maigrir
+// quand on dézoome, sinon il disparaît au moment précis où l'on regarde le monde en entier.
+function drawTrail(ctx, x0, y0, x1, y1) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < 2) return;                       // arrivé (ou presque) : plus rien à raconter
+  const ux = dx / len, uy = dy / len;
+  const ex = x1 - ux * (TRAIL.headLen + TRAIL.headGap);   // le trait s'arrête avant la pointe
+  const ey = y1 - uy * (TRAIL.headLen + TRAIL.headGap);
+  ctx.save();
+  ctx.lineCap = "butt";
+  ctx.setLineDash(TRAIL.dash);
+  for (const [col, w] of [[TRAIL.under, TRAIL.underW], [TRAIL.gold, TRAIL.goldW]]) {
+    ctx.strokeStyle = col; ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(ex, ey); ctx.stroke();
+  }
+  ctx.setLineDash([]);                       // la pointe et l'anneau sont PLEINS, pas pointillés
+  const tipX = x1 - ux * TRAIL.headGap, tipY = y1 - uy * TRAIL.headGap;
+  const bx = tipX - ux * TRAIL.headLen, by = tipY - uy * TRAIL.headLen;
+  const px = -uy, py = ux;                   // normale unitaire
+  for (const [col, grow] of [[TRAIL.under, 1.2], [TRAIL.gold, 0]]) {
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(tipX + ux * grow, tipY + uy * grow);
+    ctx.lineTo(bx + px * (TRAIL.headHalf + grow), by + py * (TRAIL.headHalf + grow));
+    ctx.lineTo(bx - px * (TRAIL.headHalf + grow), by - py * (TRAIL.headHalf + grow));
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle = TRAIL.under; ctx.lineWidth = TRAIL.ringW + 1.5;
+  ctx.beginPath(); ctx.arc(x0, y0, TRAIL.ringR, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = TRAIL.gold; ctx.lineWidth = TRAIL.ringW;
+  ctx.beginPath(); ctx.arc(x0, y0, TRAIL.ringR, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+function drawJourneys(ctx) {
+  // (a) MIGRATION : du feu ACTUEL du clan vers l'ancre du site visé. Le feu bouge à la
+  // sédentarisation, donc on relit `clans` à chaque frame plutôt que de mémoriser un départ.
+  for (const m of journeys.migrations) {
+    const c = clans.find(k => k.id === m.clan);
+    const s = sitesList.find(x => x.id === m.site);
+    if (!c || !s) continue;                  // site pas encore connu du front : rien d'inventé
+    const a = worldToScreen(c.cx, c.cy), b = siteScreenPos(s);
+    drawTrail(ctx, a.sx, a.sy, b.sx, b.sy);
+  }
+  // (b) COLONIE EN VOL : barycentre des colons VIVANTS encore présents à l'écran. On repart des
+  // entités du tick — un colon mort en route disparaît du calcul de lui-même, sans état à purger.
+  for (const col of journeys.colonies) {
+    let n = 0, sx = 0, sy = 0;
+    for (const id of col.members) {
+      const e = entityMap[id];               // objet id→entité, PAS une Map (un .get() planterait)
+      if (!e) continue;
+      sx += e.x; sy += e.y; n++;
+    }
+    if (!n) continue;                        // convoi entièrement disparu → plus de fil, sèchement
+    const a = worldToScreen(sx / n, sy / n), b = worldToScreen(col.x, col.y);
+    drawTrail(ctx, a.sx, a.sy, b.sx, b.sy);
+  }
+}
 // Le losange est tracé en MARCHES PLEINES, ligne à ligne — jamais par rotation vectorielle, qui
 // anti-aliase et fait baver le contour à cette taille.
 function drawSiteDiamond(ctx, cx, cy, col) {
@@ -1436,6 +1518,11 @@ async function refreshExplored() {
 setInterval(refreshExplored, 6000);   // la connaissance progresse lentement → poll espacé
 refreshExplored();
 setInterval(refreshSites, 6000);      // P7 G4 : même cadence — un site se découvre rarement
+// Lot UI ② : QUI voyage change au rythme des décisions de clan (des centaines de ticks), pas du
+// tick. 3 s suffisent donc largement — et la position du fil, elle, reste fluide puisqu'elle est
+// recalculée à chaque frame depuis les entités du tick, pas depuis ce poll.
+setInterval(refreshJourneys, 3000);
+refreshJourneys();
 refreshSites();
 
 function updateSeasonBadge() {
@@ -2847,6 +2934,9 @@ function drawAll() {
   // carte et sous tout le HUD. Dessinée APRÈS la météo-ciel : une couche cartographique doit
   // rester lisible sous la pluie (la liste de z-order de Regigigas ne mentionnait pas la météo —
   // choix signalé au gate). En espace ÉCRAN, donc taille fixe quel que soit le zoom.
+  // Fils de marche (lot UI ②) : couche cartographique, juste SOUS les losanges — le losange
+  // doit rester lisible au bout du fil, c'est lui qui nomme la terre visée.
+  drawJourneys(ctx);
   drawSites(ctx);
 }
 
