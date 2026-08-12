@@ -3326,6 +3326,15 @@ def test_p4_save_load_tension_counter():
     print("  test_p4_save_load_tension_counter OK (round-trip + vieux save reconstruit)")
 
 
+# ── Exemptions au câblage obligatoire (forme tranchée par Regigigas au gate H1) ────────────
+# Un test volontairement mis de côté doit COÛTER UNE LIGNE SIGNÉE, jamais un oubli gratuit.
+# Clé = nom exact du test ; valeur = CHAÎNE DE RAISON obligatoire (un nom seul est refusé par
+# `test_meta_...` lui-même, et une raison creuse aussi : on exige une phrase, pas un « todo »).
+# Vide aujourd'hui, et c'est le but : les 10 tests trouvés dormants ont tous été CÂBLÉS, aucun
+# n'a été exempté. Cette table existe pour que le jour où l'on remise un test, ce soit un ACTE.
+TESTS_EXEMPTES = {}
+
+
 def test_meta_every_test_is_wired_into_the_runner():
     """LE test qui ferme une classe entière de défauts : le runner joue une liste ÉCRITE À LA MAIN,
     donc un test qu'on oublie d'y inscrire est un test MORT — il existe, il se lit, il rassure, et
@@ -3338,13 +3347,25 @@ def test_meta_every_test_is_wired_into_the_runner():
     joues = {fn.__name__ for fn in FAST + HEAVY}
     definis = {n for n, v in sorted(globals().items())
                if n.startswith("test_") and callable(v) and getattr(v, "__module__", None) == __name__}
-    orphelins = sorted(definis - joues)
-    assert not orphelins, ("test(s) DÉFINI(S) MAIS JAMAIS JOUÉ(S) — ajoute-les à FAST ou HEAVY :\n  "
+    # ── La table d'exemptions est elle-même sous contrôle, sinon elle devient la porte de sortie
+    # qui rend le méta inutile : un nom qu'on y jette pour faire taire l'échec, et le trou revient
+    # par où on l'a bouché. Trois conditions, chacune fermant un contournement précis.
+    for nom, raison in sorted(TESTS_EXEMPTES.items()):
+        assert nom in definis, (f"exemption PÉRIMÉE pour « {nom} » : ce test n'existe plus. Une "
+                                f"exemption fantôme masquerait un futur test du même nom.")
+        assert isinstance(raison, str) and len(raison.strip()) >= 30, (
+            f"exemption de « {nom} » sans CHAÎNE DE RAISON exploitable ({raison!r}) : remiser un "
+            f"test doit coûter une phrase signée, pas un mot.")
+        assert nom not in joues, (f"« {nom} » est à la fois EXEMPTÉ et CÂBLÉ : l'exemption ment "
+                                  f"sur l'état réel du filet, retire-la.")
+    orphelins = sorted(definis - joues - set(TESTS_EXEMPTES))
+    assert not orphelins, ("test(s) DÉFINI(S) MAIS JAMAIS JOUÉ(S) — ajoute-les à FAST ou HEAVY, ou "
+                           "inscris-les dans TESTS_EXEMPTES avec une raison :\n  "
                            + "\n  ".join(orphelins))
     assert len(definis) >= 70, (f"seulement {len(definis)} tests découverts : l'inventaire est "
                                 f"cassé, ce contrôle ne prouverait plus rien")
     print(f"  test_meta_every_test_is_wired_into_the_runner OK ({len(definis)} tests définis, "
-          f"tous câblés au runner)")
+          f"{len(joues)} câblés, {len(TESTS_EXEMPTES)} exemptés)")
 
 
 # Listes AU NIVEAU MODULE (et non dans `if __name__`) : le test méta ci-dessus doit pouvoir les
