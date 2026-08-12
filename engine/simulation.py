@@ -333,6 +333,8 @@ _RELATIONS_ON  = os.environ.get("RELATIONS_OFF") != "1"
 # dériver les baselines 4ccfdd60/5f244402 que la spec exige inchangés. RELATIONS_OFF isole P2.
 _POL_ON        = _SOCIETY_ON and _JOBS_ON and _POLITICS_ON and _RELATIONS_ON
 REL_MIN, REL_MAX = -100, 100
+REL_CAUSE_DEFAULT = "decay"   # cause par défaut d'une sortie d'alliance : l'usure ordinaire
+REL_CAUSE_ENVY    = "envy"    # H1 : l'injustice de richesse — SEULE cause qui se déclare
 REL_ALLY, REL_RIVAL = 40, -40         # seuils allié/rival (PLAN §10)
 REL_ALLY_OFF, REL_RIVAL_OFF = 35, -35 # hystérésis : on CESSE d'être allié <35 / rival >-35
 REL_NEIGHBOR_DIST = 80                 # voisinage pacifique : bonus/éval si feux plus proches que ça
@@ -401,11 +403,22 @@ def _chief_personality(chief_id):
 def _rel_key(a, b):
     return (a, b) if a < b else (b, a)
 
-def _rel_apply(relations, ally_state, rival_state, a, b, delta, events):
+def _rel_apply(relations, ally_state, rival_state, a, b, delta, events, cause=REL_CAUSE_DEFAULT):
     """Applique `delta` à la relation (a,b), clampé [REL_MIN,REL_MAX], symétrique (clé triée).
     Gère les franchissements d'hystérésis : émet clan_allies/clan_rivals à l'ENTRÉE dans l'état
-    (≥REL_ALLY / ≤REL_RIVAL), sortie silencieuse (<REL_ALLY_OFF / >REL_RIVAL_OFF). Une relation
-    retombée à 0 est retirée (= neutre, save minimal). Appelant responsable du gate _POL_ON."""
+    (≥REL_ALLY / ≤REL_RIVAL) et clan_ally_break à la SORTIE d'alliance (<REL_ALLY_OFF). Une
+    relation retombée à 0 est retirée (= neutre, save minimal). Appelant responsable de _POL_ON.
+
+    LA SORTIE D'ALLIANCE ÉTAIT MUETTE, et ça rendait H1 INVISIBLE : l'entrée avait son annale, la
+    sortie n'était qu'un `discard`. Le bloc « l'envie éteint l'alliance » produisait donc un effet
+    réel que le spectateur ne voyait jamais — or le jeu est 100 % visuel, un système invisible
+    n'existe pas pour lui. La symétrie manquait, elle est rétablie ici.
+
+    `cause` est un PARAMÈTRE EXPLICITE porté par le site d'appel (exigence de conception : on ne
+    DEVINE pas une cause après coup, on la TRANSPORTE). Seule l'érosion d'envie se déclare ; tous
+    les autres appels laissent le défaut, et l'annale reste sobre. Une inférence a posteriori
+    (« la relation a baissé de 4, donc c'est l'envie ») serait fausse dès qu'un autre delta vaudra
+    4 — et personne ne le verrait avant longtemps."""
     if a == b or a is None or b is None:
         return
     k = _rel_key(a, b)
@@ -418,6 +431,7 @@ def _rel_apply(relations, ally_state, rival_state, a, b, delta, events):
         ally_state.add(k); events.append({"type": "clan_allies", "a": k[0], "b": k[1]})
     elif k in ally_state and new < REL_ALLY_OFF:
         ally_state.discard(k)
+        events.append({"type": "clan_ally_break", "a": k[0], "b": k[1], "cause": cause})
     if k not in rival_state and new <= REL_RIVAL:
         rival_state.add(k); events.append({"type": "clan_rivals", "a": k[0], "b": k[1]})
     elif k in rival_state and new > REL_RIVAL_OFF:
@@ -4188,6 +4202,9 @@ class Simulation:
         # Log événements
         # Chroniques (bloc K) : distille les jalons du tick dans les annales
         self._update_relations(tick_events)   # P2b : deltas de relation issus des events du tick
+        self._locate_ally_breaks(tick_events)  # x/y des ruptures — APRÈS le dernier _rel_apply du
+                                               # tick (society PUIS relations), sinon on manquerait
+                                               # les ruptures nées de la seconde passe
         self._update_chronicle(tick_events)
 
         self.events_log.extend(tick_events)
@@ -4367,7 +4384,10 @@ class Simulation:
                         _erode = (_hi >= ENVY_ALLY_MIN
                                   and _lo * ENVY_ALLY_RATIO_D <= _hi * ENVY_ALLY_RATIO_N)
                     if _erode:
-                        _rel_apply(rel, ally, rival, c.id, o.id, -ENVY_ALLY_EROSION, tick_events)
+                        # L'érosion SE DÉCLARE : c'est le seul site d'appel qui nomme sa cause, et
+                        # c'est ce qui permet à l'annale de dire POURQUOI l'alliance s'est éteinte.
+                        _rel_apply(rel, ally, rival, c.id, o.id, -ENVY_ALLY_EROSION, tick_events,
+                                   cause=REL_CAUSE_ENVY)
                     elif _neighbor:
                         _rel_apply(rel, ally, rival, c.id, o.id, REL_D_NEIGHBOR, tick_events)
                     elif v > 0:
@@ -5004,6 +5024,24 @@ class Simulation:
                     tick_events.append({"type": "clan_marriage", "from_clan": donor,
                                         "to_clan": recv, "entity_id": cand.id})
 
+    def _locate_ally_breaks(self, tick_events):
+        """Pose x/y sur les ruptures d'alliance du tick — le point MÉDIAN des deux feux, parce
+        qu'une rupture n'a pas de lieu propre : elle appartient aux deux clans à la fois.
+        `_rel_apply` est une fonction de module et ne connaît pas les clans ; plutôt que de lui
+        faire porter des coordonnées à travers ses 14 sites d'appel, on enrichit ICI, à l'unique
+        point où tous les events du tick ont convergé.
+        x/y sont OPTIONNELS et volontairement absents si un clan a disparu dans le même tick
+        (conquête, extinction) : la frise centrera ce qui a un lieu et laissera le reste inerte —
+        même contrat que l'enrichissement d'annales du lot UI, aucun événement fabriqué."""
+        breaks = [ev for ev in tick_events if ev.get("type") == "clan_ally_break"]
+        if not breaks:
+            return
+        pos = {c.id: (c.cx, c.cy) for c in self.clans}
+        for ev in breaks:
+            pa, pb = pos.get(ev["a"]), pos.get(ev["b"])
+            if pa and pb:
+                ev["x"], ev["y"] = int((pa[0] + pb[0]) / 2), int((pa[1] + pb[1]) / 2)
+
     def _purge_clan_relations(self, cid):
         """P3 : retire toute trace du clan `cid` des relations + états dérivés (conquête §3 OU
         extinction naturelle E8 — même bug de clés gelées depuis P2). Gated _WAR2_ON aux appels."""
@@ -5500,6 +5538,19 @@ class Simulation:
             elif et == "clan_allies":   # P2b : franchissement du seuil d'alliance (hystérésis anti-spam)
                 add({"t": t, "kind": "ally", "msg":
                      f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} scellent une alliance"})
+            elif et == "clan_ally_break":   # H1 : la sortie d'alliance, symétrique de l'entrée
+                # TOUTE sortie est annoncée, pas seulement celle causée par l'envie : n'annoncer
+                # que l'injustice donnerait au spectateur une vision biaisée de son monde, où les
+                # alliances ne mourraient que de jalousie. Une alliance qui s'éteint doucement est
+                # aussi de l'Histoire — elle a juste droit à un texte sobre.
+                _lieu = {"x": ev["x"], "y": ev["y"]} if "x" in ev else {}
+                if ev.get("cause") == REL_CAUSE_ENVY:
+                    add({"t": t, "kind": "ally", "cat": "annals", **_lieu, "msg":
+                         f"L'alliance du clan {ev['a'] + 1} et du clan {ev['b'] + 1} se brise : "
+                         f"trop de richesse d'un côté, trop peu de l'autre"})
+                else:
+                    add({"t": t, "kind": "ally", "cat": "annals", **_lieu, "msg":
+                         f"L'alliance entre le clan {ev['a'] + 1} et le clan {ev['b'] + 1} s'éteint"})
             elif et == "clan_rivals":
                 add({"t": t, "kind": "rival", "msg":
                      f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} deviennent rivaux"})

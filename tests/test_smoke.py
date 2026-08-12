@@ -3020,6 +3020,72 @@ def test_p8_h1_marriage_cannot_outpace_envy():
           f"(théorique {theorique}) ; dénominateur sans écart : 0 rupture, alliance intacte)")
 
 
+def test_p8_h1_alliance_break_is_visible_and_named():
+    """P8 H1 (suite) — LA RUPTURE D'ALLIANCE ÉTAIT MUETTE, donc H1 était INVISIBLE. `_rel_apply`
+    n'émettait un event qu'à l'ENTRÉE dans l'état allié ; la sortie n'était qu'un `discard`. Le
+    bloc « l'envie éteint l'alliance » produisait un effet réel que le spectateur ne voyait jamais
+    — or le jeu est 100 % visuel : un système invisible n'existe pas pour lui.
+    Cinq exigences en un seul test, toutes sur le VRAI chemin :
+      1. SYMÉTRIE entrée/sortie (l'entrée avait son event, la sortie l'a maintenant) ;
+      2. FRONTIÈRE EXACTE : rien à REL_ALLY_OFF, l'event à REL_ALLY_OFF − 1 ;
+      3. CAUSE TRANSPORTÉE, pas devinée — et le TEXTE diffère (bipolaire envie / usure) ;
+      4. RÉ-ENTRÉE puis RE-SORTIE = 2 events légitimes (pas de dédup qui avalerait un cycle réel) ;
+      5. l'annale porte x/y quand les deux clans existent (la frise doit pouvoir centrer)."""
+    from engine.simulation import (_rel_apply, _rel_key, REL_ALLY, REL_ALLY_OFF, REL_CAUSE_ENVY,
+                                   REL_CAUSE_DEFAULT, Clan, N_CLANS)
+    def poser():
+        rel, ally, rival, ev = {}, set(), set(), []
+        _rel_apply(rel, ally, rival, 0, 1, REL_ALLY, ev)
+        assert [e["type"] for e in ev] == ["clan_allies"], "l'ENTRÉE doit émettre (symétrie)"
+        return rel, ally, rival, ev
+    # ── 2. FRONTIÈRE EXACTE. À REL_ALLY_OFF pile, on est encore allié : aucun event.
+    rel, ally, rival, ev = poser()
+    _rel_apply(rel, ally, rival, 0, 1, REL_ALLY_OFF - REL_ALLY, ev)
+    assert rel[_rel_key(0, 1)] == REL_ALLY_OFF and _rel_key(0, 1) in ally
+    assert len(ev) == 1, f"rupture émise À REL_ALLY_OFF={REL_ALLY_OFF} : un cran trop tôt"
+    _rel_apply(rel, ally, rival, 0, 1, -1, ev)          # un point de plus → on sort
+    assert len(ev) == 2 and ev[1]["type"] == "clan_ally_break", "sortie SOUS le seuil non émise"
+    assert ev[1]["cause"] == REL_CAUSE_DEFAULT, "sans déclaration, la cause doit rester l'usure"
+    assert _rel_key(0, 1) not in ally
+    # ── 3. CAUSE : elle est TRANSPORTÉE par le site d'appel, jamais inférée du delta.
+    rel, ally, rival, ev = poser()
+    _rel_apply(rel, ally, rival, 0, 1, -(REL_ALLY - REL_ALLY_OFF) - 1, ev, cause=REL_CAUSE_ENVY)
+    assert ev[-1]["cause"] == REL_CAUSE_ENVY, "la cause déclarée ne remonte pas dans l'event"
+    # ── 4. RÉ-ENTRÉE puis RE-SORTIE : deux cycles = deux ruptures, aucune avalée.
+    _rel_apply(rel, ally, rival, 0, 1, REL_ALLY, ev)                       # re-franchit
+    _rel_apply(rel, ally, rival, 0, 1, -REL_ALLY, ev, cause=REL_CAUSE_ENVY)  # re-sort
+    types = [e["type"] for e in ev]
+    assert types.count("clan_ally_break") == 2 and types.count("clan_allies") == 2, (
+        f"un cycle alliance/rupture a été avalé : {types}")
+    # ── 1 & 3bis & 5. LES DEUX TEXTES, sur le vrai chemin de la chronique, avec le lieu.
+    sim = Simulation(World(width=60, height=45, seed=7))
+    sim.clans = [Clan(id=0, cx=10.0, cy=20.0, color="#f00", chief_id=-1),
+                 Clan(id=1, cx=30.0, cy=40.0, color="#0f0", chief_id=-1)]
+    sim._next_clan_id = N_CLANS
+    evs = [{"type": "clan_ally_break", "a": 0, "b": 1, "cause": REL_CAUSE_ENVY},
+           {"type": "clan_ally_break", "a": 0, "b": 1, "cause": REL_CAUSE_DEFAULT}]
+    sim._locate_ally_breaks(evs)
+    assert (evs[0]["x"], evs[0]["y"]) == (20, 30), f"point médian des deux feux faux : {evs[0]}"
+    avant = len(sim.chronicle)
+    sim._update_chronicle(evs)
+    textes = [c["msg"] for c in sim.chronicle[avant:]]
+    assert len(textes) == 2, f"les deux ruptures doivent produire deux annales : {textes}"
+    assert "trop de richesse" in textes[0], f"l'envie doit NOMMER sa cause : {textes[0]}"
+    assert "trop de richesse" not in textes[1] and "s'éteint" in textes[1], (
+        f"une rupture d'usure ne doit PAS accuser l'injustice : {textes[1]}")
+    assert all(c.get("cat") == "annals" for c in sim.chronicle[avant:]), \
+        "sans cat=annals, ni la bannière ① ni la frise ③ ne verront jamais ces ruptures"
+    assert all("x" in c and "y" in c for c in sim.chronicle[avant:]), \
+        "l'annale doit porter le lieu, sinon le clic de la frise est inerte"
+    # DÉNOMINATEUR du lieu : un clan disparu dans le même tick → pas de x/y inventé.
+    orphelin = [{"type": "clan_ally_break", "a": 0, "b": 99, "cause": REL_CAUSE_DEFAULT}]
+    sim._locate_ally_breaks(orphelin)
+    assert "x" not in orphelin[0], "x/y fabriqué pour un clan qui n'existe plus"
+    print(f"  test_p8_h1_alliance_break_is_visible_and_named OK (frontière {REL_ALLY_OFF}/"
+          f"{REL_ALLY_OFF - 1}, cause transportée, 2 cycles = 2 events, 2 textes, lieu (20,30) "
+          f"et pas de lieu inventé)")
+
+
 def test_p8_h2_coup_cooldown_lets_tension_reach_the_split():
     """P8 H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde,
     le coup à 70 préempte ÉTERNELLEMENT la scission à 90 dès n>1 : mesuré sur le monde live,
@@ -3451,6 +3517,7 @@ FAST = (test_deposit_no_crash_when_houses_full,
         test_p8_h1_envy_formula_is_not_a_truism,
         test_p8_h1_erosion_replaces_neighbourhood,
         test_p8_h1_marriage_cannot_outpace_envy,
+        test_p8_h1_alliance_break_is_visible_and_named,
         test_p8_h2_coup_cooldown_lets_tension_reach_the_split,
         test_p8_h2_blocked_coup_does_not_leak_into_swarm,
         test_p8_h2_last_coup_tick_round_trip,
