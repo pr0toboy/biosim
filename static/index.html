@@ -930,7 +930,10 @@ const FRISE = {
     cult:      { s: "dot",  c: "#B48EAD", t: "culte" },
     monument:  { s: "dot",  c: "#A89984", t: "monument / héros" },
     hero:      { s: "dot",  c: "#A89984", t: "monument / héros" },
-    ally:      { s: "dot",  c: "#EDE0C8", t: "alliance" },
+    // CARRÉ et non rond : un rond #EDE0C8 est indiscernable d'un amas (même couleur), et le
+    // compte au-dessus est le seul indice — invisible pour qui ne connaît pas la règle. La FORME
+    // lève l'ambiguïté sans toucher à la palette.
+    ally:      { s: "sq",   c: "#EDE0C8", t: "alliance" },
   },
   minSpan: 1, defaultYears: 6, clusterPx: 6, hitPx: 8,
 };
@@ -961,6 +964,7 @@ function drawGlyph(g, x, y, shape, color) {
   g.beginPath();
   if (shape === "tri") { g.moveTo(x, y - r); g.lineTo(x + r, y + r); g.lineTo(x - r, y + r); }
   else if (shape === "dia") { g.moveTo(x, y - r); g.lineTo(x + r, y); g.lineTo(x, y + r); g.lineTo(x - r, y); }
+  else if (shape === "sq") { g.rect(x - r * 0.8, y - r * 0.8, r * 1.6, r * 1.6); }
   else { g.arc(x, y, r * 0.9, 0, Math.PI * 2); }
   g.closePath(); g.fill();
 }
@@ -1023,11 +1027,16 @@ function drawFrise() {
   const vues = [];
   for (const k of Object.values(FRISE.kinds)) if (!vues.some(v => v.t === k.t)) vues.push(k);
   fctx.font = "11px system-ui, sans-serif"; fctx.textBaseline = "middle"; fctx.textAlign = "left";
+  // TOUTES les familles, pas les 5 de la spec d'origine : `ally` a été ajoutée aux glyphes, et
+  // un glyphe sans légende est une devinette. On s'arrête net si la largeur manque — une légende
+  // qui déborde sous le repère « aujourd'hui » serait pire que tronquée.
   let lx = 6;
-  for (const v of vues.slice(0, 5)) {
+  for (const v of vues) {
+    const larg = 11 + fctx.measureText(v.t).width + 12;
+    if (lx + larg > xEnd) break;
     drawGlyph(fctx, lx + 4, 9, v.s, v.c);
     fctx.fillStyle = FRISE.label; fctx.fillText(v.t, lx + 11, 9);
-    lx += 11 + fctx.measureText(v.t).width + 12;
+    lx += larg;
   }
 }
 
@@ -1089,6 +1098,11 @@ friseWrap.addEventListener("wheel", (e) => {
   let span = Math.min(Math.max((t1 - t0) * k, FRISE.minSpan * tpy), Math.max(tpy, currentTick || tpy));
   friseT0 = Math.max(0, anchor - span * xr);
   friseT1 = friseT0 + span;
+  // Même clamp que le pan : la molette ancrée tout à gauche ouvrait sinon une bande de FUTUR
+  // vide à droite. Le drag l'interdisait déjà — deux gestes qui donnent deux règles est un
+  // défaut en soi, même quand le second n'est que cosmétique.
+  const nowT = currentTick || friseT1;
+  if (friseT1 > nowT) { friseT1 = nowT; friseT0 = Math.max(0, nowT - span); }
   drawFrise();
 }, { passive: false });
 let friseDrag = null;
