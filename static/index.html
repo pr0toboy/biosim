@@ -2341,12 +2341,36 @@ function redrawBiomeTile(octx, x, y, biome) {
   });
 }
 
+// ── Zoom (limites) ────────────────────────────────────────────────────────────
+// ZOOM_MIN_SOFT est un PLANCHER DE CONFORT, pas la limite réelle : sur un petit monde on ne veut
+// pas dézoomer indéfiniment dans le vide. La limite réelle est le zoom qui fait tenir le monde à
+// l'écran, et elle DÉPEND de la taille de la fenêtre — donc elle se calcule, elle ne se code pas.
+// Le 0.5 en dur datait du monde d'origine ; depuis le passage au gabarit ×2 (320×232 tuiles, soit
+// 5120×3712 px) le fit vaut 0,256 sur un écran de bureau et 0,076 sur mobile : la molette butait
+// à 0.5 et la vue d'ensemble était devenue INATTEIGNABLE sur tous les écrans, alors que c'est la
+// vue qui donne son sens à un god-simulator. La bande de frise, en prenant 56 px, l'a même
+// marginalement éloignée (0,256 → 0,241).
+const ZOOM_MIN_SOFT = 0.5;
+const ZOOM_MAX = 8.0;   // vue zoomée max (pixels bien lisibles)
+
+// Zoom auquel le monde entier tient dans la zone carte. UNE seule définition, partagée avec
+// `fitWorld()` : deux calculs séparés finiraient par diverger, et le plancher de zoom ne
+// correspondrait plus tout à fait à la vue que le bouton « monde entier » donne.
+function fitScale() {
+  if (!worldData) return ZOOM_MIN_SOFT;
+  const W = worldData.width * TILE_SIZE, H = worldData.height * TILE_SIZE;
+  const cw = canvasWrap.clientWidth  || window.innerWidth - 280;
+  const ch = canvasWrap.clientHeight || window.innerHeight - 50;
+  return Math.min(cw / W, ch / H);
+}
+function zoomMin() { return Math.min(ZOOM_MIN_SOFT, fitScale()); }
+
 function fitWorld() {
   if (!worldData) return;
   const W = worldData.width * TILE_SIZE, H = worldData.height * TILE_SIZE;
   const cw = canvasWrap.clientWidth  || window.innerWidth - 280;
   const ch = canvasWrap.clientHeight || window.innerHeight - 50;
-  scale = Math.min(cw / W, ch / H);
+  scale = fitScale();          // même source que le plancher de zoom (cf. ZOOM_MIN_SOFT)
   offX  = (cw - W * scale) / 2;
   offY  = (ch - H * scale) / 2;
 }
@@ -4262,12 +4286,8 @@ canvas.addEventListener("mouseleave", () => {
   siteHover = null; siteHoverUntil = 0;
 });
 
-// ── Zoom (limites) ────────────────────────────────────────────────────────────
-const ZOOM_MIN = 0.5;   // vue dézoomée max (monde entier visible)
-const ZOOM_MAX = 8.0;   // vue zoomée max (pixels bien lisibles)
-
 function applyZoom(mx, my, delta) {
-  const newScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale * delta));
+  const newScale = Math.min(ZOOM_MAX, Math.max(zoomMin(), scale * delta));
   const realDelta = newScale / scale;
   offX = mx - (mx - offX) * realDelta;
   offY = my - (my - offY) * realDelta;
