@@ -3086,6 +3086,95 @@ def test_p8_h1_alliance_break_is_visible_and_named():
           f"et pas de lieu inventé)")
 
 
+def test_ui3_annals_carry_place_clan_and_subtype():
+    """Lot UI ③ — une annale SANS LIEU est un glyphe INERTE sur la frise : on clique, rien.
+    L'inventaire pré-code l'a chiffré : 11 des 13 types n'en portaient aucun, soit 84 % de la
+    frise morte au clic. Tout était atteignable sans un seul état nouveau, en trois familles —
+    et ce test les exerce toutes, plus le refus d'inventer :
+      (A) l'event porte déjà x/y → recopie ; pour une MIGRATION c'est `to_x/to_y`, la terre
+          d'ARRIVÉE (c'est elle qui a du sens sur une frise, pas le point qu'on a quitté) ;
+      (B) l'event nomme une ENTITÉ (héros) → sa position, plus juste que le feu de son clan ;
+      (C) l'event nomme un CLAN → le feu du clan ;
+      (D) rien d'atteignable (`money_dawn`) → AUCUN lieu inventé. Un clic inerte assumé sur un
+          jalon unique-par-partie vaut mieux qu'un clic qui emmène au mauvais endroit.
+    Le SOUS-TYPE n'est pas une inférence : migration / découverte / colonie sortent de TROIS
+    events distincts qui partagent le même `kind`. L'information existait, on la jetait."""
+    from engine.simulation import Clan, N_CLANS, TOPO_ANNAL_DIST
+    sim = Simulation(World(width=60, height=45, seed=7))
+    sim.clans = [Clan(id=0, cx=11.0, cy=22.0, color="#f00", chief_id=-1),
+                 Clan(id=1, cx=33.0, cy=44.0, color="#0f0", chief_id=-1)]
+    sim._next_clan_id = N_CLANS
+    h = spawn(EntityType.HUMAN, 7, 8, Sex.MALE); h.clan_id = 0
+    sim.entities = [h]
+    evs = [
+        {"type": "site_discovered", "clan_id": 0, "site": 3, "x": 50, "y": 51,
+         "dist": TOPO_ANNAL_DIST},          # ⚠ sous ce seuil l'annale n'existe pas : le premier
+                                            # jet de ce test mettait dist=9 et ne prouvait rien
+        {"type": "clan_swarm", "clan_id": 0, "new_clan": 9, "members": 5, "x": 12, "y": 13,
+         "site": 4},
+        {"type": "clan_migration", "clan_id": 1, "site": 2, "from_x": 1, "from_y": 2,
+         "to_x": 40, "to_y": 41},
+        {"type": "hero_named", "clan_id": 0, "entity_id": h.id, "name": "Test", "via": "combat"},
+        {"type": "cult_schism", "clan_id": 1, "name": "Foi", "new_cult": 2, "old_cult": 1},
+        {"type": "money_dawn"},
+    ]
+    avant = len(sim.chronicle)
+    sim._update_chronicle(evs)
+    nouvelles = sim.chronicle[avant:]
+    par_kind = {c["kind"]: c for c in nouvelles}
+    par_sub  = {c["sub"]: c for c in nouvelles if c.get("sub")}
+    assert set(par_sub) == {"discovery", "colony", "migration"}, \
+        f"les 3 sous-types d'exploration doivent être distincts : {sorted(par_sub)}"
+    assert (par_sub["discovery"]["x"], par_sub["discovery"]["y"]) == (50, 51), "(A) recopie x/y"
+    assert (par_sub["colony"]["x"], par_sub["colony"]["y"]) == (12, 13), "(A) essaimage"
+    assert (par_sub["migration"]["x"], par_sub["migration"]["y"]) == (40, 41), \
+        "(A) une migration doit pointer la terre d'ARRIVÉE, pas celle qu'on quitte"
+    assert (par_kind["hero"]["x"], par_kind["hero"]["y"]) == (7, 8), \
+        "(B) le héros se distingue là où il EST, pas où son clan dort"
+    assert (par_kind["cult"]["x"], par_kind["cult"]["y"]) == (33, 44), "(C) feu du clan"
+    assert par_kind["cult"]["clan"] == 1 and par_kind["hero"]["clan"] == 0, "clan mal résolu"
+    assert "x" not in par_kind["econ"], "(D) money_dawn : un lieu a été INVENTÉ"
+    print(f"  test_ui3_annals_carry_place_clan_and_subtype OK (A recopie+arrivée, B entité, "
+          f"C feu, D rien d'inventé ; sous-types {sorted(par_sub)})")
+
+
+def test_ui3_conquest_place_is_the_loser_and_stays_out_of_the_hash():
+    """Lot UI ③ — LE cas qui a fait rougir un golden, et sa réparation.
+    Le lieu juste d'une conquête est le feu du VAINCU : c'est là que ça s'est joué. Mais quand
+    l'annale s'écrit il n'est plus dans `self.clans`, et se rabattre sur le vainqueur enverrait
+    le joueur au mauvais endroit d'un clic — sans qu'aucun test ne rougisse jamais.
+    Première tentative : poser x/y sur l'event à l'émission. Le golden CIV a ÉCHOUÉ — parce que
+    `tick_events` EST dans la sortie de `step()`, donc dans le hash, contrairement à l'idée reçue
+    (« les events sont hors hash ») qu'on partageait tous les deux. La population finale ne
+    bougeait pas d'une unité : un regold pour une clé décorative.
+    D'où un relais interne d'un tick, consommé par la chronique puis purgé. Ce test verrouille
+    les TROIS propriétés à la fois : le lieu est celui du vaincu, l'event reste INTACT, et le
+    relais ne survit pas au tick."""
+    from engine.simulation import Clan, N_CLANS
+    sim = Simulation(World(width=60, height=45, seed=7))
+    sim.clans = [Clan(id=0, cx=5.0, cy=6.0, color="#f00", chief_id=-1),
+                 Clan(id=1, cx=41.0, cy=39.0, color="#0f0", chief_id=-1)]
+    sim._next_clan_id = N_CLANS
+    e = spawn(EntityType.HUMAN, 41, 39, Sex.MALE); e.clan_id = 1
+    sim.entities = [e]; sim.buildings = []
+    evs = []
+    sim._absorb_clan(0, 1, evs)
+    assert not any(c.id == 1 for c in sim.clans), "montage invalide : le vaincu n'a pas disparu"
+    assert "x" not in evs[0] and "y" not in evs[0], (
+        "l'event clan_absorbed porte un lieu → il est dans le hash, le golden CIV va rougir")
+    avant = len(sim.chronicle)
+    sim._update_chronicle(evs)
+    a = next(c for c in sim.chronicle[avant:] if c["kind"] == "war")
+    assert (a["x"], a["y"]) == (41, 39), (
+        f"lieu du VAINCU attendu (41,39), obtenu ({a.get('x')},{a.get('y')}) — (5,6) serait le "
+        f"vainqueur, c'est-à-dire le mauvais endroit")
+    assert sim._conquest_place == {}, (
+        "relais non purgé : un lieu qui traîne se recollerait à une conquête ultérieure du même "
+        "id de clan — un lieu FAUX, le seul défaut qu'on s'est interdit ici")
+    print("  test_ui3_conquest_place_is_the_loser_and_stays_out_of_the_hash OK (lieu du vaincu, "
+          "event intact, relais purgé)")
+
+
 def test_p8_h2_coup_cooldown_lets_tension_reach_the_split():
     """P8 H2 — le coup renverse un chef, il ne dissout pas la pression STRUCTURELLE. Sans garde,
     le coup à 70 préempte ÉTERNELLEMENT la scission à 90 dès n>1 : mesuré sur le monde live,
@@ -3518,6 +3607,8 @@ FAST = (test_deposit_no_crash_when_houses_full,
         test_p8_h1_erosion_replaces_neighbourhood,
         test_p8_h1_marriage_cannot_outpace_envy,
         test_p8_h1_alliance_break_is_visible_and_named,
+        test_ui3_annals_carry_place_clan_and_subtype,
+        test_ui3_conquest_place_is_the_loser_and_stays_out_of_the_hash,
         test_p8_h2_coup_cooldown_lets_tension_reach_the_split,
         test_p8_h2_blocked_coup_does_not_leak_into_swarm,
         test_p8_h2_last_coup_tick_round_trip,

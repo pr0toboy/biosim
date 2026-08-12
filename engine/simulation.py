@@ -3633,6 +3633,11 @@ class Simulation:
         # step() → le hash du guard ne bouge pas). Servies par /api/chronicle.
         self.chronicle: list[dict] = []
         self._chronicle_seen: set = set()    # jalons "première fois" déjà actés
+        # Relais d'un tick : lieu du clan VAINCU, capturé pendant `_absorb_clan` (où son feu vit
+        # encore) et consommé par la chronique du même tick. Hors payload de `step()` — donc hors
+        # hash — et volontairement NON sérialisé : un save pris entre les deux n'existe pas, la
+        # conquête et son annale se produisent dans le même tick.
+        self._conquest_place: dict = {}
         self._prev_species: set = set()      # espèces vivantes au tick précédent
         self.clans: list[Clan] = []
         # Relations inter-clans (P2b) : clé = paire d'ids TRIÉE (a<b), valeur ∈ [-100,+100],
@@ -5054,6 +5059,21 @@ class Simulation:
         Membres (chef inclus) + bâtiments durables → X (butin intégral, colonie émergente) ;
         feu de camp & chantiers de Y effacés (rien n'est mort → pas de ruine E8) ; Y retiré ;
         relations purgées ; guerre passive des tiers sur Y remise à paix (chemin extinction)."""
+        # LIEU DE LA CONQUÊTE, capturé ICI et pas à la chronique : quand l'annale s'écrit, le clan
+        # vaincu N'EXISTE PLUS (retiré de self.clans quelques lignes plus bas), et son feu avec.
+        # Le résoudre après coup imposerait un fallback vers le feu du VAINQUEUR — c'est-à-dire
+        # emmener le joueur au mauvais endroit sur un clic, sans qu'aucun test ne rougisse jamais.
+        # Le lieu juste est celui du vaincu, et le seul instant où il est encore lisible est
+        # maintenant.
+        # LE LIEU NE PASSE PAS PAR L'EVENT, ET CE N'EST PAS UN DÉTAIL : `tick_events` EST dans la
+        # sortie de `step()` (« events », l.4244), donc dans le hash du guard. Ajouter x/y à
+        # `clan_absorbed` a fait ROUGIR le golden CIV — le seul scénario qui absorbe un clan —
+        # alors que la population finale ne bougeait pas d'une unité : un regold pour une clé
+        # décorative. On passe donc par un relais interne, consommé par la chronique dans le même
+        # tick, jamais sérialisé, jamais exposé.
+        _perdant = next((c for c in self.clans if c.id == y_id), None)
+        if _perdant is not None:
+            self._conquest_place[y_id] = (int(_perdant.cx), int(_perdant.cy))
         n = 0
         for e in self.entities:
             if e.alive and e.etype == EntityType.HUMAN and e.clan_id == y_id:
@@ -5525,6 +5545,72 @@ class Simulation:
         sortie de step() → déterminisme et hash du guard intacts."""
         t = self.tick_count
         add = self.chronicle.append
+
+        # ── Lieu / clan / sous-type d'une annale (lot UI ③) ────────────────────────────────
+        # Une annale sans lieu est un glyphe INERTE sur la frise : on clique, rien ne se passe.
+        # L'inventaire pré-code l'a chiffré — 11 des 13 types n'en portaient aucun, soit 84 % de
+        # la frise morte au clic. Tout était pourtant atteignable SANS un seul état nouveau, en
+        # trois familles, et c'est ce que ce résolveur applique :
+        #   (A) l'event porte DÉJÀ x/y (site découvert, essaimage, migration, conquête) → on
+        #       recopie. Pour une migration c'est `to_x/to_y`, la terre d'ARRIVÉE : c'est elle
+        #       qui a du sens sur une frise, pas le point qu'on a quitté ;
+        #   (B) l'event nomme une ENTITÉ (héros) → sa position propre, plus juste que le feu
+        #       de son clan : un héros se distingue là où il est, pas là où il dort ;
+        #   (C) l'event nomme un CLAN → le feu du clan.
+        # Rien n'est INVENTÉ : si le lieu n'est pas atteignable, l'annale n'en porte pas, et la
+        # frise laissera son glyphe inerte plutôt que d'envoyer le joueur au mauvais endroit.
+        _pos_clan = {c.id: (int(c.cx), int(c.cy)) for c in self.clans}
+
+        def _lieu_de(ev):
+            if ev.get("type") == "clan_absorbed":              # (A bis) relais de `_absorb_clan`
+                # Le vaincu n'est plus dans `self.clans` à cet instant : son feu n'existe que
+                # dans ce relais. Sans lui, il faudrait se rabattre sur le feu du VAINQUEUR,
+                # c'est-à-dire emmener le joueur au mauvais endroit d'un clic.
+                p = self._conquest_place.get(ev.get("clan_id"))
+                return {"x": p[0], "y": p[1]} if p else {}
+            if "x" in ev and "y" in ev:                        # (A) déjà porté
+                return {"x": int(ev["x"]), "y": int(ev["y"])}
+            if "to_x" in ev and "to_y" in ev:                  # (A) migration : la destination
+                return {"x": int(ev["to_x"]), "y": int(ev["to_y"])}
+            eid = ev.get("entity_id")
+            if eid is not None:                                # (B) l'intéressé lui-même
+                # Balayage linéaire assumé : il n'existe pas d'index id→entité côté moteur, et
+                # ce chemin ne s'emprunte QUE pour une annale de héros — quelques-unes par
+                # partie, pas par tick. Un index dédié coûterait plus à maintenir qu'il ne
+                # rapporte ici.
+                e = next((x for x in self.entities if x.id == eid), None)
+                if e is not None:
+                    return {"x": int(e.x), "y": int(e.y)}
+            cid = ev.get("clan_id")
+            if cid in _pos_clan:                               # (C) le feu du clan
+                x, y = _pos_clan[cid]
+                return {"x": x, "y": y}
+            return {}
+
+        # Le CLAN concerné, pour le liseré coloré de la bannière ①. `new_clan` en dernier :
+        # sur une scission, `clan_id` est la mère et c'est elle que l'annale raconte.
+        def _clan_de(ev):
+            for k in ("clan_id", "by", "new_clan"):
+                v = ev.get(k)
+                if v is not None and v >= 0:
+                    return {"clan": v}
+            return {}
+
+        # SOUS-TYPE des annales d'exploration. Ce n'est PAS une inférence : migration, découverte
+        # et colonie sortent de TROIS events distincts qui se trouvent partager le même `kind`.
+        # L'information existait à la source et on la jetait — il suffit de ne plus la jeter.
+        _SOUS_TYPE = {"clan_migration": "migration", "site_discovered": "discovery",
+                      "clan_swarm": "colony"}
+
+        def _meta(ev):
+            """Lieu + clan + sous-type d'un coup : tout ce qu'une annale doit porter pour être
+            cliquable, colorée et pictogrammée."""
+            m = {**_lieu_de(ev), **_clan_de(ev)}
+            st = _SOUS_TYPE.get(ev.get("type"))
+            if st:
+                m["sub"] = st
+            return m
+
         for ev in tick_events:
             et = ev.get("type")
             if et == "clan_age_up":
@@ -5555,7 +5641,7 @@ class Simulation:
                 add({"t": t, "kind": "rival", "msg":
                      f"Le clan {ev['a'] + 1} et le clan {ev['b'] + 1} deviennent rivaux"})
             elif et == "clan_absorbed":   # P3a — guerre gagnée = annales
-                add({"t": t, "kind": "war", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "war", "cat": "annals", "msg":
                      f"Le clan {ev['by'] + 1} conquiert le clan {ev['clan_id'] + 1} et absorbe ses {ev['members']} survivants"})
             elif et == "clan_migration":   # P7 G3 — l'exode ABOUTI est un événement d'annales.
                 # Le départ et l'échec restent SILENCIEUX (même parti pris qu'en G1 : seule la
@@ -5567,7 +5653,7 @@ class Simulation:
                 # G4 : sous TOPO le lieu se NOMME ; sans lui la phrase reste vraie, juste anonyme.
                 _lieu = (site_name(self.world.seed, ev["site"])
                          if _TOPO_ON and ev.get("site") is not None else None)
-                add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "explo", "cat": "annals", "msg":
                      (f"Le clan {ev['clan_id'] + 1} quitte ses terres pour {_lieu}" if _lieu else
                       f"Le clan {ev['clan_id'] + 1} lève le camp et rallume son feu sur une terre "
                       f"lointaine")})
@@ -5578,13 +5664,13 @@ class Simulation:
                 _k = ("site_annal", ev["site"])
                 if _k not in self._chronicle_seen:      # une terre ne se découvre qu'UNE fois
                     self._chronicle_seen.add(_k)
-                    add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                    add({"t": t, **_meta(ev), "kind": "explo", "cat": "annals", "msg":
                          f"Les éclaireurs du clan {ev['clan_id'] + 1} atteignent "
                          f"{site_name(self.world.seed, ev['site'])}"})
             elif et == "clan_swarm" and _TOPO_ON and ev.get("site") is not None:
                 # G4 — la fondation DIRIGÉE se raconte (la clé `site` est absente d'un essaimage
                 # local, donc ce test suffit à les distinguer sans drapeau supplémentaire).
-                add({"t": t, "kind": "explo", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "explo", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} fonde une colonie "
                      f"{a_lieu(site_name(self.world.seed, ev['site']))}"})
             elif et == "clan_tribute":    # P3
@@ -5597,13 +5683,13 @@ class Simulation:
                 add({"t": t, "kind": "war", "msg":
                      f"Le clan {ev['clan_id'] + 1} entre en guerre aux côtés de son allié le clan {ev['ally'] + 1}"})
             elif et == "clan_rebellion":  # P4 scission — fondation d'un clan = annales
-                add({"t": t, "kind": "rebellion", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "rebellion", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} éclate : {ev['members']} rebelles fondent le clan {ev['new_clan'] + 1}"})
             elif et == "clan_coup":       # P4 coup d'État
                 add({"t": t, "kind": "coup", "msg":
                      f"Un coup d'État renverse le chef du clan {ev['clan_id'] + 1}"})
             elif et == "cult_schism":     # P5 E1 : rupture religieuse — fondation d'une foi = annales
-                add({"t": t, "kind": "cult", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "cult", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} rompt avec sa foi et fonde {ev['name']}"})
             elif et == "cult_converted":  # P5 E1 : conversion
                 add({"t": t, "kind": "cult", "msg":
@@ -5614,24 +5700,24 @@ class Simulation:
                      f"({ev.get('fields', 0)} champs mûrs)"})
             elif et == "monument_built":  # P5 E3 : monument de prestige
                 _ded = ev.get("dedication") or "sa gloire"
-                add({"t": t, "kind": "monument", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "monument", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} érige un monument à {_ded}"})
             elif et == "hero_named":      # P5 E4 : une figure entre dans la légende
                 _via = {"kills": "au combat", "builds": "par ses œuvres",
                         "founder": "en fondant son clan"}.get(ev.get("via"), "")
-                add({"t": t, "kind": "hero", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "hero", "cat": "annals", "msg":
                      f"{ev['name']} se distingue {_via} (clan {ev['clan_id'] + 1})"})
             elif et == "hero_fallen":     # P5 E4 : mort d'un héros → annales
                 _s = ev.get("age_seasons", 0)
                 _life = f"après {_s} saison{'s' if _s > 1 else ''}" if _s >= 1 else "au terme d'une vie brève"
-                add({"t": t, "kind": "hero", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "hero", "cat": "annals", "msg":
                      f"{ev['name']}, héros du clan {ev['clan_id'] + 1}, tombe {_life}"})
             elif et == "money_dawn":      # P6 F1 : l'or devient monnaie (1× dans la partie) → annales
                 add({"t": t, "kind": "econ", "cat": "annals", "msg":
                      "L'or devient monnaie : les marchés acceptent désormais la pièce en paiement"})
             elif et == "clan_swarm":      # P4.1 essaimage — fondation d'une colonie = annales
                 _w = "sur d'anciennes ruines" if ev.get("on_ruin") else "en terre vierge"
-                add({"t": t, "kind": "swarm", "cat": "annals", "msg":
+                add({"t": t, **_meta(ev), "kind": "swarm", "cat": "annals", "msg":
                      f"Le clan {ev['clan_id'] + 1} essaime : une colonie s'installe {_w} (clan {ev['new_clan'] + 1})"})
             elif et in ("build_house", "build_mill", "build_well", "build_forge", "build_market", "build_church"):
                 btype = et[6:]
@@ -5736,6 +5822,11 @@ class Simulation:
                 add({"t": t, "kind": "species", "msg":
                      f"Les {self._SPECIES_FR.get(sp, sp)} réapparaissent"})
         self._prev_species = alive
+        # Le relais de conquête ne survit PAS au tick qui l'a rempli : la chronique vient de
+        # le consommer, et un lieu qui traînerait se recollerait à une conquête ultérieure du
+        # même id de clan — un lieu FAUX, le seul défaut qu'on s'est interdit ici.
+        self._conquest_place.clear()
+
         if len(self.chronicle) > self.CHRONICLE_MAX:
             self.chronicle = self.chronicle[-self.CHRONICLE_MAX:]
 
