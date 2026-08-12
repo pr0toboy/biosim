@@ -67,6 +67,35 @@
     display: block;
     image-rendering: pixelated;
   }
+  /* ── Bannière d'annales (lot UI ①) ──────────────────────────────────────────
+     Params de la maquette validée par Alexis. `top: 46px` la pose sous la topbar ;
+     `pointer-events: none` est une EXIGENCE, pas un détail : la bannière traverse la
+     carte et ne doit jamais voler un clic de sélection d'entité. Le z-index la met
+     au-dessus du monde mais SOUS les panneaux HUD (tooltip/building-panel, plus hauts). */
+  #annal-banner {
+    position: absolute;
+    top: 46px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 16px);       /* mobile : jamais plus large que le canvas */
+    box-sizing: border-box;
+    padding: 11px 16px;
+    border-radius: 5px;
+    border-left: 3px solid #E8C170;     /* couleur du clan si l'annale la porte */
+    background: rgba(29, 32, 33, 0.93); /* #1D2021 α0.93 */
+    color: #EDE0C8;
+    font-size: 15px;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;            /* texte ellipsé s'il déborde */
+    pointer-events: none;
+    opacity: 0;
+    z-index: 6;
+    display: none;
+  }
+  #annal-banner.show { opacity: 1; }
+  #annal-banner .annal-picto { font-size: 13px; margin-right: 7px; }
 
   /* ── Sidebar ── */
   #sidebar {
@@ -278,6 +307,7 @@
 <div id="main">
   <div id="canvas-wrap">
     <canvas id="world-canvas"></canvas>
+    <div id="annal-banner"></div>
     <div id="tooltip"></div>
     <div id="building-panel"></div>
   </div>
@@ -806,6 +836,9 @@ function handleTick(data) {
     if (ev.x != null) lightningBolts.push({ x: ev.x, y: ev.y, t: lightningAt });   // éclair visible (nº14)
   });
   (data.events || []).forEach(addEvent);
+  // Lot UI ① — uniquement sur le TICK, jamais sur l'init : `handleInit` rejouerait en bannière
+  // des annales vieilles de plusieurs jours de simulation, comme si elles venaient d'arriver.
+  pushAnnals(data.annals);
 }
 
 // ── Calendrier (bloc I) : 1 saison = 30 jours ; la LONGUEUR de la saison vient du
@@ -847,6 +880,63 @@ function renderChronicle() {
     log.appendChild(div);
   });
 }
+// ── Bannière d'annales (lot UI ①) ────────────────────────────────────────────
+// Déclencheur : EXACTEMENT les annales du moteur (cat === "annals"), texte affiché TEL QUEL.
+// Le serveur joint au tick les entrées de chronique nées à ce tick (`data.annals`) : c'est la
+// seule source qui porte à la fois le classement `annals` et la formulation définitive. Les
+// `data.events` bruts obligeraient le front à RE-RÉDIGER, ce que le contrat interdit.
+const ANNAL_PICTOS = {
+  rebellion: "⚑", war: "⚔", swarm: "🏳", explo: "🧭", cult: "🕯",
+  monument: "🏛", hero: "★", ally: "💔", rival: "⚑", extinct: "🕯",
+};
+const ANNAL_FADE_IN = 200, ANNAL_HOLD = 3000, ANNAL_FADE_OUT = 400, ANNAL_QUEUE_MAX = 4;
+let annalQueue = [];
+let annalBusy  = false;
+
+function pushAnnals(list) {
+  for (const a of (list || [])) {
+    if (a.cat !== "annals" || !a.msg) continue;
+    annalQueue.push(a);
+  }
+  // Plafond FIFO : au-delà de 4 on jette les PLUS ANCIENNES. Un raz-de-marée d'annales (une
+  // guerre qui cascade) ne doit pas bannériser trente secondes de retard sur le monde — mieux
+  // vaut montrer ce qui vient de se produire que finir de raconter ce qui est déjà loin.
+  if (annalQueue.length > ANNAL_QUEUE_MAX) annalQueue = annalQueue.slice(-ANNAL_QUEUE_MAX);
+  drainAnnalQueue();
+}
+
+function drainAnnalQueue() {
+  if (annalBusy || !annalQueue.length) return;       // UNE seule bannière à la fois
+  const a = annalQueue.shift();
+  annalBusy = true;
+  const el = document.getElementById("annal-banner");
+  el.textContent = "";
+  const picto = document.createElement("span");
+  picto.className = "annal-picto";
+  picto.textContent = ANNAL_PICTOS[a.kind] || "⭐";
+  const txt = document.createElement("span");
+  txt.textContent = a.msg;                            // textContent : jamais d'innerHTML
+  el.appendChild(picto); el.appendChild(txt);
+  // Liseré = couleur du clan quand l'annale la porte ; or sinon. Les annales ne transportent
+  // pas encore de clan (signalé à Regigigas) : le mécanisme est prêt, il s'allumera seul.
+  const c = (a.clan != null) ? (clans.find(k => k.id === a.clan) || {}).color : null;
+  el.style.borderLeftColor = c || "#E8C170";
+  el.style.display = "block";
+  requestAnimationFrame(() => {                       // un frame pour que la transition parte
+    el.style.transition = `opacity ${ANNAL_FADE_IN}ms ease-out`;
+    el.classList.add("show");
+  });
+  setTimeout(() => {
+    el.style.transition = `opacity ${ANNAL_FADE_OUT}ms ease-in`;
+    el.classList.remove("show");
+    setTimeout(() => {
+      el.style.display = "none";
+      annalBusy = false;
+      drainAnnalQueue();                              // la suivante enchaîne
+    }, ANNAL_FADE_OUT);
+  }, ANNAL_FADE_IN + ANNAL_HOLD);
+}
+
 async function refreshChronicle() {
   try {
     const r = await fetch("/api/chronicle");

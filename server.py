@@ -186,6 +186,23 @@ async def simulation_loop():
                 # ne lit l'état pendant que step() le mute.
                 async with state_lock:
                     data = await loop.run_in_executor(None, sim.step)
+                    # ANNALES DU TICK, jointes au payload — pour la bannière (lot UI ①), dont le
+                    # contrat est « le texte de l'annale EXISTANTE, aucune réécriture ». Or la
+                    # formulation ET le classement `cat=annals` sont décidés par le MOTEUR, dans
+                    # `_update_chronicle` ; les `data["events"]` que le front reçoit déjà sont des
+                    # events BRUTS, à partir desquels il devrait re-rédiger — exactement ce que le
+                    # contrat interdit. On joint donc l'annale telle qu'elle a été écrite.
+                    # POURQUOI ICI ET PAS DANS `step()` : `_update_chronicle` garantit noir sur
+                    # blanc « n'ajoute rien à la sortie de step() → déterminisme et hash intacts ».
+                    # Toucher au payload moteur imposerait un regold des trois goldens pour un
+                    # besoin purement cosmétique. Côté serveur, l'impact est nul.
+                    # FILTRE PAR `t` et NON par longueur : la chronique est PLAFONNÉE
+                    # (`CHRONICLE_MAX`), donc sur un monde installé sa longueur ne bouge plus et
+                    # un delta calculé dessus serait vide À TOUT JAMAIS — le même piège qui a
+                    # rendu muette ma sonde de mariages cette nuit, ici il aurait rendu muette la
+                    # bannière entière.
+                    _t = data["tick"]
+                    data["annals"] = [c for c in sim.chronicle if c.get("t") == _t]
             except Exception:
                 consecutive_errors += 1
                 traceback.print_exc()
